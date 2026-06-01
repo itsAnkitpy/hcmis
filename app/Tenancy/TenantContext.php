@@ -127,6 +127,56 @@ class TenantContext
     }
 
     /**
+     * Stamp BOTH the app-layer context and the Postgres session marker for a
+     * WEB request, using plain SET (session-scoped) rather than SET LOCAL.
+     *
+     * Why not the run()/cross() path: those wrap their work in a transaction and
+     * use SET LOCAL, which lives only inside that transaction. A web request has
+     * NO request-long transaction (we deliberately avoid one so mail/HTTP never
+     * run inside a DB transaction). A SET LOCAL stamped at request start would
+     * evaporate before Filament's first query, leaving the tenant GUC empty —
+     * and the RLS default-deny policy would then return ZERO rows on every
+     * tenant-owned table. Plain SET persists for the whole request, across
+     * Filament's many nested write transactions, and dies with the connection.
+     *
+     * Set-fresh-at-start (D-M4-1): call this at the very start of every request.
+     * Overwriting the marker up-front means a crashed prior request on a reused
+     * connection (Octane) can never leak its tenant into this one — Octane-safe
+     * by construction, not merely by the exit reset.
+     *
+     * @param  bool  $crossTenant  true for cross-client HC staff (no single
+     *                             current client): app scope is bypassed and the
+     *                             RLS bypass GUC is turned on — the audited
+     *                             cross-tenant posture, mirrored from cross().
+     */
+    public static function applyWebRequest(?int $tenantId, bool $crossTenant): void
+    {
+        self::$tenantId = $tenantId;
+        self::$crossTenant = $crossTenant;
+
+        self::applyWebSession($tenantId, $crossTenant);
+    }
+
+    /**
+     * Reset the web marker to the safe default (no tenant, no bypass → DB
+     * default-deny). Called on request exit as belt-and-suspenders; the primary
+     * guarantee is applyWebRequest() set-fresh-at-start on the next request.
+     * Best-effort: a dying connection at terminate() must not raise.
+     */
+    public static function resetWebRequest(): void
+    {
+        self::$tenantId = null;
+        self::$crossTenant = false;
+
+        try {
+            self::applyWebSession(null, false);
+        } catch (Throwable) {
+            // Connection already gone at end of request — the next request's
+            // set-fresh-at-start covers it, and the connection is reset anyway.
+        }
+    }
+
+    /**
      * Set app + DB context, run the callback, then restore the previous
      * context. Ensures a transaction so SET LOCAL is valid and pooler-safe.
      *
@@ -197,5 +247,20 @@ class TenantContext
         $connection->statement('SET LOCAL '.Rls::TENANT_GUC.' = '.$tenantValue);
 
         $connection->statement('SET LOCAL '.Rls::BYPASS_GUC.' = '.($crossTenant ? "'on'" : "'off'"));
+    }
+
+    /**
+     * Push the active tenant onto the Postgres session via plain SET (NOT SET
+     * LOCAL) so the marker persists for the whole web request across Filament's
+     * nested transactions. See applyWebRequest() for why SET LOCAL is wrong here.
+     */
+    private static function applyWebSession(?int $tenantId, bool $crossTenant): void
+    {
+        $connection = DB::connection();
+
+        $tenantValue = $tenantId === null ? "''" : "'".$tenantId."'";
+        $connection->statement('SET '.Rls::TENANT_GUC.' = '.$tenantValue);
+
+        $connection->statement('SET '.Rls::BYPASS_GUC.' = '.($crossTenant ? "'on'" : "'off'"));
     }
 }

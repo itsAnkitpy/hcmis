@@ -3,6 +3,9 @@
 namespace App\Providers\Filament;
 
 use App\Http\Middleware\SetCurrentTenant;
+use App\Models\User;
+use App\Tenancy\TenantContext;
+use App\Tenancy\TenantSwitcher;
 use BezhanSalleh\FilamentShield\FilamentShieldPlugin;
 use Filament\Auth\MultiFactor\App\AppAuthentication;
 use Filament\Http\Middleware\Authenticate;
@@ -13,6 +16,7 @@ use Filament\Pages\Dashboard;
 use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
+use Filament\View\PanelsRenderHook;
 use Filament\Widgets\AccountWidget;
 use Filament\Widgets\FilamentInfoWidget;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
@@ -64,6 +68,24 @@ class AdminPanelProvider extends PanelProvider
             ->plugins([
                 FilamentShieldPlugin::make(),
             ])
+            // M4.A — topbar client context / switcher (D-M4-6). Logic stays in
+            // the closure; the view is pure presentation.
+            ->renderHook(
+                PanelsRenderHook::USER_MENU_BEFORE,
+                function (): string {
+                    $user = auth()->user();
+
+                    if (! $user instanceof User) {
+                        return '';
+                    }
+
+                    return view('filament.client-switcher', [
+                        'tenants' => TenantSwitcher::allowedTenants($user),
+                        'currentId' => TenantContext::id(),
+                        'isGlobal' => $user->operatesGlobally(),
+                    ])->render();
+                },
+            )
             // Fail-closed authorization: a resource page with no matching model
             // policy method throws instead of silently allowing access. Prevents
             // the M3 gap (Tenant/User resources were visible to everyone for lack
