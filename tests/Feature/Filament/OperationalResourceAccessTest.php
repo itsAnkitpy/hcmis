@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\RoleName;
+use App\Filament\Resources\Leads\Pages\ListLeads;
 use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\Lead;
@@ -9,11 +10,16 @@ use App\Models\Tenant;
 use App\Models\User;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Livewire\Livewire;
 use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
 afterEach(function () {
+    // resetWebRequest too: the column test below stamps the web marker with
+    // plain SET, which survives the RefreshDatabase transaction rollback and
+    // would otherwise leak the posture into the next test on this connection.
+    TenantContext::resetWebRequest();
     TenantContext::forget();
 });
 
@@ -145,4 +151,30 @@ it('forbids the leads list for an agent', function () {
     $agent = clientRoleUser($tenant, RoleName::Agent->value);
 
     $this->actingAs($agent)->get('/admin/leads')->assertForbidden();
+});
+
+// --- client-attribution column (all-clients posture only) ---
+
+it('shows the client column to global staff and hides it for client-scoped staff', function () {
+    $tenant = Tenant::factory()->create();
+    $lead = TenantContext::run(
+        $tenant->id,
+        fn () => Lead::factory()->forCampaign(Campaign::factory()->create())->create(),
+    );
+
+    // Global super admin, all-clients posture: the Client column renders.
+    $this->actingAs(hcRoleUser(RoleName::SuperAdmin->value)->fresh());
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(ListLeads::class)
+        ->assertCanSeeTableRecords([$lead])
+        ->assertCanRenderTableColumn('tenant.name');
+
+    // Client-scoped team leader pinned to one client: the column is redundant, hidden.
+    $this->actingAs(clientRoleUser($tenant, RoleName::TeamLeader->value)->fresh());
+    TenantContext::applyWebRequest($tenant->id, crossTenant: false);
+
+    Livewire::test(ListLeads::class)
+        ->assertCanSeeTableRecords([$lead])
+        ->assertTableColumnHidden('tenant.name');
 });

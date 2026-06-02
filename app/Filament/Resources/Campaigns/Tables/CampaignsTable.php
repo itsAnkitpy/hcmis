@@ -3,19 +3,23 @@
 namespace App\Filament\Resources\Campaigns\Tables;
 
 use App\Enums\CampaignTemplate;
+use App\Filament\Support\ClientColumn;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 
 class CampaignsTable
 {
     public static function configure(Table $table): Table
     {
         return $table
+            ->modifyQueryUsing(fn (Builder $query): Builder => ClientColumn::eagerLoad($query))
             ->columns([
+                ClientColumn::make(),
                 TextColumn::make('name')
                     ->searchable()
                     ->sortable(),

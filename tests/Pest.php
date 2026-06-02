@@ -1,6 +1,10 @@
 <?php
 
+use App\Models\Tenant;
+use App\Models\User;
+use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 /*
@@ -47,4 +51,21 @@ expect()->extend('toBeOne', function () {
 function something()
 {
     // ..
+}
+
+/**
+ * Create a user holding a per-client role scoped to the given tenant's team
+ * (the spatie-teams posture). Shared by the Filament feature tests.
+ */
+function clientUserWithRole(Tenant $tenant, string $role): User
+{
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $user->tenants()->attach($tenant);
+
+    TenantContext::run($tenant->id, function () use ($user, $role) {
+        Role::findOrCreate($role, 'web');
+        $user->assignRole($role);
+    });
+
+    return $user;
 }

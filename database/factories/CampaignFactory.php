@@ -36,4 +36,14 @@ class CampaignFactory extends Factory
     {
         return $this->state(fn (array $attributes): array => ['template' => $template]);
     }
+
+    /**
+     * Define this campaign's custom-field list (FR-LC02).
+     *
+     * @param  array<int, array<string, mixed>>  $fields
+     */
+    public function withCustomFields(array $fields): static
+    {
+        return $this->state(fn (array $attributes): array => ['custom_fields' => $fields]);
+    }
 }

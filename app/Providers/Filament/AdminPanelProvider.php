@@ -91,9 +91,15 @@ class AdminPanelProvider extends PanelProvider
             // the M3 gap (Tenant/User resources were visible to everyone for lack
             // of a policy) from recurring as new resources land in M4+.
             ->strictAuthorization()
+            // isPersistent so the auth + tenant-context middleware re-run on
+            // Livewire AJAX requests (livewire/update), not just the initial page
+            // load. Without this the active client is lost on every in-page
+            // interaction (add repeater row, save, table action) — RLS then
+            // default-denies and the create-gate 403s. The catastrophic seam must
+            // hold on Livewire requests too, not only full page loads.
             ->authMiddleware([
                 Authenticate::class,
                 SetCurrentTenant::class,
-            ]);
+            ], isPersistent: true);
     }
 }
