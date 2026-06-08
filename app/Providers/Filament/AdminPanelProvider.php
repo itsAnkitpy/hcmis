@@ -38,6 +38,10 @@ class AdminPanelProvider extends PanelProvider
             ->login()
             ->profile()
             ->sidebarCollapsibleOnDesktop()
+            // M5 — the queued lead import notifies the uploader on completion via
+            // a database notification (D-M5-10); the bell surfaces it after the
+            // async job finishes, since the user may have navigated away.
+            ->databaseNotifications()
             ->multiFactorAuthentication([
                 AppAuthentication::make()->recoverable(), // optional TOTP 2FA (FR-U04); users opt in via profile
             ])

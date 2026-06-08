@@ -4,6 +4,7 @@ use App\Models\Tenant;
 use App\Models\User;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -68,4 +69,22 @@ function clientUserWithRole(Tenant $tenant, string $role): User
     });
 
     return $user;
+}
+
+/**
+ * Write a simple CSV onto the (faked) local disk for the lead importer to read.
+ * Shared by the M5 import tests.
+ *
+ * @param  array<int, array<int, string>>  $rows
+ * @param  array<int, string>  $headers
+ */
+function writeLeadCsv(string $path, array $rows, array $headers = ['phone', 'name', 'email', 'region']): void
+{
+    $lines = [implode(',', $headers)];
+
+    foreach ($rows as $row) {
+        $lines[] = implode(',', $row);
+    }
+
+    Storage::disk('local')->put($path, implode("\n", $lines));
 }
