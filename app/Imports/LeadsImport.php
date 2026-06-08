@@ -6,6 +6,7 @@ namespace App\Imports;
 
 use App\Models\Campaign;
 use App\Models\Lead;
+use App\Support\PhoneNumber;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 use Maatwebsite\Excel\Concerns\SkipsEmptyRows;
@@ -101,7 +102,7 @@ class LeadsImport implements SkipsEmptyRows, ToCollection, WithChunkReading, Wit
     private function markExistingPhones(Collection $rows): void
     {
         $phones = $rows
-            ->map(fn (Collection $row): ?string => $this->normalizePhone($row->get('phone')))
+            ->map(fn (Collection $row): ?string => PhoneNumber::normalize($row->get('phone')))
             ->filter()
             ->unique()
             ->values();
@@ -123,7 +124,7 @@ class LeadsImport implements SkipsEmptyRows, ToCollection, WithChunkReading, Wit
      */
     private function handleRow(array $row): void
     {
-        $phone = $this->normalizePhone($row['phone'] ?? null);
+        $phone = PhoneNumber::normalize($row['phone'] ?? null);
 
         if ($phone === null) {
             $this->skip('phone is required');
@@ -131,7 +132,7 @@ class LeadsImport implements SkipsEmptyRows, ToCollection, WithChunkReading, Wit
             return;
         }
 
-        if (! $this->isValidPhone($phone)) {
+        if (! PhoneNumber::isValid($phone)) {
             $this->skip('phone is not a valid number');
 
             return;
@@ -207,27 +208,6 @@ class LeadsImport implements SkipsEmptyRows, ToCollection, WithChunkReading, Wit
     private function skip(string $reason): void
     {
         $this->skipped[] = ['row' => $this->currentRow, 'reason' => $reason];
-    }
-
-    /**
-     * Light normalization: trim and strip spaces, dashes and brackets so the same
-     * number written two ways dedupes as one. No country-code logic — voice is not
-     * live in Phase 1, phone is a data field only (guardrail #1).
-     */
-    private function normalizePhone(mixed $raw): ?string
-    {
-        if (! is_string($raw) && ! is_int($raw)) {
-            return null;
-        }
-
-        $normalized = preg_replace('/[\s\-()]/', '', trim((string) $raw));
-
-        return $normalized === '' ? null : $normalized;
-    }
-
-    private function isValidPhone(string $phone): bool
-    {
-        return preg_match('/^\+?\d{7,15}$/', $phone) === 1;
     }
 
     private function cleanString(mixed $raw): ?string

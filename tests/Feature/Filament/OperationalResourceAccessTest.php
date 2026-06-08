@@ -4,6 +4,7 @@ use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Pages\ListLeads;
 use App\Models\Campaign;
 use App\Models\Disposition;
+use App\Models\DncEntry;
 use App\Models\Lead;
 use App\Models\Script;
 use App\Models\Tenant;
@@ -27,6 +28,7 @@ dataset('operationalModels', [
     'campaign' => [Campaign::class],
     'lead' => [Lead::class],
     'disposition' => [Disposition::class],
+    'dnc entry' => [DncEntry::class],
     'script' => [Script::class],
 ]);
 

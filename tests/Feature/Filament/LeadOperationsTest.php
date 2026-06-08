@@ -1,9 +1,11 @@
 <?php
 
+use App\Enums\DncSource;
 use App\Enums\LeadStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Pages\ListLeads;
 use App\Models\Campaign;
+use App\Models\DncEntry;
 use App\Models\Lead;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
@@ -125,4 +127,66 @@ it('hides the move action from a read-only QC user', function () {
     Livewire::test(ListLeads::class)
         ->assertCanSeeTableRecords([$lead])                  // QC reads the list
         ->assertTableActionHidden('moveToCampaign', $lead);  // but cannot move (no update)
+});
+
+// --- add to DNC (M6 follow-up): row + bulk, idempotent, lead untouched ---
+
+it('adds a lead number to the client DNC list and leaves the lead unchanged', function () {
+    $tenant = actingAsClientTeamLeader();
+
+    $lead = Lead::factory()->forCampaign(Campaign::factory()->create())->create(['phone' => '98765 43210']);
+    $statusBefore = $lead->status;
+
+    Livewire::test(ListLeads::class)
+        ->callTableAction('addToDnc', $lead)
+        ->assertHasNoTableActionErrors();
+
+    $entry = DncEntry::query()->first();
+
+    expect($entry)->not->toBeNull()
+        ->and($entry->phone)->toBe('9876543210')              // normalized on save
+        ->and($entry->tenant_id)->toBe($tenant->id)
+        ->and($entry->source)->toBe(DncSource::CustomerRequest)
+        ->and($lead->fresh()->status)->toBe($statusBefore);   // lead left unchanged
+});
+
+it('skips a number already on the DNC list (idempotent add)', function () {
+    actingAsClientTeamLeader();
+
+    $lead = Lead::factory()->forCampaign(Campaign::factory()->create())->create(['phone' => '9876543210']);
+
+    Livewire::test(ListLeads::class)->callTableAction('addToDnc', $lead);
+    Livewire::test(ListLeads::class)->callTableAction('addToDnc', $lead); // again, no error
+
+    expect(DncEntry::query()->where('phone', '9876543210')->count())->toBe(1);
+});
+
+it('bulk-adds lead numbers to the DNC list', function () {
+    actingAsClientTeamLeader();
+
+    $campaign = Campaign::factory()->create();
+    $leads = Lead::factory()->forCampaign($campaign)->count(3)->sequence(
+        ['phone' => '9000000001'],
+        ['phone' => '9000000002'],
+        ['phone' => '9000000003'],
+    )->create();
+
+    Livewire::test(ListLeads::class)
+        ->callTableBulkAction('addToDnc', $leads);
+
+    expect(DncEntry::query()->count())->toBe(3);
+});
+
+it('hides the add-to-DNC action from a read-only QC user', function () {
+    $tenant = Tenant::factory()->create();
+    $qc = clientUserWithRole($tenant, RoleName::Qc->value);
+
+    $this->actingAs($qc->fresh());
+    TenantContext::applyWebRequest($tenant->id, false);
+
+    $lead = Lead::factory()->forCampaign(Campaign::factory()->create())->create();
+
+    Livewire::test(ListLeads::class)
+        ->assertCanSeeTableRecords([$lead])                // QC reads the list
+        ->assertTableActionHidden('addToDnc', $lead);      // but cannot add to DNC (no create)
 });

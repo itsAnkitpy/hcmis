@@ -2,10 +2,14 @@
 
 namespace App\Filament\Resources\Leads\Tables;
 
+use App\Enums\DncSource;
 use App\Enums\LeadStatus;
 use App\Filament\Support\ClientColumn;
 use App\Models\Campaign;
+use App\Models\DncEntry;
 use App\Models\Lead;
+use App\Support\PhoneNumber;
+use App\Tenancy\TenantContext;
 use Filament\Actions\Action;
 use Filament\Actions\BulkAction;
 use Filament\Actions\BulkActionGroup;
@@ -138,6 +142,20 @@ class LeadsTable
                     ->action(function (Lead $record, array $data): void {
                         self::moveLeads(collect([$record]), (int) $data['campaign_id']);
                     }),
+                // Add this lead's number to the client's DNC list (M6 follow-up).
+                // One click + confirm, no form. Gated like the import action.
+                Action::make('addToDnc')
+                    ->label('Add to DNC')
+                    ->icon(Heroicon::OutlinedPhoneXMark)
+                    ->color('danger')
+                    ->visible(fn (): bool => self::canAddToDnc())
+                    ->requiresConfirmation()
+                    ->modalHeading('Add to do-not-call list')
+                    ->modalDescription("This number is added to this client's do-not-call list. The lead itself is left unchanged.")
+                    ->modalSubmitActionLabel('Add to DNC')
+                    ->action(function (Lead $record): void {
+                        self::addLeadsToDnc(collect([$record]));
+                    }),
                 EditAction::make(),
             ])
             ->toolbarActions([
@@ -156,6 +174,19 @@ class LeadsTable
                                 ->searchable(),
                         ])
                         ->action(fn (Collection $records, array $data) => self::moveLeads($records, (int) $data['campaign_id']))
+                        ->deselectRecordsAfterCompletion(),
+                    // Bulk add to DNC (M6 follow-up). Already-listed numbers are
+                    // skipped and reported; the leads themselves are unchanged.
+                    BulkAction::make('addToDnc')
+                        ->label('Add to DNC')
+                        ->icon(Heroicon::OutlinedPhoneXMark)
+                        ->color('danger')
+                        ->visible(fn (): bool => self::canAddToDnc())
+                        ->requiresConfirmation()
+                        ->modalHeading('Add to do-not-call list')
+                        ->modalDescription("These numbers are added to this client's do-not-call list. Numbers already listed are skipped. The leads themselves are left unchanged.")
+                        ->modalSubmitActionLabel('Add to DNC')
+                        ->action(fn (Collection $records) => self::addLeadsToDnc($records))
                         ->deselectRecordsAfterCompletion(),
                     DeleteBulkAction::make(),
                 ]),
@@ -199,5 +230,80 @@ class LeadsTable
             ->title($leads->count() === 1 ? "Lead moved to {$target->name}" : "{$leads->count()} leads moved to {$target->name}")
             ->success()
             ->send();
+    }
+
+    /**
+     * Whether the current user may add numbers to this client's DNC list. Like
+     * the import action, it needs a current client (the DNC entry is stamped to
+     * it) plus the DncEntry create ability (D-M4-5 write roles). Hidden for
+     * global staff in all-clients mode — they pick a client first.
+     */
+    private static function canAddToDnc(): bool
+    {
+        return TenantContext::has()
+            && (auth()->user()?->can('create', DncEntry::class) ?? false);
+    }
+
+    /**
+     * Add each lead's phone to the current client's do-not-call list (M6
+     * follow-up, FR-LC05). Idempotent: the (tenant_id, phone) unique rule means a
+     * number is listed once, so a re-add is skipped, not an error.
+     *
+     * The lead itself is left unchanged — "on DNC" and lead status are
+     * deliberately kept as separate facts. This is a changeable call: closing the
+     * lead too (status -> Closed) would be a one-line addition here if the client
+     * workflow ever wants it.
+     *
+     * @param  \Illuminate\Support\Collection<int, Lead>  $leads
+     */
+    private static function addLeadsToDnc(\Illuminate\Support\Collection $leads): void
+    {
+        // Defensive: visible() already gates the action, but never write a DNC
+        // entry without a current client + the create ability (mirrors import).
+        if (! self::canAddToDnc()) {
+            return;
+        }
+
+        $added = 0;
+        $already = 0;
+
+        foreach ($leads as $lead) {
+            $phone = PhoneNumber::normalize($lead->phone);
+
+            if ($phone === null) {
+                continue; // no usable number to suppress
+            }
+
+            // firstOrCreate is tenant-scoped by the active client, so it finds
+            // this client's existing entry (skip) or creates a new one stamped to
+            // the client by BelongsToTenant.
+            $entry = DncEntry::firstOrCreate(
+                ['phone' => $phone],
+                ['source' => DncSource::CustomerRequest],
+            );
+
+            $entry->wasRecentlyCreated ? $added++ : $already++;
+        }
+
+        Notification::make()
+            ->title(self::dncSummary($added, $already))
+            ->success()
+            ->send();
+    }
+
+    /** Plain-language summary of an add-to-DNC run. */
+    private static function dncSummary(int $added, int $already): string
+    {
+        if ($added > 0 && $already > 0) {
+            return "Added {$added} to the DNC list; {$already} already listed.";
+        }
+
+        if ($added > 0) {
+            return $added === 1 ? 'Number added to the DNC list.' : "{$added} numbers added to the DNC list.";
+        }
+
+        return $already === 1
+            ? 'That number is already on the DNC list.'
+            : "Those {$already} numbers were already on the DNC list.";
     }
 }

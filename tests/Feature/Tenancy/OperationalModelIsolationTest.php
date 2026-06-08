@@ -3,6 +3,7 @@
 use App\Enums\CampaignTemplate;
 use App\Models\Campaign;
 use App\Models\Disposition;
+use App\Models\DncEntry;
 use App\Models\Lead;
 use App\Models\Script;
 use App\Models\Tenant;
@@ -25,6 +26,7 @@ afterEach(function () {
 dataset('tenantModels', [
     'campaign' => [Campaign::class],
     'disposition' => [Disposition::class],
+    'dnc entry' => [DncEntry::class],
     'lead' => [Lead::class],
     'script' => [Script::class],
 ]);
