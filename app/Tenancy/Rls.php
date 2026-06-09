@@ -48,6 +48,82 @@ class Rls
     }
 
     /**
+     * Variant of enable() for a table that holds BOTH tenant-owned rows and
+     * ownerless/global rows under one isolation wall — the M7 audit log
+     * (D-M7-1). Logins, super-admin platform actions and the no-auth import job
+     * write rows with no tenant context (tenant_id IS NULL).
+     *
+     * READ predicate — three branches:
+     *   1. the bypass path (HC staff) sees everything;
+     *   2. a pinned client sees its own rows (tenant_id = the pinned tenant);
+     *   3. ownerless rows (tenant_id IS NULL) are visible ONLY when no client is
+     *      pinned (the GUC is empty).
+     * Branch 3 is what keeps a pinned client from ever seeing a global event,
+     * while still letting an ownerless INSERT read its own row back: Eloquent's
+     * `INSERT ... RETURNING id` re-reads the new row through this USING policy,
+     * so without branch 3 an ownerless save() (e.g. a login) would be rejected.
+     *
+     * WRITE check is widened over enable(): the standard check rejects an
+     * ownerless insert (no GUC → `NULL = NULL` → not true), so we additionally
+     * permit `tenant_id IS NULL`. A pinned client still cannot insert a row
+     * stamped to another tenant — that path stays default-denied.
+     */
+    public static function enableNullableTenant(string $table, string $tenantColumn = 'tenant_id'): void
+    {
+        self::assertIdentifier($table);
+        self::assertIdentifier($tenantColumn);
+
+        $policy = "{$table}_tenant_isolation";
+
+        $using = sprintf(
+            "(current_setting('%s', true) = 'on'"
+            ." OR %s = NULLIF(current_setting('%s', true), '')::bigint"
+            ." OR (%s IS NULL AND NULLIF(current_setting('%s', true), '') IS NULL))",
+            self::BYPASS_GUC,
+            $tenantColumn,
+            self::TENANT_GUC,
+            $tenantColumn,
+            self::TENANT_GUC,
+        );
+
+        $withCheck = sprintf(
+            "(current_setting('%s', true) = 'on' OR %s IS NULL OR %s = NULLIF(current_setting('%s', true), '')::bigint)",
+            self::BYPASS_GUC,
+            $tenantColumn,
+            $tenantColumn,
+            self::TENANT_GUC,
+        );
+
+        DB::statement("ALTER TABLE {$table} ENABLE ROW LEVEL SECURITY");
+        DB::statement("ALTER TABLE {$table} FORCE ROW LEVEL SECURITY");
+        DB::statement("DROP POLICY IF EXISTS {$policy} ON {$table}");
+        DB::statement("CREATE POLICY {$policy} ON {$table} FOR ALL USING {$using} WITH CHECK {$withCheck}");
+    }
+
+    /**
+     * Make a table append-only at the database layer by revoking UPDATE and
+     * DELETE from the application role — the Level-1 tamper-evidence backstop
+     * for the audit log (D-M7-5). INSERT and SELECT remain; nothing the app can
+     * run will alter or remove a logged row. Pairs with the read-only Filament
+     * viewer so immutability holds at both the UI and the DB.
+     *
+     * The role defaults to the connection's configured username (the app role).
+     * Postgres lets an owner revoke its own ordinary privileges, so this binds
+     * even where the app role also owns the table (the single-role local/test
+     * setup); a Phase-3 PII-scrub job must therefore run under a separate
+     * privileged role (carry-in — see m7-audit-logging.md §3 D-M7-3/-5).
+     */
+    public static function revokeMutations(string $table, ?string $role = null): void
+    {
+        self::assertIdentifier($table);
+
+        $role ??= (string) DB::connection()->getConfig('username');
+        self::assertIdentifier($role);
+
+        DB::statement("REVOKE UPDATE, DELETE ON {$table} FROM {$role}");
+    }
+
+    /**
      * Remove tenant RLS from a table (migration rollback / teardown).
      */
     public static function disable(string $table): void

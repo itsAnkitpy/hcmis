@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
+use App\Audit\Audit;
 use App\Imports\LeadsImport;
 use App\Models\Campaign;
 use App\Models\User;
@@ -67,7 +68,22 @@ class ImportLeadsJob implements ShouldQueue
             }
 
             $import = new LeadsImport($campaign);
-            Excel::import($import, $this->storedPath, $this->disk);
+
+            // Suppress the per-lead "created" auto-logging during the bulk
+            // import: a large file would write thousands of causer-less audit
+            // rows. The import is recorded instead as ONE attributable summary
+            // event below — the same one-event-per-bulk-op shape as exports
+            // (D-M7-2). Single/manual lead creation still auto-logs normally.
+            activity()->withoutLogging(fn () => Excel::import($import, $this->storedPath, $this->disk));
+
+            Audit::imported('leads', [
+                'campaign_id' => $campaign->id,
+                'campaign' => $campaign->name,
+                'file' => $this->originalName,
+                'imported' => $import->imported,
+                'duplicates' => $import->duplicates,
+                'skipped' => count($import->skipped),
+            ], subject: $campaign, causer: User::find($this->uploaderId));
 
             return [
                 'status' => 'done',

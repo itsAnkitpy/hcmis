@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Audit\LogsModelActivity;
 use App\Enums\ScriptType;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\ScriptFactory;
@@ -23,7 +24,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class Script extends Model
 {
     /** @use HasFactory<ScriptFactory> */
-    use BelongsToTenant, HasFactory;
+    use BelongsToTenant, HasFactory, LogsModelActivity;
 
     protected $fillable = [
         'campaign_id',
@@ -47,5 +48,18 @@ class Script extends Model
     public function campaign(): BelongsTo
     {
         return $this->belongsTo(Campaign::class);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    protected function activityLogAttributes(): array
+    {
+        return ['campaign_id', 'type', 'content'];
+    }
+
+    protected function activityLogName(): string
+    {
+        return 'script';
     }
 }

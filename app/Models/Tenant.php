@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Audit\LogsModelActivity;
 use App\Enums\TenantStatus;
 use App\Tenancy\InvalidTenantTransitionException;
 use App\Tenancy\Observers\TenantObserver;
@@ -34,7 +35,7 @@ use Spatie\Permission\Models\Role;
 class Tenant extends Model
 {
     /** @use HasFactory<TenantFactory> */
-    use HasFactory;
+    use HasFactory, LogsModelActivity;
 
     protected $fillable = [
         'name',
@@ -117,5 +118,23 @@ class Tenant extends Model
     public function users(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'user_tenant')->withTimestamps();
+    }
+
+    /**
+     * The lifecycle + identity columns. `settings` is intentionally excluded:
+     * it is a large nested object and its edits are lower-value for the audit
+     * trail; the compliance-relevant Tenant events are the status transitions
+     * (suspend / archive) captured here (D-M7-2).
+     *
+     * @return array<int, string>
+     */
+    protected function activityLogAttributes(): array
+    {
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason'];
+    }
+
+    protected function activityLogName(): string
+    {
+        return 'tenant';
     }
 }

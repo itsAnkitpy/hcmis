@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Audit\LogsModelActivity;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\DispositionFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -26,7 +27,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class Disposition extends Model
 {
     /** @use HasFactory<DispositionFactory> */
-    use BelongsToTenant, HasFactory;
+    use BelongsToTenant, HasFactory, LogsModelActivity;
 
     protected $fillable = [
         'campaign_id',
@@ -55,5 +56,18 @@ class Disposition extends Model
     public function campaign(): BelongsTo
     {
         return $this->belongsTo(Campaign::class);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    protected function activityLogAttributes(): array
+    {
+        return ['campaign_id', 'code', 'label', 'is_contact', 'is_sale', 'sort_order'];
+    }
+
+    protected function activityLogName(): string
+    {
+        return 'disposition';
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Tenants\RelationManagers;
 
+use App\Audit\Audit;
 use App\Enums\RoleName;
 use App\Models\Tenant;
 use App\Models\User;
@@ -192,8 +193,9 @@ class UsersRelationManager extends RelationManager
                         /** @var Tenant $tenant */
                         $tenant = $this->getOwnerRecord();
 
-                        TenantContext::run($tenant->getKey(), function () use ($record): void {
+                        TenantContext::run($tenant->getKey(), function () use ($record, $tenant): void {
                             self::clearPerTenantRoles($record);
+                            Audit::roleRemoved($record, $tenant->getKey());
                         });
                     }),
             ])
@@ -227,6 +229,7 @@ class UsersRelationManager extends RelationManager
     {
         self::clearPerTenantRoles($user);
         $user->assignRole($roleName);
+        Audit::roleGranted($user, $roleName, TenantContext::id());
     }
 
     /**

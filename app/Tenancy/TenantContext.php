@@ -71,6 +71,28 @@ class TenantContext
     }
 
     /**
+     * Run a callback in the global/ownerless posture: no single client in scope,
+     * the RLS bypass GUC on, so a write belonging to no client (the M7 audit
+     * log's ownerless events — logins, global platform actions) lands and reads
+     * back even if a stale tenant GUC is left on the connection.
+     *
+     * This is deliberately NOT cross(): a cross() call is an operator *reaching
+     * across* a client's data and emits the tenant.cross_access tripwire, which
+     * must stay rare to be a useful security/compliance signal. A platform-level
+     * ownerless write is not such a reach, so it does not log that line — and the
+     * event is already recorded in the audit log itself.
+     *
+     * @template TReturn
+     *
+     * @param  Closure(): TReturn  $callback
+     * @return TReturn
+     */
+    public static function runGlobal(Closure $callback): mixed
+    {
+        return self::bind(null, true, $callback);
+    }
+
+    /**
      * The active tenant id, or null when none is set.
      */
     public static function id(): ?int

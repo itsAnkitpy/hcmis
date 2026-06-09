@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Audit\LogsModelActivity;
 use App\Enums\LeadStatus;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\LeadFactory;
@@ -29,7 +30,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class Lead extends Model
 {
     /** @use HasFactory<LeadFactory> */
-    use BelongsToTenant, HasFactory;
+    use BelongsToTenant, HasFactory, LogsModelActivity;
 
     protected $fillable = [
         'campaign_id',
@@ -71,5 +72,18 @@ class Lead extends Model
     public function lastDisposition(): BelongsTo
     {
         return $this->belongsTo(Disposition::class, 'last_disposition_id');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    protected function activityLogAttributes(): array
+    {
+        return ['campaign_id', 'name', 'phone', 'email', 'region', 'status', 'last_disposition_id', 'attempts', 'custom_fields'];
+    }
+
+    protected function activityLogName(): string
+    {
+        return 'lead';
     }
 }

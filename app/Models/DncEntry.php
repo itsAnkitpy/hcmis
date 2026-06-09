@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Audit\LogsModelActivity;
 use App\Enums\DncSource;
 use App\Support\PhoneNumber;
 use App\Tenancy\BelongsToTenant;
@@ -31,7 +32,7 @@ use Illuminate\Support\Carbon;
 class DncEntry extends Model
 {
     /** @use HasFactory<DncEntryFactory> */
-    use BelongsToTenant, HasFactory;
+    use BelongsToTenant, HasFactory, LogsModelActivity;
 
     protected $fillable = [
         'phone',
@@ -73,5 +74,18 @@ class DncEntry extends Model
         return Attribute::make(
             get: fn (): string => $this->expires_at?->isPast() ? 'Expired' : 'Active',
         );
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    protected function activityLogAttributes(): array
+    {
+        return ['phone', 'source', 'reason', 'expires_at'];
+    }
+
+    protected function activityLogName(): string
+    {
+        return 'dnc';
     }
 }

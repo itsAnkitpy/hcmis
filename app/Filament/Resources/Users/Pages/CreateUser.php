@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Users\Pages;
 
+use App\Audit\Audit;
 use App\Enums\RoleName;
 use App\Filament\Resources\Users\UserResource;
 use App\Models\User;
@@ -86,6 +87,7 @@ class CreateUser extends CreateRecord
         if ($globalRole !== null && in_array($globalRole, RoleName::globalValues(), strict: true)) {
             TenantContext::forget();
             $user->assignRole($globalRole);
+            Audit::roleGranted($user, $globalRole, null);
         }
 
         // Best-effort: the create runs inside Filament's DB transaction, so a

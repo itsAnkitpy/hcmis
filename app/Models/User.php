@@ -3,6 +3,7 @@
 namespace App\Models;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
+use App\Audit\LogsModelActivity;
 use App\Enums\RoleName;
 use Database\Factories\UserFactory;
 use Filament\Auth\MultiFactor\App\Concerns\InteractsWithAppAuthentication;
@@ -24,7 +25,7 @@ use Spatie\Permission\Traits\HasRoles;
 class User extends Authenticatable implements FilamentUser, HasAppAuthentication, HasAppAuthenticationRecovery
 {
     /** @use HasFactory<UserFactory> */
-    use HasFactory, HasRoles, InteractsWithAppAuthentication, InteractsWithAppAuthenticationRecovery, Notifiable;
+    use HasFactory, HasRoles, InteractsWithAppAuthentication, InteractsWithAppAuthenticationRecovery, LogsModelActivity, Notifiable;
 
     /**
      * Who may log into the panel (FR-U01). A user qualifies if they are a
@@ -96,5 +97,22 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
     public function operatesGlobally(): bool
     {
         return $this->hasAnyRole(RoleName::globalValues());
+    }
+
+    /**
+     * Only identity columns are recorded — password, remember_token and the 2FA
+     * secrets are never on the allowlist, so a "user updated" / "password
+     * changed" event records that it happened, never the secret value (D-M7-2).
+     *
+     * @return array<int, string>
+     */
+    protected function activityLogAttributes(): array
+    {
+        return ['name', 'email'];
+    }
+
+    protected function activityLogName(): string
+    {
+        return 'user';
     }
 }

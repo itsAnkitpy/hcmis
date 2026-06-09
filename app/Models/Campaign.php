@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Audit\LogsModelActivity;
 use App\Enums\CampaignTemplate;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\CampaignFactory;
@@ -24,7 +25,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Campaign extends Model
 {
     /** @use HasFactory<CampaignFactory> */
-    use BelongsToTenant, HasFactory;
+    use BelongsToTenant, HasFactory, LogsModelActivity;
 
     protected $fillable = [
         'name',
@@ -67,5 +68,18 @@ class Campaign extends Model
     public function scripts(): HasMany
     {
         return $this->hasMany(Script::class);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    protected function activityLogAttributes(): array
+    {
+        return ['name', 'template', 'is_active', 'custom_fields'];
+    }
+
+    protected function activityLogName(): string
+    {
+        return 'campaign';
     }
 }

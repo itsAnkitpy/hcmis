@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Tenants\Pages;
 
+use App\Audit\Audit;
 use App\Enums\CampaignTemplate;
 use App\Enums\RoleName;
 use App\Filament\Resources\Tenants\TenantResource;
@@ -216,6 +217,7 @@ class CreateTenant extends CreateRecord
 
                 $user->tenants()->attach($tenant->getKey());
                 $user->assignRole($agent['role_name']);
+                Audit::roleGranted($user, $agent['role_name'], $tenant->getKey());
 
                 $newUsers[] = $user;
             }
