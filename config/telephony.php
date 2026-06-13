@@ -39,6 +39,30 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Agent phone (B4 D7 — config map, lab-only)
+    |--------------------------------------------------------------------------
+    |
+    | The Agent Console registers itself as a SIP-over-WebSocket phone (the A4
+    | path). v1 has one agent, so a config map gets the demo real with zero
+    | schema (per-agent provisioning is a trunk-era module). The browser reads
+    | these to register; everything is env-driven and the lab SIP password is a
+    | throwaway, never committed.
+    |
+    | PROD NOTE: production runs browser <-> Asterisk over 'wss://' + a real
+    | cert (infra §2.9), and must not hand a real SIP secret to the browser this
+    | way — the lab's plain 'ws://127.0.0.1' shortcut never ships (D7 reopen).
+    |
+    */
+
+    'agent' => [
+        'extension' => env('TELEPHONY_AGENT_EXTENSION'),
+        'password' => env('TELEPHONY_AGENT_PASSWORD'),
+        'ws_url' => env('TELEPHONY_AGENT_WS_URL'),
+        'sip_domain' => env('TELEPHONY_AGENT_SIP_DOMAIN', 'asterisk.lab'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Recordings
     |--------------------------------------------------------------------------
     |
