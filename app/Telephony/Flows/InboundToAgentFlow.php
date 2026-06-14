@@ -104,21 +104,34 @@ class InboundToAgentFlow
         }
 
         if ($args === [] && $this->state === InboundFlowState::Idle) {
-            $this->beginCall($legId);
+            // The caller's number rides the arrival event (channel.caller.number,
+            // the same field translate() reads). An anonymous caller presents an
+            // empty string — treat that as "no number" so we present nothing.
+            $callerNumber = $event['channel']['caller']['number'] ?? null;
+            $this->beginCall($legId, $callerNumber !== '' ? $callerNumber : null);
         }
     }
 
-    /** Answer the caller and ring the agent's extension (D7 config map). */
-    private function beginCall(string $callerLegId): void
+    /**
+     * Answer the caller and ring the agent's extension (D7 config map), carrying
+     * the caller's own number as the agent leg's caller-ID — the browser reads it
+     * off the ringing call to look up the lead (B4 D4).
+     */
+    private function beginCall(string $callerLegId, ?string $callerNumber = null): void
     {
         $this->callerLegId = $callerLegId;
 
         $this->telephony->answer($callerLegId);
-        $this->agentLegId = $this->telephony->placeCall(config('telephony.agent.endpoint'), 'agent');
+        $this->agentLegId = $this->telephony->placeCall(
+            config('telephony.agent.endpoint'),
+            'agent',
+            $callerNumber,
+        );
         $this->state = InboundFlowState::RingingAgent;
 
         Log::info('Inbound call: caller answered, ringing the agent.', [
             'caller' => $callerLegId,
+            'callerNumber' => $callerNumber,
             'agent' => $this->agentLegId,
         ]);
     }

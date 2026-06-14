@@ -57,6 +57,29 @@ it('places a call tagged as ours and returns the new leg id', function () {
         ]);
 });
 
+it('rides the caller-ID on the originate when one is given (B4 D4)', function () {
+    Http::fake(['*' => Http::response(['id' => 'leg-agent'])]);
+
+    $this->telephony->placeCall('PJSIP/1003', 'agent', '9991234567');
+
+    Http::assertSent(fn (Request $request): bool => str_starts_with($request->url(), 'http://voice.test:8088/ari/channels?')
+        && ariParams($request) === [
+            'endpoint' => 'PJSIP/1003',
+            'app' => 'hcmis-test',
+            'appArgs' => 'agent',
+            'timeout' => '30',
+            'callerId' => '9991234567',
+        ]);
+});
+
+it('omits the caller-ID param when none is given', function () {
+    Http::fake(['*' => Http::response(['id' => 'leg-agent'])]);
+
+    $this->telephony->placeCall('PJSIP/1003', 'agent');
+
+    Http::assertSent(fn (Request $request): bool => ! array_key_exists('callerId', ariParams($request)));
+});
+
 it('sends commands with basic auth', function () {
     Http::fake(['*' => Http::response(['id' => 'leg-1'])]);
 

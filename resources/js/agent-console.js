@@ -8,6 +8,10 @@ import { AgentPhone } from './telephony/agent-phone';
  * leg: an inbound call -> 'ringing' (caller shown), Answer -> 'onCall', either
  * side hangs up -> back to 'ready'. (CP3 turns that last hop into wrap-up.)
  *
+ * CP2b: on 'incoming' the caller's number is matched to a lead via the page's
+ * lookupLead() over $wire (the lead card, or a bare-number fallback), and mute
+ * toggles the mic mid-call (pure browser, reflected in `muted`).
+ *
  * Registered as an Alpine component named "agentConsole" so the Blade view can
  * mount it with x-data="agentConsole(config)". Alpine ships with Filament — we
  * never import our own copy.
@@ -16,6 +20,9 @@ const agentConsole = (config) => ({
     state: 'offline',
     error: null,
     callerNumber: null,
+    lead: null,
+    leadResolved: false,
+    muted: false,
     phone: null,
 
     init() {
@@ -33,15 +40,38 @@ const agentConsole = (config) => ({
             this.error = cause;
         });
 
-        this.phone.on('incoming', (number) => {
+        this.phone.on('incoming', async (number) => {
             this.callerNumber = number;
+            this.lead = null;
+            this.leadResolved = false;
+            this.muted = false;
             this.state = 'ringing';
+
+            // Anonymous caller (no number) — nothing to match; show the bare
+            // "no matching lead" state once, no server round-trip.
+            if (! number) {
+                this.leadResolved = true;
+                return;
+            }
+
+            try {
+                // $wire reaches the page's lookupLead() — the match runs in the
+                // agent's tenant context (B4 D4). A non-match resolves to null.
+                this.lead = await this.$wire.lookupLead(number);
+            } catch (e) {
+                this.lead = null;
+            } finally {
+                this.leadResolved = true;
+            }
         });
         this.phone.on('answered', () => {
             this.state = 'onCall';
         });
         this.phone.on('ended', () => {
             this.callerNumber = null;
+            this.lead = null;
+            this.leadResolved = false;
+            this.muted = false;
             this.state = 'ready';
         });
 
@@ -54,6 +84,17 @@ const agentConsole = (config) => ({
 
     hangup() {
         this.phone.hangup();
+    },
+
+    /** Toggle the mic mid-call (browser-local); `muted` drives the button. */
+    toggleMute() {
+        if (this.muted) {
+            this.phone.unmute();
+        } else {
+            this.phone.mute();
+        }
+
+        this.muted = ! this.muted;
     },
 
     destroy() {

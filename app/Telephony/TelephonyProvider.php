@@ -27,8 +27,12 @@ interface TelephonyProvider
      * Start a new outgoing call leg and return its id. The tag is how we
      * recognise our own calls on the event pipe — legs we placed arrive
      * tagged, outside calls arrive with no tag.
+     *
+     * $callerId, when given, is the number shown to the dialled endpoint — B4
+     * D4 rides the customer's number to the agent's screen this way. Left null,
+     * the engine uses its own default and no number is presented.
      */
-    public function placeCall(string $destination, string $tag, int $timeoutSeconds = 30): string;
+    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30): string;
 
     /** Pick up a ringing leg. */
     public function answer(string $legId): void;

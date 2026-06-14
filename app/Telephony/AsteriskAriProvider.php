@@ -18,14 +18,22 @@ use Illuminate\Support\Facades\Http;
  */
 class AsteriskAriProvider implements TelephonyProvider
 {
-    public function placeCall(string $destination, string $tag, int $timeoutSeconds = 30): string
+    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30): string
     {
-        return (string) $this->command('POST', '/channels', [
+        $params = [
             'endpoint' => $destination,
             'app' => config('telephony.asterisk.app'),
             'appArgs' => $tag,
             'timeout' => $timeoutSeconds,
-        ])->json('id');
+        ];
+
+        // 'callerId' is ARI's originate param (verified live against the
+        // container's channels.json) — only sent when we have one to present.
+        if ($callerId !== null) {
+            $params['callerId'] = $callerId;
+        }
+
+        return (string) $this->command('POST', '/channels', $params)->json('id');
     }
 
     public function answer(string $legId): void

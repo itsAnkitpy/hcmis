@@ -14,6 +14,8 @@ import JsSIP from 'jssip';
  *     answer() / hangup() drive it. The caller's voice is wired into the
  *     <audio> element handed in via attachRemoteAudio(), using the exact
  *     'track' -> srcObject path the A4 lab page proved against this Asterisk.
+ *   - CP2b: the 'incoming' number drives the screen's lead lookup, and
+ *     mute() / unmute() toggle the mic mid-call (pure browser, no server).
  *
  * @typedef {object} AgentPhoneConfig
  * @property {string} extension  the SIP user (e.g. "1003")
@@ -128,6 +130,19 @@ export class AgentPhone {
     /** Hang up / decline the current call (works ringing or connected). */
     hangup() {
         this.session?.terminate();
+    }
+
+    /**
+     * Mute / unmute the agent's microphone mid-call. Pure browser — JsSIP
+     * toggles the local audio track, the server is never involved (B4 D5 button
+     * split: mute is browser-local in v1).
+     */
+    mute() {
+        this.session?.mute({ audio: true });
+    }
+
+    unmute() {
+        this.session?.unmute({ audio: true });
     }
 
     /** The caller's number as Asterisk set it on the INVITE (shown on the screen). */

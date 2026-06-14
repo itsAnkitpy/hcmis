@@ -19,9 +19,15 @@ use Illuminate\Support\Facades\Queue;
  * @param  array<int, string>  $args
  * @return array<string, mixed>
  */
-function stasisStart(string $legId, array $args): array
+function stasisStart(string $legId, array $args, ?string $callerNumber = null): array
 {
-    return ['type' => 'StasisStart', 'args' => $args, 'channel' => ['id' => $legId]];
+    $channel = ['id' => $legId];
+
+    if ($callerNumber !== null) {
+        $channel['caller'] = ['number' => $callerNumber];
+    }
+
+    return ['type' => 'StasisStart', 'args' => $args, 'channel' => $channel];
 }
 
 /**
@@ -50,7 +56,7 @@ it('connects an answering agent and merges the call once both recordings finish'
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()
         ->with('caller-leg', Mockery::on(fn (string $name): bool => str_starts_with($name, 'call-')))
@@ -81,7 +87,7 @@ it('connects an answering agent and merges the call once both recordings finish'
 it('hangs up the agent leg when the caller abandons before pickup', function () {
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
@@ -97,7 +103,7 @@ it('hangs up the agent leg when the caller abandons before pickup', function () 
 it('hangs up the caller when the agent never answers', function () {
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
@@ -106,6 +112,34 @@ it('hangs up the caller when the agent never answers', function () {
 
     $flow->handle(stasisStart('caller-leg', []));
     $flow->handle(channelDestroyed('agent-leg'));         // Asterisk's 30s originate timeout fired
+
+    Queue::assertNothingPushed();
+});
+
+it('passes the caller number to placeCall as the agent leg caller-ID (B4 D4)', function () {
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once()->with('caller-leg');
+    $telephony->shouldReceive('placeCall')->once()
+        ->with('PJSIP/1003', 'agent', '9991234567')
+        ->andReturn('agent-leg');
+
+    $flow = new InboundToAgentFlow($telephony);
+
+    $flow->handle(stasisStart('caller-leg', [], '9991234567'));   // caller presents a number
+
+    Queue::assertNothingPushed();
+});
+
+it('presents no caller-ID when the caller is anonymous (empty number)', function () {
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once()->with('caller-leg');
+    $telephony->shouldReceive('placeCall')->once()
+        ->with('PJSIP/1003', 'agent', null)
+        ->andReturn('agent-leg');
+
+    $flow = new InboundToAgentFlow($telephony);
+
+    $flow->handle(stasisStart('caller-leg', [], ''));   // anonymous caller → empty number
 
     Queue::assertNothingPushed();
 });

@@ -41,10 +41,11 @@
             </p>
         </div>
 
-        {{-- B4 CP2a: the call panel. The app dials this agent; the phone fires
-             'incoming' -> ringing, Answer opens two-way audio -> on-call, and
+        {{-- B4 CP2a/CP2b: the call panel. The app dials this agent; the phone
+             fires 'incoming' -> ringing, Answer opens two-way audio -> on-call,
              either hang-up returns to ready (CP3 makes that last hop wrap-up).
-             The caller's voice plays through the hidden <audio> sink below. --}}
+             CP2b shows the matched lead (D4) and a mute toggle; the caller's
+             voice plays through the hidden <audio> sink below. --}}
         <div
             x-show="state === 'ringing' || state === 'onCall'"
             x-cloak
@@ -56,10 +57,36 @@
                         class="text-sm text-gray-500 dark:text-gray-400"
                         x-text="state === 'ringing' ? 'Incoming call' : 'On call'"
                     ></p>
-                    <p
-                        class="mt-1 text-lg font-semibold text-gray-950 dark:text-white"
-                        x-text="callerNumber || 'Unknown number'"
-                    ></p>
+
+                    {{-- Matched lead (B4 D4): name + context. No match -> the bare
+                         number, honestly labelled "No matching lead" (D4/D6). --}}
+                    <template x-if="lead">
+                        <div class="mt-1">
+                            <p
+                                class="text-lg font-semibold text-gray-950 dark:text-white"
+                                x-text="lead.name || 'Unnamed lead'"
+                            ></p>
+                            <p class="text-sm text-gray-500 dark:text-gray-400" x-text="callerNumber"></p>
+                            <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500 dark:text-gray-400">
+                                <span x-show="lead.campaign" x-text="lead.campaign"></span>
+                                <span class="font-medium text-gray-700 dark:text-gray-300" x-text="lead.status"></span>
+                                <span x-show="lead.lastDisposition" x-text="'Last: ' + lead.lastDisposition"></span>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template x-if="! lead">
+                        <div class="mt-1">
+                            <p
+                                class="text-lg font-semibold text-gray-950 dark:text-white"
+                                x-text="callerNumber || 'Unknown number'"
+                            ></p>
+                            <p
+                                x-show="leadResolved && callerNumber"
+                                class="text-sm text-gray-500 dark:text-gray-400"
+                            >No matching lead</p>
+                        </div>
+                    </template>
                 </div>
 
                 <div class="flex items-center gap-2">
@@ -71,6 +98,16 @@
                     >
                         Answer
                     </button>
+                    <button
+                        type="button"
+                        x-show="state === 'onCall'"
+                        x-on:click="toggleMute()"
+                        :class="muted
+                            ? 'bg-amber-500 text-white hover:bg-amber-400'
+                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/20'"
+                        class="inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold"
+                        x-text="muted ? 'Unmute' : 'Mute'"
+                    ></button>
                     <button
                         type="button"
                         x-on:click="hangup()"
