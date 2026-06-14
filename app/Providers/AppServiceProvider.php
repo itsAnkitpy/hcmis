@@ -2,10 +2,13 @@
 
 namespace App\Providers;
 
+use App\Enums\RoleName;
 use App\Listeners\LogAuthenticationActivity;
+use App\Models\User;
 use App\Telephony\AsteriskAriProvider;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
 use InvalidArgumentException;
 
@@ -32,5 +35,15 @@ class AppServiceProvider extends ServiceProvider
     {
         // Audit the auth events (M7 D-M7-2): login / logout / failed / reset.
         Event::subscribe(LogAuthenticationActivity::class);
+
+        // B4 CP3 (decision C): the narrow write-gate for recording a handled
+        // call's outcome. Same population as AgentConsole::canAccess() — agent +
+        // global staff — but a DISTINCT named ability, deliberately not
+        // LeadPolicy::update: agents still have no Leads CRUD (D-M4-5). super_admin
+        // also passes via Shield's Gate::before; operatesGlobally covers the rest.
+        Gate::define(
+            'record-call-outcome',
+            fn (User $user): bool => $user->operatesGlobally() || $user->hasRole(RoleName::Agent->value),
+        );
     }
 }

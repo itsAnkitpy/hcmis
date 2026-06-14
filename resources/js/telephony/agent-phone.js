@@ -122,7 +122,21 @@ export class AgentPhone {
     /** Accept the ringing call and open two-way audio. */
     answer() {
         this.session?.answer({
-            mediaConstraints: { audio: true, video: false },
+            // Request the mic with the browser's audio DSP off (CP4 finding): the
+            // defaults (echo-cancel + noise-suppression + auto-gain) over-process
+            // the agent's voice — the lab caller's continuous 440 Hz tone is a
+            // worst case for noise suppression, which band-limits speech to a hum
+            // in the recording. Off = the raw voice reaches Asterisk untouched.
+            // Prod note: agents on speakers still want echoCancellation — revisit
+            // per-device when the trunk/headset story lands; this is a lab call.
+            mediaConstraints: {
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                },
+                video: false,
+            },
             pcConfig: { iceServers: [] }, // lab is same-machine; host candidates suffice
         });
     }

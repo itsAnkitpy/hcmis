@@ -4,13 +4,19 @@ declare(strict_types=1);
 
 namespace App\Filament\Pages;
 
+use App\Actions\AdvanceLeadStatus;
+use App\Audit\Audit;
 use App\Enums\RoleName;
+use App\Filament\Resources\Leads\Schemas\LeadForm;
+use App\Models\Disposition;
 use App\Models\Lead;
 use App\Models\User;
 use App\Support\PhoneNumber;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
+use Illuminate\Support\Facades\Gate;
+use Livewire\Attributes\Locked;
 
 /**
  * Agent Console (B4 D1) — the agent's one screen: a browser SIP phone plus the
@@ -28,6 +34,18 @@ class AgentConsole extends Page
     protected static ?int $navigationSort = 0;
 
     protected string $view = 'filament.pages.agent-console';
+
+    /**
+     * The matched lead + its campaign, held SERVER-SIDE across the call (B4 CP3
+     * decision C). #[Locked] so the browser cannot tamper them: the wrap-up write
+     * keys off these, never a browser-supplied id. Set in lookupLead() on a match,
+     * cleared on no-match and after every wrap-up.
+     */
+    #[Locked]
+    public ?int $matchedLeadId = null;
+
+    #[Locked]
+    public ?int $matchedCampaignId = null;
 
     public static function canAccess(): bool
     {
@@ -76,6 +94,10 @@ class AgentConsole extends Page
      */
     public function lookupLead(string $number): ?array
     {
+        // A fresh ring always resets the server-held match first, so a no-match
+        // can never inherit the previous caller's lead (decision C).
+        $this->resetMatch();
+
         $phone = PhoneNumber::normalize($number);
 
         if ($phone === null) {
@@ -91,6 +113,9 @@ class AgentConsole extends Page
             return null;
         }
 
+        $this->matchedLeadId = $lead->id;
+        $this->matchedCampaignId = $lead->campaign_id;
+
         return [
             'id' => $lead->id,
             'name' => $lead->name,
@@ -99,5 +124,80 @@ class AgentConsole extends Page
             'status' => $lead->status->label(),
             'lastDisposition' => $lead->lastDisposition?->label,
         ];
+    }
+
+    /**
+     * The dispositions the agent can pick in wrap-up: the matched lead's campaign
+     * set plus the tenant-wide ones (reuses the C1/M4.D query, RLS-scoped). Driven
+     * by the server-held campaign id, never a browser value.
+     *
+     * @return array<int, string>
+     */
+    public function dispositions(): array
+    {
+        return LeadForm::dispositionOptions($this->matchedCampaignId);
+    }
+
+    /**
+     * Record the outcome of the call the agent just handled (B4 CP3 decision B+C).
+     * Narrow by construction: gated by the dedicated record-call-outcome ability
+     * (NOT Leads CRUD — agents still have none, D-M4-5); the lead is re-fetched
+     * from the SERVER-HELD id in the agent's tenant context (RLS walls any
+     * cross-tenant id to null); the picked disposition is re-validated against
+     * that lead's own campaign set before a single column is written.
+     *
+     * Writes the last disposition, bumps attempts (one wrap-up = one answered
+     * call), and nudges the funnel forward (C2-lite). The $lead->update() also
+     * auto-logs a lead.updated diff; callWrappedUp() adds the call-stream event.
+     */
+    public function saveWrapUp(int $dispositionId): void
+    {
+        Gate::authorize('record-call-outcome');
+
+        $lead = Lead::find($this->matchedLeadId);
+
+        // No server-held match (a no-match call, or a tampered/cross-tenant id RLS
+        // hid) — nothing to record against a lead; fall back to ready.
+        if ($lead === null) {
+            $this->resetMatch();
+
+            return;
+        }
+
+        abort_unless(
+            array_key_exists($dispositionId, LeadForm::dispositionOptions($lead->campaign_id)),
+            403,
+        );
+
+        $disposition = Disposition::findOrFail($dispositionId);
+
+        $lead->update([
+            'last_disposition_id' => $disposition->id,
+            'attempts' => $lead->attempts + 1,
+            'status' => (new AdvanceLeadStatus)($lead->status, $disposition->is_contact),
+        ]);
+
+        Audit::callWrappedUp($lead, $disposition);
+
+        $this->resetMatch();
+    }
+
+    /**
+     * The no-match wrap-up (decision Q6): close the call out writing nothing to any
+     * lead, but log the miss so B3 can measure how often callers arrive unknown.
+     */
+    public function completeUnmatched(): void
+    {
+        Gate::authorize('record-call-outcome');
+
+        Audit::callWrappedUp(null);
+
+        $this->resetMatch();
+    }
+
+    private function resetMatch(): void
+    {
+        $this->matchedLeadId = null;
+        $this->matchedCampaignId = null;
     }
 }

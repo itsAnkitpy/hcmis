@@ -2,6 +2,8 @@
 
 namespace App\Audit;
 
+use App\Models\Disposition;
+use App\Models\Lead;
 use App\Models\User;
 use App\Tenancy\TenantContext;
 use Closure;
@@ -111,6 +113,37 @@ class Audit
             return $log->event('exported')
                 ->withProperties(['export' => $what] + $properties)
                 ->log("exported {$what}");
+        });
+    }
+
+    /**
+     * Record that an agent wrapped up a handled call (B4 CP3 decision D), on its
+     * own `call` log stream. Purpose-built alongside the auto `lead.updated` diff
+     * because only this event survives the no-match case — a wrapped-up call where
+     * no lead row changed — and it gives B3's future calls-table a clean stream to
+     * inherit. The causer is the agent from the active web auth (the wrap-up always
+     * runs in their request, so the default resolver stamps it).
+     *
+     * On a match the subject is the lead and the disposition code/label ride along;
+     * on a miss the subject is absent and `matched` is false (so B3 can measure how
+     * often callers arrive unknown).
+     */
+    public static function callWrappedUp(?Lead $lead, ?Disposition $disposition = null): void
+    {
+        self::record('call', function (ActivityLogger $log) use ($lead, $disposition) {
+            if ($lead !== null) {
+                $log->performedOn($lead);
+            }
+
+            $properties = ['matched' => $lead !== null];
+
+            if ($disposition !== null) {
+                $properties += ['disposition_code' => $disposition->code, 'disposition_label' => $disposition->label];
+            }
+
+            return $log->event('wrapped_up')
+                ->withProperties($properties)
+                ->log('call wrapped up');
         });
     }
 
