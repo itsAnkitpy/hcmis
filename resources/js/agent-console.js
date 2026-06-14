@@ -2,8 +2,11 @@ import { AgentPhone } from './telephony/agent-phone';
 
 /**
  * The Agent Console's browser-side state machine (B4 D3 — browser-driven off
- * phone events; no server push). CP1 holds two states: 'offline' until the
- * phone registers, then 'ready'. Ringing / on-call / wrap-up land in CP2–CP3.
+ * phone events; no server push).
+ *
+ * States: 'offline' until the phone registers, then 'ready'. CP2a adds the call
+ * leg: an inbound call -> 'ringing' (caller shown), Answer -> 'onCall', either
+ * side hangs up -> back to 'ready'. (CP3 turns that last hop into wrap-up.)
  *
  * Registered as an Alpine component named "agentConsole" so the Blade view can
  * mount it with x-data="agentConsole(config)". Alpine ships with Filament — we
@@ -12,10 +15,11 @@ import { AgentPhone } from './telephony/agent-phone';
 const agentConsole = (config) => ({
     state: 'offline',
     error: null,
+    callerNumber: null,
     phone: null,
 
     init() {
-        this.phone = new AgentPhone(config);
+        this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
 
         this.phone.on('registered', () => {
             this.state = 'ready';
@@ -29,7 +33,27 @@ const agentConsole = (config) => ({
             this.error = cause;
         });
 
+        this.phone.on('incoming', (number) => {
+            this.callerNumber = number;
+            this.state = 'ringing';
+        });
+        this.phone.on('answered', () => {
+            this.state = 'onCall';
+        });
+        this.phone.on('ended', () => {
+            this.callerNumber = null;
+            this.state = 'ready';
+        });
+
         this.phone.start();
+    },
+
+    answer() {
+        this.phone.answer();
+    },
+
+    hangup() {
+        this.phone.hangup();
     },
 
     destroy() {

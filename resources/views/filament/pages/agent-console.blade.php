@@ -40,5 +40,48 @@
                 <span x-text="error"></span>
             </p>
         </div>
+
+        {{-- B4 CP2a: the call panel. The app dials this agent; the phone fires
+             'incoming' -> ringing, Answer opens two-way audio -> on-call, and
+             either hang-up returns to ready (CP3 makes that last hop wrap-up).
+             The caller's voice plays through the hidden <audio> sink below. --}}
+        <div
+            x-show="state === 'ringing' || state === 'onCall'"
+            x-cloak
+            class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
+        >
+            <div class="flex items-center justify-between gap-4">
+                <div>
+                    <p
+                        class="text-sm text-gray-500 dark:text-gray-400"
+                        x-text="state === 'ringing' ? 'Incoming call' : 'On call'"
+                    ></p>
+                    <p
+                        class="mt-1 text-lg font-semibold text-gray-950 dark:text-white"
+                        x-text="callerNumber || 'Unknown number'"
+                    ></p>
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <button
+                        type="button"
+                        x-show="state === 'ringing'"
+                        x-on:click="answer()"
+                        class="inline-flex items-center rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500"
+                    >
+                        Answer
+                    </button>
+                    <button
+                        type="button"
+                        x-on:click="hangup()"
+                        class="inline-flex items-center rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500"
+                        x-text="state === 'ringing' ? 'Decline' : 'Hang up'"
+                    ></button>
+                </div>
+            </div>
+        </div>
+
+        {{-- The caller's voice plays here; hidden, but audio still flows (D2). --}}
+        <audio x-ref="remoteAudio" autoplay class="hidden"></audio>
     </div>
 </x-filament-panels::page>

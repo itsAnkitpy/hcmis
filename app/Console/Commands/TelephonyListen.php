@@ -8,9 +8,9 @@ use App\Events\Telephony\CallAnswered;
 use App\Events\Telephony\CallEnded;
 use App\Events\Telephony\CallRinging;
 use App\Events\Telephony\RecordingFailed;
-use App\Jobs\MergeCallRecordingJob;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\AriWebSocket;
+use App\Telephony\Flows\InboundToAgentFlow;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Console\Attributes\Description;
@@ -21,12 +21,13 @@ use Illuminate\Console\Command;
  * The event side of B1 (D2/D5): one long-lived process holding the ARI
  * WebSocket open. Connecting is what registers our Stasis app — while this
  * command is down, inbound voice is down (calls into Stasis just end), so in
- * production it runs under a supervisor with auto-restart, queue-worker
- * style. The in-process reconnect loop rides over network blips.
+ * production it runs under a supervisor with auto-restart, queue-worker style.
+ * The in-process reconnect loop rides over network blips.
  *
- * D5's dividing rule, applied: call control a human is waiting on happens
- * inline here; everything heavy (the recording merge) leaves through the
- * queue.
+ * It is transport + translation only (B4 D5): it reads engine events, turns
+ * them into app events (translate()), and hands each raw event to the call flow
+ * that drives call control. A fresh flow is built per connection, so a
+ * reconnect starts with no half-finished call in hand.
  */
 #[Signature('telephony:listen')]
 #[Description('Hold the ARI event pipe open: register the app with Asterisk, translate engine events into app events, and run the call flow')]
@@ -44,18 +45,6 @@ class TelephonyListen extends Command
 
     /** Read window per loop tick. */
     private const READ_TIMEOUT_SECONDS = 5.0;
-
-    /**
-     * Stage-2 demo flow constants (the lab's extensions and timings). B2
-     * replaces the scripted flow with real call flows; these leave with it.
-     */
-    private const DEMO_AGENT_ENDPOINT = 'PJSIP/1001';
-
-    private const DEMO_TRANSFER_EXTENSION = '600';
-
-    private const DEMO_TALK_SECONDS = 10.0;
-
-    private const DEMO_ECHO_SECONDS = 5.0;
 
     public function __construct(private readonly TelephonyProvider $telephony)
     {
@@ -77,7 +66,7 @@ class TelephonyListen extends Command
                 ));
                 $backoff = self::BACKOFF_INITIAL_SECONDS;
 
-                $this->listen($pipe);
+                $this->listen($pipe, new InboundToAgentFlow($this->telephony));
             } catch (TelephonyException $exception) {
                 $this->error("Event pipe lost: {$exception->getMessage()} — reconnecting in {$backoff}s.");
                 $pipe->close();
@@ -99,11 +88,11 @@ class TelephonyListen extends Command
     }
 
     /**
-     * The main loop — only leaves by throwing (connection loss). Handles one
-     * call at a time: a second caller arriving mid-demo is announced
-     * (CallRinging) but not driven. Concurrent calls are B2's flow table.
+     * The main loop — only leaves by throwing (connection loss). Each event is
+     * both translated into app events and handed to the flow for call control;
+     * the two are independent readers of the same event.
      */
-    private function listen(AriWebSocket $pipe): void
+    private function listen(AriWebSocket $pipe, InboundToAgentFlow $flow): void
     {
         while (true) {
             $event = $pipe->readEvent(self::READ_TIMEOUT_SECONDS);
@@ -115,11 +104,7 @@ class TelephonyListen extends Command
             }
 
             $this->translate($event);
-
-            // A fresh outside call (no tag = not a leg we placed) — drive it.
-            if (($event['type'] ?? '') === 'StasisStart' && ($event['args'] ?? null) === []) {
-                $this->runDemoCall($pipe, $event['channel']['id']);
-            }
+            $flow->handle($event);
         }
     }
 
@@ -137,9 +122,9 @@ class TelephonyListen extends Command
     }
 
     /**
-     * ARI events in, app events out — the same altitude as the provider's
-     * verbs (B1 D3): the rest of the app never sees a raw engine payload.
-     * Snoop legs (our own recording taps) are infrastructure, not calls.
+     * ARI events in, app events out — the same altitude as the provider's verbs
+     * (B1 D3): the rest of the app never sees a raw engine payload. Snoop legs
+     * (our own recording taps) are infrastructure, not calls.
      *
      * @param  array<string, mixed>  $event
      */
@@ -165,113 +150,6 @@ class TelephonyListen extends Command
             ),
             default => null,
         };
-    }
-
-    /**
-     * A3 Stage 2's proof flow — the lab's Stage-1 script, run by the app:
-     * answer → dial the agent → join → record per D4 → let them talk → stop
-     * recording → queue the stereo merge → transfer the caller → hang up.
-     * Scripted timings on purpose; B2 replaces this with real flows.
-     */
-    private function runDemoCall(AriWebSocket $pipe, string $callerLegId): void
-    {
-        $this->info("Caller arrived ({$callerLegId}) — running the demo flow.");
-
-        try {
-            $this->telephony->answer($callerLegId);
-
-            $this->telephony->placeCall(self::DEMO_AGENT_ENDPOINT, 'agent');
-            $agentArrival = $this->waitFor(
-                $pipe,
-                fn (array $event): bool => ($event['type'] ?? '') === 'StasisStart' && ($event['args'] ?? null) === ['agent'],
-                30.0,
-            );
-
-            if ($agentArrival === null) {
-                $this->warn('Agent did not pick up — ending the call.');
-                $this->telephony->hangup($callerLegId);
-
-                return;
-            }
-
-            $agentLegId = $agentArrival['channel']['id'];
-            $conversationId = $this->telephony->join($callerLegId, $agentLegId);
-            $this->info('Caller and agent are in one conversation.');
-
-            $recording = $this->telephony->startRecording($callerLegId, 'call-'.now()->format('Ymd-His'));
-            $this->info("Recording both sides as \"{$recording->name}\" — letting them talk for ".self::DEMO_TALK_SECONDS.'s.');
-            $this->drain($pipe, self::DEMO_TALK_SECONDS);
-
-            $this->telephony->stopRecording($recording);
-
-            // Events are facts: queue the merge only once Asterisk SAYS both
-            // files are finished, not because our stop request got a 2xx.
-            $finished = [];
-            $confirmed = $this->waitFor($pipe, function (array $event) use ($recording, &$finished): bool {
-                if (($event['type'] ?? '') === 'RecordingFinished') {
-                    $finished[$event['recording']['name'] ?? ''] = true;
-                }
-
-                return isset($finished[$recording->saidRecordingName()], $finished[$recording->heardRecordingName()]);
-            }, 10.0);
-
-            if ($confirmed === null) {
-                RecordingFailed::dispatch($recording->name, 'Asterisk never confirmed the recordings finished');
-                $this->warn('Recordings were not confirmed — skipping the merge.');
-            } else {
-                MergeCallRecordingJob::dispatch($callerLegId, $recording->name);
-                $this->info('Both recordings confirmed — stereo merge queued.');
-            }
-
-            $this->telephony->transfer($callerLegId, $conversationId, self::DEMO_TRANSFER_EXTENSION);
-            $this->info('Caller transferred to extension '.self::DEMO_TRANSFER_EXTENSION.' (echo test).');
-
-            $this->telephony->hangup($agentLegId);
-            $this->telephony->endConversation($conversationId);
-
-            $this->drain($pipe, self::DEMO_ECHO_SECONDS);
-            $this->telephony->hangup($callerLegId);
-
-            $this->info('Demo flow complete — answer, dial, join, record, transfer, hang up all ran from the app.');
-        } catch (AriConnectionLost $exception) {
-            throw $exception;   // the pipe is gone — the reconnect loop owns that
-        } catch (TelephonyException $exception) {
-            $this->error("Demo flow aborted: {$exception->getMessage()}");
-            rescue(fn () => $this->telephony->hangup($callerLegId), report: false);
-        }
-    }
-
-    /**
-     * Read (and translate) events until one matches, or null at the deadline.
-     *
-     * @param  callable(array<string, mixed>): bool  $match
-     * @return array<string, mixed>|null
-     */
-    private function waitFor(AriWebSocket $pipe, callable $match, float $timeoutSeconds): ?array
-    {
-        $deadline = microtime(true) + $timeoutSeconds;
-
-        while (($remaining = $deadline - microtime(true)) > 0) {
-            $event = $pipe->readEvent(min($remaining, self::READ_TIMEOUT_SECONDS));
-
-            if ($event === null) {
-                continue;
-            }
-
-            $this->translate($event);
-
-            if ($match($event)) {
-                return $event;
-            }
-        }
-
-        return null;
-    }
-
-    /** Keep listening (and translating) for a fixed window — the "let them talk" pause. */
-    private function drain(AriWebSocket $pipe, float $seconds): void
-    {
-        $this->waitFor($pipe, fn (): bool => false, $seconds);
     }
 
     /** One readable line per engine event, so a whole call is followable in the terminal. */
