@@ -10,7 +10,7 @@ use App\Events\Telephony\CallRinging;
 use App\Events\Telephony\RecordingFailed;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\AriWebSocket;
-use App\Telephony\Flows\InboundToAgentFlow;
+use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Console\Attributes\Description;
@@ -66,7 +66,7 @@ class TelephonyListen extends Command
                 ));
                 $backoff = self::BACKOFF_INITIAL_SECONDS;
 
-                $this->listen($pipe, new InboundToAgentFlow($this->telephony));
+                $this->listen($pipe, new CallToAgentFlow($this->telephony));
             } catch (TelephonyException $exception) {
                 $this->error("Event pipe lost: {$exception->getMessage()} — reconnecting in {$backoff}s.");
                 $pipe->close();
@@ -92,7 +92,7 @@ class TelephonyListen extends Command
      * both translated into app events and handed to the flow for call control;
      * the two are independent readers of the same event.
      */
-    private function listen(AriWebSocket $pipe, InboundToAgentFlow $flow): void
+    private function listen(AriWebSocket $pipe, CallToAgentFlow $flow): void
     {
         while (true) {
             $event = $pipe->readEvent(self::READ_TIMEOUT_SECONDS);

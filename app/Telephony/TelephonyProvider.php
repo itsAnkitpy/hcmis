@@ -31,8 +31,14 @@ interface TelephonyProvider
      * $callerId, when given, is the number shown to the dialled endpoint — B4
      * D4 rides the customer's number to the agent's screen this way. Left null,
      * the engine uses its own default and no number is presented.
+     *
+     * $tagDetail, when given, rides alongside the tag back to the listener on
+     * the event pipe (a second value next to the tag). Outbound uses it to carry
+     * the customer's number on the agent leg, so the flow can dial the customer
+     * without any web<->listener side channel (CP-O0-proven). Left null, only the
+     * bare tag rides.
      */
-    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30): string;
+    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30, ?string $tagDetail = null): string;
 
     /** Pick up a ringing leg. */
     public function answer(string $legId): void;

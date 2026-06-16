@@ -65,6 +65,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Outbound dialing (B-outbound O2 + plumbing)
+    |--------------------------------------------------------------------------
+    |
+    | 'caller_id' is the single configured "from" number the customer sees on an
+    | outbound call (O2 — one value in v1; per-campaign DIDs ride the trunk).
+    |
+    | 'dial_prefix' is the tech-qualified endpoint prefix the flow prepends to a
+    | bare customer number to reach it (the bare number rides as a clean app-arg;
+    | the engine-specific "how to reach it" lives here, not in the flow). Lab dials
+    | softphones over PJSIP; the trunk era overrides this via env.
+    |
+    */
+
+    'outbound' => [
+        'caller_id' => env('TELEPHONY_OUTBOUND_CALLER_ID'),
+        'dial_prefix' => env('TELEPHONY_OUTBOUND_DIAL_PREFIX', 'PJSIP/'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Recordings
     |--------------------------------------------------------------------------
     |

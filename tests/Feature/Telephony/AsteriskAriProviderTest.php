@@ -72,6 +72,20 @@ it('rides the caller-ID on the originate when one is given (B4 D4)', function ()
         ]);
 });
 
+it('rides the tag detail as a second app-arg so it reaches the listener (outbound C-transport)', function () {
+    Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
+
+    $this->telephony->placeCall('PJSIP/1003', 'agent', tagDetail: '1002');
+
+    Http::assertSent(fn (Request $request): bool => str_starts_with($request->url(), 'http://voice.test:8088/ari/channels?')
+        && ariParams($request) === [
+            'endpoint' => 'PJSIP/1003',
+            'app' => 'hcmis-test',
+            'appArgs' => 'agent,1002',
+            'timeout' => '30',
+        ]);
+});
+
 it('omits the caller-ID param when none is given', function () {
     Http::fake(['*' => Http::response(['id' => 'leg-agent'])]);
 

@@ -1,15 +1,17 @@
 <?php
 
 use App\Jobs\MergeCallRecordingJob;
-use App\Telephony\Flows\InboundToAgentFlow;
+use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
 
 /**
- * The B4 v1 call flow (D5), event-driven: an outside caller reaches a browser
- * agent. These prove the sequence against a mocked provider — no Asterisk, no
- * network — so the risky rewrite is covered before the live CP2a checkpoint.
+ * The call-to-agent flow, event-driven, both directions. Inbound: an outside
+ * caller reaches a browser agent (B4 CP2a). Outbound: the agent's leg arrives
+ * first carrying the customer number, and the flow dials the customer (B-outbound
+ * M2). These prove the sequences against a mocked provider — no Asterisk, no
+ * network — so the risky logic is covered before the live checkpoints.
  *
  * The flow is fed the same raw event shapes the listener reads off ARI; only
  * the fields the flow actually inspects are built here.
@@ -65,7 +67,7 @@ it('connects an answering agent and merges the call once both recordings finish'
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');         // the survivor
     $telephony->shouldReceive('endConversation')->once()->with('conv-1');
 
-    $flow = new InboundToAgentFlow($telephony);
+    $flow = new CallToAgentFlow($telephony);
 
     $flow->handle(stasisStart('caller-leg', []));        // caller dials in
     $flow->handle(stasisStart('agent-leg', ['agent']));   // agent picks up
@@ -92,7 +94,7 @@ it('hangs up the agent leg when the caller abandons before pickup', function () 
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
-    $flow = new InboundToAgentFlow($telephony);
+    $flow = new CallToAgentFlow($telephony);
 
     $flow->handle(stasisStart('caller-leg', []));
     $flow->handle(channelDestroyed('caller-leg'));        // gives up while the agent rings
@@ -108,7 +110,7 @@ it('hangs up the caller when the agent never answers', function () {
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
-    $flow = new InboundToAgentFlow($telephony);
+    $flow = new CallToAgentFlow($telephony);
 
     $flow->handle(stasisStart('caller-leg', []));
     $flow->handle(channelDestroyed('agent-leg'));         // Asterisk's 30s originate timeout fired
@@ -123,7 +125,7 @@ it('passes the caller number to placeCall as the agent leg caller-ID (B4 D4)', f
         ->with('PJSIP/1003', 'agent', '9991234567')
         ->andReturn('agent-leg');
 
-    $flow = new InboundToAgentFlow($telephony);
+    $flow = new CallToAgentFlow($telephony);
 
     $flow->handle(stasisStart('caller-leg', [], '9991234567'));   // caller presents a number
 
@@ -137,7 +139,7 @@ it('presents no caller-ID when the caller is anonymous (empty number)', function
         ->with('PJSIP/1003', 'agent', null)
         ->andReturn('agent-leg');
 
-    $flow = new InboundToAgentFlow($telephony);
+    $flow = new CallToAgentFlow($telephony);
 
     $flow->handle(stasisStart('caller-leg', [], ''));   // anonymous caller → empty number
 
@@ -153,11 +155,79 @@ it('does not drive a second caller while a call is already in progress', functio
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
 
-    $flow = new InboundToAgentFlow($telephony);
+    $flow = new CallToAgentFlow($telephony);
 
     $flow->handle(stasisStart('caller-leg', []));
     $flow->handle(stasisStart('agent-leg', ['agent']));
     $flow->handle(stasisStart('second-caller', []));      // arrives mid-call — announced, not driven
+
+    Queue::assertNothingPushed();
+});
+
+/*
+|--------------------------------------------------------------------------
+| Outbound (agent-first) — B-outbound M2 / CP-O1
+|--------------------------------------------------------------------------
+|
+| The web console places the AGENT leg, tagging it ['agent', <customerNumber>].
+| When that leg arrives the flow dials the CUSTOMER (prefix + number, the single
+| outbound caller-ID), and the customer answering joins + records exactly as
+| inbound does — the customer is the internal callerLegId.
+|
+*/
+
+it('dials the customer when the agent leg arrives carrying the number, then joins + records on answer (outbound)', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+
+    $session = new RecordingSession('customer-leg', 'call-1', 'snoop-said', 'snoop-heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    // The flow does NOT place the agent leg (the console did); it places the
+    // customer leg using the number that rode in as args[1], with the prefix and
+    // the configured outbound caller-ID.
+    $telephony->shouldReceive('placeCall')->once()
+        ->with('PJSIP/1002', 'outbound', '1800555000')
+        ->andReturn('customer-leg');
+    $telephony->shouldReceive('join')->once()->with('customer-leg', 'agent-leg')->andReturn('conv-1');
+    $telephony->shouldReceive('startRecording')->once()
+        ->with('customer-leg', Mockery::on(fn (string $name): bool => str_starts_with($name, 'call-')))
+        ->andReturn($session);
+    $telephony->shouldReceive('stopRecording')->once()->with($session);
+    $telephony->shouldReceive('hangup')->once()->with('agent-leg');          // the survivor
+    $telephony->shouldReceive('endConversation')->once()->with('conv-1');
+
+    $flow = new CallToAgentFlow($telephony);
+
+    $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // agent leg up, carrying the customer number
+    $flow->handle(stasisStart('customer-leg', ['outbound']));     // customer picks up
+    $flow->handle(channelDestroyed('customer-leg'));              // customer hangs up
+
+    Queue::assertNothingPushed();                                 // not until both files are confirmed
+
+    $flow->handle(recordingFinished('call-1-said'));
+    $flow->handle(recordingFinished('call-1-heard'));
+
+    Queue::assertPushed(
+        MergeCallRecordingJob::class,
+        fn (MergeCallRecordingJob $job): bool => $job->callId === 'customer-leg' && $job->recordingName === 'call-1',
+    );
+});
+
+it('does not join until the outbound customer actually answers', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('placeCall')->once()
+        ->with('PJSIP/1002', 'outbound', null)
+        ->andReturn('customer-leg');
+    $telephony->shouldNotReceive('join');
+    $telephony->shouldNotReceive('startRecording');
+
+    $flow = new CallToAgentFlow($telephony);
+
+    $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // customer is now ringing, not up
 
     Queue::assertNothingPushed();
 });

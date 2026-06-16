@@ -12,28 +12,35 @@ use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Log;
 
 /**
- * The one call flow B4 v1 draws properly (D5): an outside caller reaches a
- * browser agent. This replaces the scripted demo that used to live inside
- * TelephonyListen — no fixed timings, no sleep/wait/drain. It reacts to raw
- * engine events as the listener hands them over and keeps a little state about
- * the single call in flight.
+ * The one call-to-agent flow B4 v1 draws properly, generalised to both
+ * directions (B-outbound D4). It replaces the scripted demo that used to live
+ * inside TelephonyListen — no fixed timings, no sleep/wait/drain. It reacts to
+ * raw engine events as the listener hands them over and keeps a little state
+ * about the single call in flight.
  *
- * The shape (CP2a):
+ * Inbound (an outside caller reaches a browser agent — CP2a):
  *   caller arrives  -> answer the caller, ring the agent's extension
  *   agent answers   -> join the two legs + record both sides (D4 snoops)
  *   either hangs up -> stop recording, drop the survivor, fold the conversation
- *   both files done  -> queue the stereo merge
+ *   both files done -> queue the stereo merge
+ *
+ * Outbound (the agent clicks Dial — B-outbound M2, agent-first ordering):
+ *   the web AgentConsole originates the AGENT leg first, carrying the customer's
+ *   number as the agent leg's tag detail (StasisStart.args[1], CP-O0). When that
+ *   agent leg arrives here we dial the CUSTOMER leg; the customer answering joins
+ *   and records exactly as inbound does. The outbound customer maps onto the
+ *   internal callerLegId, so join/record/teardown reuse unchanged.
  *
  * No-answer needs no timer of ours (B4 nod c): placeCall carries Asterisk's own
- * 30s originate timeout, so an unanswered or declined agent leg simply ends and
- * we see its ChannelDestroyed while still ringing — that is the no-answer signal.
+ * originate timeout, so an unanswered leg simply ends and we see its
+ * ChannelDestroyed while still ringing — that is the no-answer signal.
  *
  * One call at a time (v1): a second caller arriving mid-call is announced by the
  * listener's translate() but is not driven here. Concurrency is B2.
  */
-class InboundToAgentFlow
+class CallToAgentFlow
 {
-    private InboundFlowState $state = InboundFlowState::Idle;
+    private CallFlowState $state = CallFlowState::Idle;
 
     private ?string $callerLegId = null;
 
@@ -80,9 +87,14 @@ class InboundToAgentFlow
     }
 
     /**
-     * A leg entered our Stasis app. Three kinds arrive here, told apart by the
-     * tag we placed them with: our recording taps ('snoop') are infrastructure;
-     * the agent leg ('agent') means pickup; an untagged leg is an outside caller.
+     * A leg entered our Stasis app. The kinds are told apart by the args we
+     * tagged them with:
+     *   ['snoop']            -> our recording taps; infrastructure, ignored.
+     *   ['agent']            -> inbound agent pickup (the agent leg we placed).
+     *   ['agent', <number>]  -> outbound entry: the agent leg, carrying the
+     *                           customer number to dial next (agent-first, CP-O0).
+     *   ['outbound']         -> outbound customer pickup (the customer leg we placed).
+     *   []                   -> an untagged outside caller (inbound entry).
      *
      * @param  array<string, mixed>  $event
      */
@@ -96,14 +108,30 @@ class InboundToAgentFlow
         }
 
         if ($args === ['agent']) {
-            if ($this->state === InboundFlowState::RingingAgent && $legId === $this->agentLegId) {
+            if ($this->state === CallFlowState::RingingAgent && $legId === $this->agentLegId) {
                 $this->connectAgent();
             }
 
             return;
         }
 
-        if ($args === [] && $this->state === InboundFlowState::Idle) {
+        // Outbound entry (agent-first): the agent's own leg arrives first carrying
+        // the customer's number as a second arg, so we dial the customer now.
+        if (is_array($args) && count($args) === 2 && $args[0] === 'agent' && $this->state === CallFlowState::Idle) {
+            $this->beginOutboundCall($legId, (string) $args[1]);
+
+            return;
+        }
+
+        if ($args === ['outbound']) {
+            if ($this->state === CallFlowState::RingingCustomer && $legId === $this->callerLegId) {
+                $this->connectAgent();
+            }
+
+            return;
+        }
+
+        if ($args === [] && $this->state === CallFlowState::Idle) {
             // The caller's number rides the arrival event (channel.caller.number,
             // the same field translate() reads). An anonymous caller presents an
             // empty string — treat that as "no number" so we present nothing.
@@ -127,12 +155,36 @@ class InboundToAgentFlow
             'agent',
             $callerNumber,
         );
-        $this->state = InboundFlowState::RingingAgent;
+        $this->state = CallFlowState::RingingAgent;
 
         Log::info('Inbound call: caller answered, ringing the agent.', [
             'caller' => $callerLegId,
             'callerNumber' => $callerNumber,
             'agent' => $this->agentLegId,
+        ]);
+    }
+
+    /**
+     * Outbound entry (B-outbound M2): the agent's leg is already up (the web
+     * console placed it agent-first); now dial the customer. The customer maps
+     * onto callerLegId so the join/record/teardown below reuse unchanged. The
+     * bare number rides as a clean arg; the engine-specific endpoint prefix and
+     * the single outbound caller-ID (O2) are read from config here.
+     */
+    private function beginOutboundCall(string $agentLegId, string $customerNumber): void
+    {
+        $this->agentLegId = $agentLegId;
+        $this->callerLegId = $this->telephony->placeCall(
+            config('telephony.outbound.dial_prefix').$customerNumber,
+            'outbound',
+            config('telephony.outbound.caller_id'),
+        );
+        $this->state = CallFlowState::RingingCustomer;
+
+        Log::info('Outbound call: agent connected, ringing the customer.', [
+            'agent' => $agentLegId,
+            'customer' => $this->callerLegId,
+            'customerNumber' => $customerNumber,
         ]);
     }
 
@@ -144,9 +196,9 @@ class InboundToAgentFlow
             $this->callerLegId,
             'call-'.now()->format('Ymd-His'),
         );
-        $this->state = InboundFlowState::InCall;
+        $this->state = CallFlowState::InCall;
 
-        Log::info('Inbound call connected and recording.', ['recording' => $this->recording->name]);
+        Log::info('Call connected and recording.', ['recording' => $this->recording->name]);
     }
 
     /**
@@ -161,7 +213,7 @@ class InboundToAgentFlow
     {
         $legId = $event['channel']['id'] ?? '';
 
-        if ($this->state === InboundFlowState::RingingAgent) {
+        if ($this->state === CallFlowState::RingingAgent) {
             if ($legId === $this->agentLegId) {
                 $this->telephony->hangup($this->callerLegId);
                 $this->reset();
@@ -173,7 +225,12 @@ class InboundToAgentFlow
             return;
         }
 
-        if ($this->state === InboundFlowState::InCall
+        // CP-O2 (M2 step 6): the outbound ring-stage teardown lands here — a
+        // customer leg that ends while RingingCustomer is the no-answer signal
+        // (tear down the agent leg, open wrap-up), and an agent who abandons
+        // mid-ring cancels the customer leg. Built in the next checkpoint.
+
+        if ($this->state === CallFlowState::InCall
             && ($legId === $this->callerLegId || $legId === $this->agentLegId)) {
             $this->endCall($legId);
         }
@@ -251,10 +308,10 @@ class InboundToAgentFlow
         $this->reset();
     }
 
-    /** Back to Idle, ready for the next caller. Pending merges outlive a call. */
+    /** Back to Idle, ready for the next call. Pending merges outlive a call. */
     private function reset(): void
     {
-        $this->state = InboundFlowState::Idle;
+        $this->state = CallFlowState::Idle;
         $this->callerLegId = null;
         $this->agentLegId = null;
         $this->conversationId = null;

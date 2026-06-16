@@ -41,13 +41,83 @@
             </p>
         </div>
 
-        {{-- B4 CP2a/CP2b: the call panel. The app dials this agent; the phone
-             fires 'incoming' -> ringing, Answer opens two-way audio -> on-call,
-             either hang-up returns to ready (CP3 makes that last hop wrap-up).
-             CP2b shows the matched lead (D4) and a mute toggle; the caller's
-             voice plays through the hidden <audio> sink below. --}}
+        {{-- B-outbound CP-O1: the preview dialer. In 'ready' the agent picks a
+             campaign and the next callable lead is served (server-rendered: not
+             Closed, fewest attempts then oldest). Dial originates the call
+             agent-first (the page places the agent leg carrying the customer
+             number); Skip advances the served cursor without calling. --}}
         <div
-            x-show="state === 'ringing' || state === 'onCall'"
+            x-show="state === 'ready'"
+            x-cloak
+            class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
+        >
+            <label for="campaign" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Campaign</label>
+            <select
+                id="campaign"
+                wire:model.live="selectedCampaignId"
+                class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white sm:max-w-xs"
+            >
+                <option value="">Select a campaign…</option>
+                @foreach ($this->campaignOptions() as $campaignId => $campaignName)
+                    <option value="{{ $campaignId }}">{{ $campaignName }}</option>
+                @endforeach
+            </select>
+
+            @if ($this->selectedCampaignId)
+                @php($served = $this->servedLead())
+
+                @if ($served)
+                    <div class="mt-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                        <div>
+                            <p class="text-sm text-gray-500 dark:text-gray-400">Next lead</p>
+                            <p class="mt-1 text-lg font-semibold text-gray-950 dark:text-white">
+                                {{ $served['name'] ?? 'Unnamed lead' }}
+                            </p>
+                            <p class="text-sm text-gray-500 dark:text-gray-400">{{ $served['phone'] }}</p>
+                            <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500 dark:text-gray-400">
+                                @if ($served['campaign'])
+                                    <span>{{ $served['campaign'] }}</span>
+                                @endif
+                                <span class="font-medium text-gray-700 dark:text-gray-300">{{ $served['status'] }}</span>
+                                @if ($served['lastDisposition'])
+                                    <span>Last: {{ $served['lastDisposition'] }}</span>
+                                @endif
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-2">
+                            <button
+                                type="button"
+                                x-on:click="dial()"
+                                class="inline-flex items-center rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500"
+                            >
+                                Dial
+                            </button>
+                            <button
+                                type="button"
+                                x-on:click="skip()"
+                                class="inline-flex items-center rounded-lg bg-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-300 dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/20"
+                            >
+                                Skip
+                            </button>
+                        </div>
+                    </div>
+                @else
+                    <p class="mt-5 text-sm text-gray-500 dark:text-gray-400">No callable leads in this campaign.</p>
+                @endif
+            @else
+                <p class="mt-5 text-sm text-gray-500 dark:text-gray-400">Pick a campaign to start dialing.</p>
+            @endif
+        </div>
+
+        {{-- B4 CP2a/CP2b + B-outbound CP-O1: the call panel. Inbound: the app
+             dials this agent -> 'incoming' -> ringing, Answer -> on-call. Outbound:
+             Dial auto-answers the agent leg -> 'calling' (customer ringing) ->
+             'onCall' once bridged. Either hang-up returns to ready (CP3 makes that
+             last hop wrap-up). The matched/served lead (D4) and a mute toggle show
+             here; the far-side voice plays through the hidden <audio> sink below. --}}
+        <div
+            x-show="state === 'ringing' || state === 'calling' || state === 'onCall'"
             x-cloak
             class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
         >
@@ -55,7 +125,7 @@
                 <div>
                     <p
                         class="text-sm text-gray-500 dark:text-gray-400"
-                        x-text="state === 'ringing' ? 'Incoming call' : 'On call'"
+                        x-text="state === 'ringing' ? 'Incoming call' : (state === 'calling' ? 'Calling…' : 'On call')"
                     ></p>
 
                     {{-- Matched lead (B4 D4): name + context. No match -> the bare

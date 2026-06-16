@@ -10,6 +10,13 @@ import { AgentPhone } from './telephony/agent-phone';
  * straight back to 'ready'); the agent picks a disposition and Save records the
  * outcome, then -> 'ready'.
  *
+ * Outbound (B-outbound CP-O1): in 'ready' the agent picks a campaign and the
+ * served lead shows (server-rendered). Dial -> the page originates the AGENT leg
+ * first (agent-first); that leg rings this browser, and because the agent already
+ * clicked Dial we AUTO-ANSWER it (no second ring to accept) -> 'calling' until the
+ * customer is bridged in -> 'onCall'. Skip advances the served lead without
+ * dialing. An ended outbound call lands in 'wrapUp' just like inbound.
+ *
  * CP2b: on 'incoming' the caller's number is matched to a lead via the page's
  * lookupLead() over $wire (the lead card, or a bare-number fallback), and mute
  * toggles the mic mid-call (pure browser, reflected in `muted`).
@@ -35,6 +42,10 @@ const agentConsole = (config) => ({
     saving: false,
     phone: null,
 
+    // Outbound: true between clicking Dial and the call ending, so the agent
+    // leg's inbound INVITE is auto-answered instead of presented as a ring.
+    outboundDialing: false,
+
     init() {
         this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
 
@@ -51,6 +62,14 @@ const agentConsole = (config) => ({
         });
 
         this.phone.on('incoming', async (number) => {
+            // Outbound: the agent already clicked Dial, so their own leg ringing
+            // here must be auto-answered — no ring to accept. The served lead is
+            // already known (dial() returned it), so no inbound lookup.
+            if (this.outboundDialing) {
+                this.phone.answer();
+                return;
+            }
+
             this.resetCall();
             this.callerNumber = number;
             this.state = 'ringing';
@@ -77,6 +96,9 @@ const agentConsole = (config) => ({
             this.state = 'onCall';
         });
         this.phone.on('ended', async () => {
+            // The dial is over either way — stop auto-answering.
+            this.outboundDialing = false;
+
             // Only an answered call opens wrap-up (CP3 decision A). A declined or
             // abandoned ring (never answered) goes straight back to ready.
             if (! this.answered) {
@@ -109,6 +131,46 @@ const agentConsole = (config) => ({
 
     hangup() {
         this.phone.hangup();
+    },
+
+    /**
+     * Outbound: dial the served lead (B-outbound CP-O1). The page originates the
+     * agent leg first and returns the lead for the call/wrap-up card; the agent
+     * leg ringing here is auto-answered (outboundDialing). A null return means
+     * nothing was callable — fall back to ready.
+     */
+    async dial() {
+        if (this.state !== 'ready' || this.outboundDialing) {
+            return;
+        }
+
+        this.resetCall();
+        this.outboundDialing = true;
+        this.state = 'calling';
+
+        try {
+            this.lead = await this.$wire.dial();
+
+            if (! this.lead) {
+                this.outboundDialing = false;
+                this.state = 'ready';
+                return;
+            }
+
+            this.callerNumber = this.lead.phone;
+        } catch (e) {
+            this.outboundDialing = false;
+            this.state = 'ready';
+        }
+    },
+
+    /** Outbound: pass the served lead without calling; the page advances the cursor. */
+    async skip() {
+        if (this.state !== 'ready' || this.outboundDialing) {
+            return;
+        }
+
+        await this.$wire.skip();
     },
 
     /** Toggle the mic mid-call (browser-local); `muted` drives the button. */
@@ -156,7 +218,7 @@ const agentConsole = (config) => ({
         }
     },
 
-    /** Clear all per-call state (caller, lead, mute, wrap-up). */
+    /** Clear all per-call state (caller, lead, mute, wrap-up, outbound dial). */
     resetCall() {
         this.callerNumber = null;
         this.lead = null;
@@ -165,6 +227,7 @@ const agentConsole = (config) => ({
         this.answered = false;
         this.dispositions = {};
         this.selectedDisposition = '';
+        this.outboundDialing = false;
     },
 
     destroy() {

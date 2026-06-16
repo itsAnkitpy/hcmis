@@ -6,12 +6,15 @@ namespace App\Filament\Pages;
 
 use App\Actions\AdvanceLeadStatus;
 use App\Audit\Audit;
+use App\Enums\LeadStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
+use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\Lead;
 use App\Models\User;
 use App\Support\PhoneNumber;
+use App\Telephony\TelephonyProvider;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
@@ -46,6 +49,22 @@ class AgentConsole extends Page
 
     #[Locked]
     public ?int $matchedCampaignId = null;
+
+    /**
+     * The campaign the agent is working (outbound preview — O4). A plain agent
+     * choice among their own client's campaigns; the serving query runs in tenant
+     * context, so RLS walls it regardless of what id the browser sends.
+     */
+    public ?int $selectedCampaignId = null;
+
+    /**
+     * Leads the agent skipped this session (O4 Skip — advance the served cursor
+     * with no write). Excluded from serving so the next callable lead is shown.
+     * Browser-visible by design: at worst the agent skips their own leads.
+     *
+     * @var array<int, int>
+     */
+    public array $skippedLeadIds = [];
 
     public static function canAccess(): bool
     {
@@ -116,6 +135,123 @@ class AgentConsole extends Page
         $this->matchedLeadId = $lead->id;
         $this->matchedCampaignId = $lead->campaign_id;
 
+        return $this->presentLead($lead);
+    }
+
+    /**
+     * The campaigns the agent can work (O4 — one selected campaign at a time).
+     * Active campaigns in the agent's own client; RLS + BelongsToTenant wall the
+     * list to their tenant.
+     *
+     * @return array<int, string>
+     */
+    public function campaignOptions(): array
+    {
+        return Campaign::query()
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->pluck('name', 'id')
+            ->all();
+    }
+
+    /**
+     * The next callable lead the console presents for the selected campaign
+     * (M1 preview, D2): not Closed, fewest attempts first then oldest, skipping
+     * any the agent passed this session. Presentation only — the id is stashed at
+     * dial, never here (the inverse of inbound's ring-time lookup).
+     *
+     * @return array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}|null
+     */
+    public function servedLead(): ?array
+    {
+        $lead = $this->nextCallableLead();
+
+        return $lead === null ? null : $this->presentLead($lead);
+    }
+
+    /**
+     * Dial the served lead (M2 origination, agent-first). The lead is re-resolved
+     * SERVER-SIDE here (never a browser-supplied id), its ids are stashed #[Locked]
+     * exactly like inbound's match, and the AGENT leg is originated carrying the
+     * customer's number as the leg's tag detail — the flow reads it back and dials
+     * the customer (CP-O0 transport). Returns the lead shape for the screen, or
+     * null when there is nothing callable to dial.
+     *
+     * @return array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}|null
+     */
+    public function dial(): ?array
+    {
+        $lead = $this->nextCallableLead();
+
+        if ($lead === null) {
+            return null;
+        }
+
+        $this->matchedLeadId = $lead->id;
+        $this->matchedCampaignId = $lead->campaign_id;
+
+        app(TelephonyProvider::class)->placeCall(
+            config('telephony.agent.endpoint'),
+            'agent',
+            tagDetail: $lead->phone,
+        );
+
+        return $this->presentLead($lead);
+    }
+
+    /**
+     * Skip the served lead without dialing (O4): remember it for this session so
+     * serving moves on. No write, no telephony — just advances the cursor.
+     */
+    public function skip(): void
+    {
+        $lead = $this->nextCallableLead();
+
+        if ($lead !== null) {
+            $this->skippedLeadIds[] = $lead->id;
+        }
+    }
+
+    /**
+     * Switching campaigns starts the served cursor fresh and drops any held match
+     * (Livewire fires this when selectedCampaignId changes).
+     */
+    public function updatedSelectedCampaignId(): void
+    {
+        $this->skippedLeadIds = [];
+        $this->resetMatch();
+    }
+
+    /**
+     * The serving query, shared by servedLead() (presentation) and dial()
+     * (origination) so both always agree on "the next lead". Runs in tenant
+     * context, so the tenant wall is automatic.
+     */
+    private function nextCallableLead(): ?Lead
+    {
+        if ($this->selectedCampaignId === null) {
+            return null;
+        }
+
+        return Lead::query()
+            ->with(['campaign', 'lastDisposition'])
+            ->where('campaign_id', $this->selectedCampaignId)
+            ->where('status', '!=', LeadStatus::Closed->value)
+            ->whereNotIn('id', $this->skippedLeadIds)
+            ->orderBy('attempts')
+            ->orderBy('id')
+            ->first();
+    }
+
+    /**
+     * The small display shape the screen shows for a lead — shared by the inbound
+     * caller match (lookupLead) and the outbound served lead (servedLead/dial), so
+     * the lead card reads identically whichever way the call started.
+     *
+     * @return array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}
+     */
+    private function presentLead(Lead $lead): array
+    {
         return [
             'id' => $lead->id,
             'name' => $lead->name,
