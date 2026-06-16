@@ -3,7 +3,9 @@
 use App\Enums\LeadStatus;
 use App\Enums\RoleName;
 use App\Filament\Pages\AgentConsole;
+use App\Models\ActivityLog;
 use App\Models\Campaign;
+use App\Models\Disposition;
 use App\Models\Lead;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
@@ -77,6 +79,56 @@ it('serves the next callable lead, stashes its locked ids at dial, and originate
     Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/ari/channels?')
         && dialParams($request)['endpoint'] === 'PJSIP/1003'
         && dialParams($request)['appArgs'] === 'agent,9991234567');
+});
+
+it('writes a no-answer (non-contact) outcome on an unanswered outbound — attempts +1, status forward, audited (CP-O2 / D5)', function () {
+    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
+    Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    [$campaignId, $leadId, $noAnswerId] = TenantContext::run($tenant->id, function (): array {
+        $campaign = Campaign::factory()->create(['is_active' => true]);
+        // NO_ANSWER is seeded non-contact in every template; here we mint the same
+        // shape so the picker accepts it for this campaign.
+        $noAnswer = Disposition::factory()->forCampaign($campaign)->create([
+            'is_contact' => false,
+            'label' => 'No answer',
+        ]);
+        $lead = Lead::factory()->forCampaign($campaign)->status(LeadStatus::New)->create([
+            'phone' => '9991234567',
+            'attempts' => 0,
+        ]);
+
+        return [$campaign->id, $lead->id, $noAnswer->id];
+    });
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($campaignId, $noAnswerId): void {
+        $page = new AgentConsole;
+        $page->selectedCampaignId = $campaignId;
+        $page->dial();                  // outbound stash at dial; the customer never answers
+        $page->saveWrapUp($noAnswerId); // the agent picks "No answer" in wrap-up
+    });
+
+    $lead = TenantContext::run($tenant->id, fn (): ?Lead => Lead::find($leadId));
+
+    // The unchanged saveWrapUp / AdvanceLeadStatus carry a non-contact outcome:
+    // New + non-contact -> In Progress, the attempt is counted, the outcome stuck.
+    expect($lead->last_disposition_id)->toBe($noAnswerId)
+        ->and($lead->attempts)->toBe(1)
+        ->and($lead->status)->toBe(LeadStatus::InProgress);
+
+    // The call-stream audit still fires for an unanswered outbound (matched lead).
+    $call = TenantContext::run($tenant->id, fn (): ?ActivityLog => ActivityLog::query()
+        ->where('log_name', 'call')->where('event', 'wrapped_up')->latest('id')->first());
+
+    expect($call)->not->toBeNull()
+        ->and($call->subject_id)->toBe($leadId)
+        ->and($call->causer_id)->toBe($agent->id)
+        ->and($call->properties['matched'])->toBeTrue();
 });
 
 it('serves fewest-attempts-then-oldest and never serves a closed lead', function () {

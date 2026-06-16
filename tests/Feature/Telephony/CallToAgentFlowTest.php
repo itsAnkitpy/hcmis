@@ -231,3 +231,48 @@ it('does not join until the outbound customer actually answers', function () {
 
     Queue::assertNothingPushed();
 });
+
+it('tears down the agent leg when the outbound customer never answers (no-answer, CP-O2)', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('placeCall')->once()
+        ->with('PJSIP/1002', 'outbound', null)
+        ->andReturn('customer-leg');
+    // The customer leg dying while ringing is the no-answer signal: drop the
+    // already-answered agent leg, which flips the browser to wrap-up (D5). No
+    // join, no recording — nothing was ever connected.
+    $telephony->shouldReceive('hangup')->once()->with('agent-leg');
+    $telephony->shouldNotReceive('join');
+    $telephony->shouldNotReceive('startRecording');
+
+    $flow = new CallToAgentFlow($telephony);
+
+    $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // agent up, customer dialed
+    $flow->handle(channelDestroyed('customer-leg'));              // customer ring timed out
+
+    Queue::assertNothingPushed();
+});
+
+it('cancels the customer leg when the agent abandons before the customer answers (CP-O2)', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('placeCall')->once()
+        ->with('PJSIP/1002', 'outbound', null)
+        ->andReturn('customer-leg');
+    // The agent hangs up while the customer is still ringing: cancel the
+    // still-ringing customer leg so it is not left orphaned.
+    $telephony->shouldReceive('hangup')->once()->with('customer-leg');
+    $telephony->shouldNotReceive('join');
+    $telephony->shouldNotReceive('startRecording');
+
+    $flow = new CallToAgentFlow($telephony);
+
+    $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // agent up, customer ringing
+    $flow->handle(channelDestroyed('agent-leg'));                 // agent abandons mid-ring
+
+    Queue::assertNothingPushed();
+});

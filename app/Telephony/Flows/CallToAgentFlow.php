@@ -213,7 +213,18 @@ class CallToAgentFlow
     {
         $legId = $event['channel']['id'] ?? '';
 
-        if ($this->state === CallFlowState::RingingAgent) {
+        // While ringing, a leg ending tears the other one down and resets. The
+        // shape is identical both directions — end one ringing leg, hang up the
+        // other — but what the agent's browser does next differs, and is decided
+        // there (on the answered flag), not here:
+        //   - inbound (RingingAgent): the agent leg never answered; its end is a
+        //     silent reset, the caller leg ending is an abandoned caller — both
+        //     drop the survivor and go back to ready.
+        //   - outbound (RingingCustomer): the agent leg is already up, so the
+        //     CUSTOMER leg ending is the no-answer signal (CP-O2 / D5) — dropping
+        //     the answered agent leg flips the browser to wrap-up; the agent leg
+        //     ending is the agent abandoning mid-ring, which cancels the customer.
+        if ($this->state === CallFlowState::RingingAgent || $this->state === CallFlowState::RingingCustomer) {
             if ($legId === $this->agentLegId) {
                 $this->telephony->hangup($this->callerLegId);
                 $this->reset();
@@ -224,11 +235,6 @@ class CallToAgentFlow
 
             return;
         }
-
-        // CP-O2 (M2 step 6): the outbound ring-stage teardown lands here — a
-        // customer leg that ends while RingingCustomer is the no-answer signal
-        // (tear down the agent leg, open wrap-up), and an agent who abandons
-        // mid-ring cancels the customer leg. Built in the next checkpoint.
 
         if ($this->state === CallFlowState::InCall
             && ($legId === $this->callerLegId || $legId === $this->agentLegId)) {
