@@ -42,6 +42,12 @@ const agentConsole = (config) => ({
     saving: false,
     phone: null,
 
+    // M4 callback capture: the disposition ids that mean "schedule a callback"
+    // (server-derived), and the schedule fields revealed when one is picked.
+    callbackDispositionIds: [],
+    callbackAt: '',
+    callbackNotes: '',
+
     // Outbound: true between clicking Dial and the call ending, so the agent
     // leg's inbound INVITE is auto-answered instead of presented as a ring.
     outboundDialing: false,
@@ -117,12 +123,15 @@ const agentConsole = (config) => ({
             this.state = 'wrapUp';
 
             // Matched lead -> load its campaign's disposition options for the
-            // picker. No match -> the panel shows the "nothing recorded" variant.
+            // picker, plus which of them schedule a callback (M4). No match -> the
+            // panel shows the "nothing recorded" variant.
             if (this.lead) {
                 try {
                     this.dispositions = await this.$wire.dispositions();
+                    this.callbackDispositionIds = await this.$wire.callbackDispositionIds();
                 } catch (e) {
                     this.dispositions = {};
+                    this.callbackDispositionIds = [];
                 }
             }
         });
@@ -218,6 +227,29 @@ const agentConsole = (config) => ({
         }
     },
 
+    /**
+     * Outbound: dial a specific due callback (M4) rather than the next campaign
+     * lead. Same result branching as dial() — 'dialed' rides the lead along and the
+     * agent leg auto-answers; 'blocked' (now on Do-Not-Call) shows a notice; 'none'
+     * (the callback was already taken / vanished) quietly returns to ready.
+     */
+    async dialCallback(id) {
+        if (this.state !== 'ready' || this.outboundDialing) {
+            return;
+        }
+
+        this.resetCall();
+        this.outboundDialing = true;
+        this.state = 'calling';
+
+        try {
+            this.applyDialResult(await this.$wire.dialCallback(id));
+        } catch (e) {
+            this.outboundDialing = false;
+            this.state = 'ready';
+        }
+    },
+
     /** Outbound: pass the served lead without calling; the page advances the cursor. */
     async skip() {
         if (this.state !== 'ready' || this.outboundDialing) {
@@ -238,16 +270,59 @@ const agentConsole = (config) => ({
         this.muted = ! this.muted;
     },
 
-    /** Save the picked disposition for the matched lead, then return to ready. */
+    /** Whether the picked outcome schedules a callback (reveals the date/time fields). */
+    isCallbackSelected() {
+        return this.callbackDispositionIds.includes(Number(this.selectedDisposition));
+    },
+
+    /** Now, as a `datetime-local` value — the earliest a callback may be set to. */
+    minCallbackLocal() {
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+
+        return now.toISOString().slice(0, 16);
+    },
+
+    /** A due callback's UTC time, rendered in the agent's own local clock. */
+    formatDue(iso) {
+        return new Date(iso).toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+        });
+    },
+
+    /**
+     * Save the picked disposition for the matched lead, then return to ready. When
+     * the outcome schedules a callback (M4), a date/time is required and rides along
+     * with the optional note; the server validates and creates the callback row.
+     */
     async saveWrapUp() {
         if (this.saving || ! this.selectedDisposition) {
+            return;
+        }
+
+        const isCallback = this.isCallbackSelected();
+
+        // A callback needs a time — the server enforces this too, but guard here so
+        // the click can't silently no-op a missing schedule.
+        if (isCallback && ! this.callbackAt) {
             return;
         }
 
         this.saving = true;
 
         try {
-            await this.$wire.saveWrapUp(Number(this.selectedDisposition));
+            // The picker is browser-local; send UTC so the server (UTC) stores the
+            // real instant. The agent's clock and the stored time then agree.
+            const scheduledAt = isCallback ? new Date(this.callbackAt).toISOString() : null;
+
+            await this.$wire.saveWrapUp(
+                Number(this.selectedDisposition),
+                scheduledAt,
+                isCallback ? (this.callbackNotes || null) : null,
+            );
         } finally {
             this.saving = false;
             this.resetCall();
@@ -281,6 +356,9 @@ const agentConsole = (config) => ({
         this.answered = false;
         this.dispositions = {};
         this.selectedDisposition = '';
+        this.callbackDispositionIds = [];
+        this.callbackAt = '';
+        this.callbackNotes = '';
         this.outboundDialing = false;
         this.notice = null;
     },

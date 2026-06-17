@@ -9,6 +9,7 @@ use Database\Factories\LeadFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
  * A contact record an agent works (FR-LC01–04). Tenant-owned and bound to one
@@ -72,6 +73,17 @@ class Lead extends Model
     public function lastDisposition(): BelongsTo
     {
         return $this->belongsTo(Disposition::class, 'last_disposition_id');
+    }
+
+    /**
+     * Scheduled "call me later" rows for this lead (M4). A pending one parks the
+     * lead out of the normal preview — it returns via the agent's due-list.
+     *
+     * @return HasMany<Callback, $this>
+     */
+    public function callbacks(): HasMany
+    {
+        return $this->hasMany(Callback::class);
     }
 
     /**

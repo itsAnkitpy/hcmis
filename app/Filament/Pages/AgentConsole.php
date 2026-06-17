@@ -6,9 +6,11 @@ namespace App\Filament\Pages;
 
 use App\Actions\AdvanceLeadStatus;
 use App\Audit\Audit;
+use App\Enums\CallbackStatus;
 use App\Enums\LeadStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
+use App\Models\Callback;
 use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\DncEntry;
@@ -19,6 +21,8 @@ use App\Telephony\TelephonyProvider;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Attributes\Locked;
 
@@ -171,6 +175,40 @@ class AgentConsole extends Page
     }
 
     /**
+     * The agent's due callbacks (M4): their OWN (sticky), still pending, and now
+     * due (scheduled_at has passed). Cross-tenant walled by RLS, cross-agent by the
+     * owner filter. Each is dialed like a served lead via dialCallback(). Soonest
+     * first. Spans campaigns — a callback is owned by the agent, not the campaign
+     * they happen to have selected.
+     *
+     * Due-detection is server-side in the app timezone (UTC). The schedule rides
+     * out as a UTC ISO string (scheduledAtIso) so the browser renders it in the
+     * AGENT's own clock — the picker is browser-local too, so capture and display
+     * agree without flipping the app's global timezone.
+     *
+     * @return array<int, array{id: int, leadName: ?string, phone: string, campaign: ?string, scheduledAtIso: string, notes: ?string}>
+     */
+    public function dueCallbacks(): array
+    {
+        return Callback::query()
+            ->with(['lead', 'campaign'])
+            ->where('owner_agent_id', auth()->id())
+            ->where('status', CallbackStatus::Pending)
+            ->where('scheduled_at', '<=', now())
+            ->orderBy('scheduled_at')
+            ->get()
+            ->map(fn (Callback $callback): array => [
+                'id' => $callback->id,
+                'leadName' => $callback->lead?->name,
+                'phone' => $callback->lead?->phone ?? '',
+                'campaign' => $callback->campaign?->name,
+                'scheduledAtIso' => $callback->scheduled_at->toIso8601String(),
+                'notes' => $callback->notes,
+            ])
+            ->all();
+    }
+
+    /**
      * Dial the served lead (M2 origination, agent-first). The lead is re-resolved
      * SERVER-SIDE here (never a browser-supplied id); its number is checked against
      * the client's Do-Not-Call list FIRST (O1 — listed numbers never ring). On a
@@ -216,6 +254,47 @@ class AgentConsole extends Page
         if ($lead !== null) {
             $this->skippedLeadIds[] = $lead->id;
         }
+    }
+
+    /**
+     * Dial a specific due callback (M4) instead of the next campaign lead. The
+     * callback is re-resolved server-side and must be the agent's OWN and still
+     * pending (the cross-agent wall; RLS is the cross-tenant wall) — a stale id
+     * resolves to nothing. Its lead's number gets the same Do-Not-Call guard a
+     * served lead gets (O1). Dialing CONSUMES the callback — it flips to done so it
+     * leaves the due-list; a reschedule becomes a fresh callback at the next
+     * wrap-up. On a clean number the lead ids are stashed #[Locked] and the agent
+     * leg is originated, exactly like a served-lead dial.
+     *
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
+     */
+    public function dialCallback(int $callbackId): array
+    {
+        $callback = Callback::query()
+            ->with('lead')
+            ->where('owner_agent_id', auth()->id())
+            ->where('status', CallbackStatus::Pending)
+            ->find($callbackId);
+
+        if ($callback === null || $callback->lead === null) {
+            return ['outcome' => 'none'];
+        }
+
+        $lead = $callback->lead;
+
+        if ($this->isDncListed($lead->phone)) {
+            return $this->blockCallback($callback, $lead);
+        }
+
+        // Consume the callback: dialing it drops it off the due-list.
+        $callback->update(['status' => CallbackStatus::Done]);
+
+        $this->matchedLeadId = $lead->id;
+        $this->matchedCampaignId = $lead->campaign_id;
+
+        $this->originateAgentLeg($lead->phone);
+
+        return ['outcome' => 'dialed', 'lead' => $this->presentLead($lead)];
     }
 
     /**
@@ -292,6 +371,10 @@ class AgentConsole extends Page
             ->where('campaign_id', $this->selectedCampaignId)
             ->where('status', '!=', LeadStatus::Closed->value)
             ->whereNotIn('id', $this->skippedLeadIds)
+            // A lead with a pending callback is parked (PR2): it surfaces only via
+            // the agent's due-list when due, never the normal preview. Once dialed
+            // (callback -> done), it returns to the pool.
+            ->whereDoesntHave('callbacks', fn ($query) => $query->where('status', CallbackStatus::Pending))
             ->orderBy('attempts')
             ->orderBy('id')
             ->first();
@@ -347,6 +430,27 @@ class AgentConsole extends Page
     }
 
     /**
+     * A due callback whose number is now on the do-not-call list: never dial it,
+     * consume the callback (done, so it leaves the due-list), and close the lead
+     * out of rotation — the same compliance hard-stop a served-lead block applies,
+     * audited. The callback flip + lead close share one transaction.
+     *
+     * @return array{outcome: 'blocked', phone: string}
+     */
+    private function blockCallback(Callback $callback, Lead $lead): array
+    {
+        DB::transaction(function () use ($callback, $lead): void {
+            $callback->update(['status' => CallbackStatus::Done]);
+            $lead->update(['status' => LeadStatus::Closed]);
+            Audit::dncBlocked($lead);
+        });
+
+        $this->resetMatch();
+
+        return ['outcome' => 'blocked', 'phone' => $lead->phone];
+    }
+
+    /**
      * The small display shape the screen shows for a lead — shared by the inbound
      * caller match (lookupLead) and the outbound served lead (servedLead/dial), so
      * the lead card reads identically whichever way the call started.
@@ -378,6 +482,26 @@ class AgentConsole extends Page
     }
 
     /**
+     * The disposition ids in the matched lead's set that mean "schedule a callback"
+     * (carry the CALLBACK code, M4). The browser uses these to reveal the date/time
+     * + notes fields only when such an outcome is picked. Scoped exactly like
+     * dispositionOptions (this campaign + tenant-wide), RLS-walled; the server
+     * re-derives from the saved id on write, so this is a UI hint, never the wall.
+     *
+     * @return array<int, int>
+     */
+    public function callbackDispositionIds(): array
+    {
+        return Disposition::query()
+            ->where('code', Disposition::CALLBACK_CODE)
+            ->where(function ($query): void {
+                $query->whereNull('campaign_id')->orWhere('campaign_id', $this->matchedCampaignId);
+            })
+            ->pluck('id')
+            ->all();
+    }
+
+    /**
      * Record the outcome of the call the agent just handled (B4 CP3 decision B+C).
      * Narrow by construction: gated by the dedicated record-call-outcome ability
      * (NOT Leads CRUD — agents still have none, D-M4-5); the lead is re-fetched
@@ -388,8 +512,15 @@ class AgentConsole extends Page
      * Writes the last disposition, bumps attempts (one wrap-up = one answered
      * call), and nudges the funnel forward (C2-lite). The $lead->update() also
      * auto-logs a lead.updated diff; callWrappedUp() adds the call-stream event.
+     *
+     * When the picked disposition is the CALLBACK outcome (M4), a callback row is
+     * created ON TOP of the normal write — picking Callback is additive, not an
+     * alternative: the agent did reach the customer (CALLBACK is a contact), and
+     * the row schedules the follow-up. The two writes share one transaction so a
+     * lead is never advanced without its callback. scheduled_at is validated
+     * (present + future) before either write.
      */
-    public function saveWrapUp(int $dispositionId): void
+    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null): void
     {
         Gate::authorize('record-call-outcome');
 
@@ -410,15 +541,50 @@ class AgentConsole extends Page
 
         $disposition = Disposition::findOrFail($dispositionId);
 
-        $lead->update([
-            'last_disposition_id' => $disposition->id,
-            'attempts' => $lead->attempts + 1,
-            'status' => (new AdvanceLeadStatus)($lead->status, $disposition->is_contact),
-        ]);
+        $isCallback = $disposition->code === Disposition::CALLBACK_CODE;
+        $callbackAt = $isCallback ? $this->validateCallbackSchedule($scheduledAt) : null;
 
-        Audit::callWrappedUp($lead, $disposition);
+        DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes): void {
+            $lead->update([
+                'last_disposition_id' => $disposition->id,
+                'attempts' => $lead->attempts + 1,
+                'status' => (new AdvanceLeadStatus)($lead->status, $disposition->is_contact),
+            ]);
+
+            Audit::callWrappedUp($lead, $disposition);
+
+            // Sticky v1: the callback is owned by the agent wrapping up the call.
+            if ($isCallback) {
+                Callback::create([
+                    'lead_id' => $lead->id,
+                    'campaign_id' => $lead->campaign_id,
+                    'scheduled_at' => $callbackAt,
+                    'owner_agent_id' => auth()->id(),
+                    'status' => CallbackStatus::Pending,
+                    'notes' => filled($notes) ? $notes : null,
+                ]);
+            }
+        });
 
         $this->resetMatch();
+    }
+
+    /**
+     * Validate the callback schedule the browser sent: a date/time must be present
+     * and in the future (a callback in the past is meaningless). The browser also
+     * guards this, but the server is the wall. Parsed in the app timezone (UTC),
+     * the same clock the due-list compares against.
+     */
+    private function validateCallbackSchedule(?string $scheduledAt): Carbon
+    {
+        abort_if($scheduledAt === null || trim($scheduledAt) === '', 422, 'A callback needs a date and time.');
+
+        $when = rescue(fn (): Carbon => Carbon::parse($scheduledAt), null, false);
+
+        abort_if($when === null, 422, 'That callback time is not valid.');
+        abort_if($when->isPast(), 422, 'A callback must be scheduled in the future.');
+
+        return $when;
     }
 
     /**

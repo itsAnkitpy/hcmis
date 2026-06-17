@@ -62,6 +62,45 @@
                 <button type="button" x-on:click="notice = null" class="font-semibold hover:opacity-70">Dismiss</button>
             </div>
 
+            {{-- M4 (CP-O4): the agent's due callbacks — their own, pending, and now
+                 due. Spans campaigns (owned by the agent, not the selected campaign).
+                 Dialing one calls that lead like any served lead and consumes the
+                 callback (it drops off the list on the next render). --}}
+            @php($dueCallbacks = $this->dueCallbacks())
+            @if (count($dueCallbacks) > 0)
+                <div class="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-500/20 dark:bg-blue-500/10">
+                    <p class="text-sm font-semibold text-blue-800 dark:text-blue-300">My due callbacks</p>
+                    <ul class="mt-3 flex flex-col gap-3">
+                        @foreach ($dueCallbacks as $callback)
+                            <li class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <p class="text-sm font-medium text-gray-950 dark:text-white">
+                                        {{ $callback['leadName'] ?? 'Unnamed lead' }}
+                                        <span class="font-normal text-gray-500 dark:text-gray-400">· {{ $callback['phone'] }}</span>
+                                    </p>
+                                    <div class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-gray-500 dark:text-gray-400">
+                                        @if ($callback['campaign'])
+                                            <span>{{ $callback['campaign'] }}</span>
+                                        @endif
+                                        <span>Due <span x-text="formatDue(@js($callback['scheduledAtIso']))"></span></span>
+                                        @if ($callback['notes'])
+                                            <span class="italic">“{{ $callback['notes'] }}”</span>
+                                        @endif
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    x-on:click="dialCallback({{ $callback['id'] }})"
+                                    class="inline-flex items-center self-start rounded-lg bg-green-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-green-500 sm:self-auto"
+                                >
+                                    Dial
+                                </button>
+                            </li>
+                        @endforeach
+                    </ul>
+                </div>
+            @endif
+
             <label for="campaign" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Campaign</label>
             <select
                 id="campaign"
@@ -263,10 +302,37 @@
                         <button
                             type="button"
                             x-on:click="saveWrapUp()"
-                            :disabled="! selectedDisposition || saving"
+                            :disabled="! selectedDisposition || saving || (isCallbackSelected() && ! callbackAt)"
                             class="inline-flex items-center justify-center rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
                             x-text="saving ? 'Saving…' : 'Save'"
                         ></button>
+                    </div>
+
+                    {{-- M4 callback capture: revealed only when the picked outcome
+                         schedules a callback (a CALLBACK-coded disposition). The
+                         date/time is required (Save stays disabled without it); the
+                         note is optional. The server validates + creates the row. --}}
+                    <div x-show="isCallbackSelected()" x-cloak class="mt-4 flex flex-col gap-3 sm:max-w-xs">
+                        <div>
+                            <label for="callbackAt" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Call back at</label>
+                            <input
+                                id="callbackAt"
+                                type="datetime-local"
+                                x-model="callbackAt"
+                                :min="minCallbackLocal()"
+                                class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
+                            />
+                        </div>
+                        <div>
+                            <label for="callbackNotes" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Note <span class="text-gray-400">(optional)</span></label>
+                            <textarea
+                                id="callbackNotes"
+                                x-model="callbackNotes"
+                                rows="2"
+                                placeholder="e.g. prefers evenings"
+                                class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
+                            ></textarea>
+                        </div>
                     </div>
                 </div>
             </template>

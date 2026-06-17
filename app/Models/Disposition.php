@@ -29,6 +29,16 @@ class Disposition extends Model
     /** @use HasFactory<DispositionFactory> */
     use BelongsToTenant, HasFactory, LogsModelActivity;
 
+    /**
+     * The disposition `code` that means "the customer asked to be called back"
+     * (M4). Outbound wrap-up keys callback capture off this code — labels are
+     * client-editable, the code is the stable identifier. Seeded in the
+     * OutboundSales / CustomerCare / Edtech templates (not COD / NDR); a campaign
+     * without it simply never offers callback scheduling. The single seam: change
+     * detection (e.g. to an is_callback flag) in one place.
+     */
+    public const CALLBACK_CODE = 'CALLBACK';
+
     protected $fillable = [
         'campaign_id',
         'code',
