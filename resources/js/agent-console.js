@@ -46,6 +46,11 @@ const agentConsole = (config) => ({
     // leg's inbound INVITE is auto-answered instead of presented as a ring.
     outboundDialing: false,
 
+    // The agent's typed ad-hoc number (CP-O3 D3) and a short notice shown back in
+    // 'ready' after a dial that never rang (e.g. blocked by Do-Not-Call).
+    adhocNumber: '',
+    notice: null,
+
     init() {
         this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
 
@@ -134,10 +139,10 @@ const agentConsole = (config) => ({
     },
 
     /**
-     * Outbound: dial the served lead (B-outbound CP-O1). The page originates the
-     * agent leg first and returns the lead for the call/wrap-up card; the agent
-     * leg ringing here is auto-answered (outboundDialing). A null return means
-     * nothing was callable — fall back to ready.
+     * Outbound: dial the served lead (B-outbound CP-O1 / CP-O3). The page returns
+     * a small result the screen branches on (CP-O3): 'dialed' (a lead rides along,
+     * the agent leg auto-answers via outboundDialing), 'blocked' (on Do-Not-Call,
+     * never rang — show a notice, back to ready), or 'none' (nothing callable).
      */
     async dial() {
         if (this.state !== 'ready' || this.outboundDialing) {
@@ -149,18 +154,67 @@ const agentConsole = (config) => ({
         this.state = 'calling';
 
         try {
-            this.lead = await this.$wire.dial();
-
-            if (! this.lead) {
-                this.outboundDialing = false;
-                this.state = 'ready';
-                return;
-            }
-
-            this.callerNumber = this.lead.phone;
+            this.applyDialResult(await this.$wire.dial());
         } catch (e) {
             this.outboundDialing = false;
             this.state = 'ready';
+        }
+    },
+
+    /**
+     * Outbound: dial an ad-hoc typed number (CP-O3 D3). Same result branching as
+     * dial(), plus an 'invalid' notice when the number isn't dialable. An ad-hoc
+     * call has no lead, so 'dialed' shows the bare number ("No matching lead").
+     */
+    async dialAdhoc() {
+        const number = this.adhocNumber.trim();
+
+        if (this.state !== 'ready' || this.outboundDialing || ! number) {
+            return;
+        }
+
+        this.resetCall();
+        this.outboundDialing = true;
+        this.state = 'calling';
+
+        try {
+            const result = await this.$wire.dialAdhoc(number);
+
+            if (result?.outcome === 'invalid') {
+                this.outboundDialing = false;
+                this.state = 'ready';
+                this.notice = "That doesn't look like a dialable number.";
+                return;
+            }
+
+            this.applyDialResult(result);
+
+            if (result?.outcome === 'dialed') {
+                this.adhocNumber = '';
+            }
+        } catch (e) {
+            this.outboundDialing = false;
+            this.state = 'ready';
+        }
+    },
+
+    /**
+     * Apply a dial result from the page (shared by dial() and dialAdhoc()).
+     * 'dialed' keeps us in 'calling' until the call bridges; anything else placed
+     * no call, so fall back to 'ready' (with a Do-Not-Call notice when blocked).
+     */
+    applyDialResult(result) {
+        if (result?.outcome === 'dialed') {
+            this.lead = result.lead ?? null;
+            this.callerNumber = this.lead ? this.lead.phone : result.phone;
+            return;
+        }
+
+        this.outboundDialing = false;
+        this.state = 'ready';
+
+        if (result?.outcome === 'blocked') {
+            this.notice = `${result.phone} is on the Do-Not-Call list — not dialed.`;
         }
     },
 
@@ -228,6 +282,7 @@ const agentConsole = (config) => ({
         this.dispositions = {};
         this.selectedDisposition = '';
         this.outboundDialing = false;
+        this.notice = null;
     },
 
     destroy() {

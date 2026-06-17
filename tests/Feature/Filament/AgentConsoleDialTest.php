@@ -6,11 +6,14 @@ use App\Filament\Pages\AgentConsole;
 use App\Models\ActivityLog;
 use App\Models\Campaign;
 use App\Models\Disposition;
+use App\Models\DncEntry;
 use App\Models\Lead;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
@@ -184,6 +187,91 @@ it('skips a lead to the next without dialing or writing anything', function () {
     });
 });
 
+it('blocks a served lead on the do-not-call list — never dials, closes it, audits, no attempt counted (O1)', function () {
+    Http::preventStrayRequests(); // a blocked dial must never originate
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    [$campaignId, $leadId] = TenantContext::run($tenant->id, function (): array {
+        $campaign = Campaign::factory()->create(['is_active' => true]);
+        $lead = Lead::factory()->forCampaign($campaign)->status(LeadStatus::New)->create([
+            'phone' => '9991234567',
+            'attempts' => 0,
+        ]);
+        DncEntry::factory()->create(['phone' => '9991234567']);
+
+        return [$campaign->id, $lead->id];
+    });
+
+    $this->actingAs($agent);
+
+    $result = TenantContext::run($tenant->id, function () use ($campaignId): array {
+        $page = new AgentConsole;
+        $page->selectedCampaignId = $campaignId;
+
+        $result = $page->dial();
+
+        // The block clears the held match — wrap-up has nothing to key on.
+        expect($page->matchedLeadId)->toBeNull();
+
+        return $result;
+    });
+
+    expect($result['outcome'])->toBe('blocked')
+        ->and($result['phone'])->toBe('9991234567');
+
+    $lead = TenantContext::run($tenant->id, fn (): ?Lead => Lead::find($leadId));
+
+    // Closed (out of rotation), but never "attempted" or "contacted" — no call ran.
+    expect($lead->status)->toBe(LeadStatus::Closed)
+        ->and($lead->attempts)->toBe(0)
+        ->and($lead->last_disposition_id)->toBeNull();
+
+    // The block is on the `call` stream, attributed to the agent, against the lead.
+    $blocked = TenantContext::run($tenant->id, fn (): ?ActivityLog => ActivityLog::query()
+        ->where('log_name', 'call')->where('event', 'dnc_blocked')->latest('id')->first());
+
+    expect($blocked)->not->toBeNull()
+        ->and($blocked->subject_id)->toBe($leadId)
+        ->and($blocked->causer_id)->toBe($agent->id)
+        ->and($blocked->properties['matched'])->toBeTrue();
+});
+
+it('does not block when the do-not-call entry belongs to another client (tenant wall, O1)', function () {
+    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
+    Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
+
+    $clientA = Tenant::factory()->create();
+    $clientB = Tenant::factory()->create();
+    $agent = clientUserWithRole($clientA, RoleName::Agent->value);
+
+    // Client A holds the lead; client B lists the same number on THEIR own list.
+    $campaignId = TenantContext::run($clientA->id, function (): int {
+        $campaign = Campaign::factory()->create(['is_active' => true]);
+        Lead::factory()->forCampaign($campaign)->status(LeadStatus::New)->create([
+            'phone' => '9991234567',
+            'attempts' => 0,
+        ]);
+
+        return $campaign->id;
+    });
+    TenantContext::run($clientB->id, fn () => DncEntry::factory()->create(['phone' => '9991234567']));
+
+    $this->actingAs($agent);
+
+    $result = TenantContext::run($clientA->id, function () use ($campaignId): array {
+        $page = new AgentConsole;
+        $page->selectedCampaignId = $campaignId;
+
+        return $page->dial();
+    });
+
+    // B's list never blocks A — the dial proceeds and the agent leg is originated.
+    expect($result['outcome'])->toBe('dialed');
+    Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/ari/channels?'));
+});
+
 it('never serves a lead that belongs to another client (tenant wall)', function () {
     $clientA = Tenant::factory()->create();
     $clientB = Tenant::factory()->create();
@@ -205,4 +293,76 @@ it('never serves a lead that belongs to another client (tenant wall)', function 
     });
 
     expect($served)->toBeNull();
+});
+
+it('dials an ad-hoc typed number, stashing no lead, carrying the typed number on the agent leg (D3)', function () {
+    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
+    Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    $this->actingAs($agent);
+
+    $result = TenantContext::run($tenant->id, function (): array {
+        $page = new AgentConsole;
+        $result = $page->dialAdhoc('999 765-4321');
+
+        // An ad-hoc call has no lead — nothing is stashed, so wrap-up writes nothing.
+        expect($page->matchedLeadId)->toBeNull()
+            ->and($page->matchedCampaignId)->toBeNull();
+
+        return $result;
+    });
+
+    // The typed number is normalized (spaces/dashes stripped) before it dials.
+    expect($result['outcome'])->toBe('dialed')
+        ->and($result['phone'])->toBe('9997654321');
+
+    Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/ari/channels?')
+        && dialParams($request)['endpoint'] === 'PJSIP/1003'
+        && dialParams($request)['appArgs'] === 'agent,9997654321');
+});
+
+it('blocks an ad-hoc number on the do-not-call list — never dials, audits, writes nothing (O1)', function () {
+    Http::preventStrayRequests(); // a blocked ad-hoc dial must never originate
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, fn () => DncEntry::factory()->create(['phone' => '9997654321']));
+
+    $this->actingAs($agent);
+
+    $result = TenantContext::run($tenant->id, fn (): array => (new AgentConsole)->dialAdhoc('999 765-4321'));
+
+    expect($result['outcome'])->toBe('blocked')
+        ->and($result['phone'])->toBe('9997654321');
+
+    // Audited on the `call` stream as an unmatched (no-lead) block carrying the number.
+    $blocked = TenantContext::run($tenant->id, fn (): ?ActivityLog => ActivityLog::query()
+        ->where('log_name', 'call')->where('event', 'dnc_blocked')->latest('id')->first());
+
+    expect($blocked)->not->toBeNull()
+        ->and($blocked->subject_id)->toBeNull()
+        ->and($blocked->properties['matched'])->toBeFalse()
+        ->and($blocked->properties['phone'])->toBe('9997654321');
+});
+
+it('forbids ad-hoc dialing without the dial-adhoc ability (D3 gate)', function () {
+    Http::preventStrayRequests(); // a forbidden dial must never originate
+
+    $tenant = Tenant::factory()->create();
+    $user = clientUserWithRole($tenant, RoleName::ClientUser->value);
+
+    $this->actingAs($user);
+
+    TenantContext::run($tenant->id, function (): void {
+        expect(Gate::denies('dial-adhoc'))->toBeTrue();
+
+        $page = new AgentConsole;
+
+        expect(fn (): array => $page->dialAdhoc('9997654321'))
+            ->toThrow(AuthorizationException::class);
+    });
 });

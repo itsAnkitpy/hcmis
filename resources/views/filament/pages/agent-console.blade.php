@@ -51,6 +51,17 @@
             x-cloak
             class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
         >
+            {{-- CP-O3 O1: a dial that never rang (blocked by Do-Not-Call, or an
+                 unusable number) drops back here with a short notice. --}}
+            <div
+                x-show="notice"
+                x-cloak
+                class="mb-4 flex items-start justify-between gap-3 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
+            >
+                <span x-text="notice"></span>
+                <button type="button" x-on:click="notice = null" class="font-semibold hover:opacity-70">Dismiss</button>
+            </div>
+
             <label for="campaign" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Campaign</label>
             <select
                 id="campaign"
@@ -107,6 +118,36 @@
                 @endif
             @else
                 <p class="mt-5 text-sm text-gray-500 dark:text-gray-400">Pick a campaign to start dialing.</p>
+            @endif
+
+            {{-- CP-O3 D3: ad-hoc dialing — a one-off typed number, not a served
+                 lead. Rendered only for an agent with the dial-adhoc permission
+                 (the server gate on dialAdhoc() is the real wall). Do-Not-Call
+                 still applies (O1). An ad-hoc call has no lead, so its wrap-up
+                 records nothing. --}}
+            @if ($this->canDialAdhoc())
+                <div class="mt-6 border-t border-gray-200 pt-5 dark:border-white/10">
+                    <label for="adhoc" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Dial a number</label>
+                    <div class="mt-1 flex items-center gap-2">
+                        <input
+                            id="adhoc"
+                            type="tel"
+                            x-model="adhocNumber"
+                            x-on:keydown.enter.prevent="dialAdhoc()"
+                            placeholder="e.g. 9991234567"
+                            class="block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white sm:max-w-xs"
+                        />
+                        <button
+                            type="button"
+                            x-on:click="dialAdhoc()"
+                            :disabled="! adhocNumber.trim()"
+                            class="inline-flex items-center rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            Dial
+                        </button>
+                    </div>
+                    <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">One-off call to a typed number. Do-Not-Call still applies.</p>
+                </div>
             @endif
         </div>
 

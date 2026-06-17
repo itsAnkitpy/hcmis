@@ -148,6 +148,26 @@ class Audit
     }
 
     /**
+     * Record that a dial was blocked before it rang because the number is on the
+     * client's Do-Not-Call list (O1). On the same `call` stream as callWrappedUp,
+     * so B3's future calls-table inherits a clean blocked-dial signal. A served
+     * lead is the subject (and is auto-Closed by the caller); an ad-hoc number has
+     * no lead, so the subject is absent and the normalized number rides along.
+     */
+    public static function dncBlocked(?Lead $lead, ?string $phone = null): void
+    {
+        self::record('call', function (ActivityLogger $log) use ($lead, $phone) {
+            if ($lead !== null) {
+                $log->performedOn($lead);
+            }
+
+            return $log->event('dnc_blocked')
+                ->withProperties(self::withoutNulls(['matched' => $lead !== null, 'phone' => $phone]))
+                ->log('dial blocked: do-not-call');
+        });
+    }
+
+    /**
      * Run a manual audit write so its INSERT…RETURNING survives RLS whatever the
      * connection's tenant GUC currently is:
      *  - with a tenant pinned, write directly (the GUC already matches it, so the

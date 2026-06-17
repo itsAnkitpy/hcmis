@@ -45,5 +45,15 @@ class AppServiceProvider extends ServiceProvider
             'record-call-outcome',
             fn (User $user): bool => $user->operatesGlobally() || $user->hasRole(RoleName::Agent->value),
         );
+
+        // CP-O3 (D3): the ad-hoc dial gate — an agent typing a one-off number
+        // instead of dialing a served lead. Same population as record-call-outcome
+        // for v1 (agent + global staff); selective per-agent grant is deferred TL
+        // tooling (no lead-ownership / assignment layer exists yet). super_admin
+        // passes via Shield's Gate::before.
+        Gate::define(
+            'dial-adhoc',
+            fn (User $user): bool => $user->operatesGlobally() || $user->hasRole(RoleName::Agent->value),
+        );
     }
 }

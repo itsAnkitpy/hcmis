@@ -11,6 +11,7 @@ use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
 use App\Models\Campaign;
 use App\Models\Disposition;
+use App\Models\DncEntry;
 use App\Models\Lead;
 use App\Models\User;
 use App\Support\PhoneNumber;
@@ -171,32 +172,37 @@ class AgentConsole extends Page
 
     /**
      * Dial the served lead (M2 origination, agent-first). The lead is re-resolved
-     * SERVER-SIDE here (never a browser-supplied id), its ids are stashed #[Locked]
-     * exactly like inbound's match, and the AGENT leg is originated carrying the
-     * customer's number as the leg's tag detail — the flow reads it back and dials
-     * the customer (CP-O0 transport). Returns the lead shape for the screen, or
-     * null when there is nothing callable to dial.
+     * SERVER-SIDE here (never a browser-supplied id); its number is checked against
+     * the client's Do-Not-Call list FIRST (O1 — listed numbers never ring). On a
+     * clean number the ids are stashed #[Locked] exactly like inbound's match and
+     * the AGENT leg is originated carrying the customer's number as the leg's tag
+     * detail (the flow reads it back and dials the customer — CP-O0 transport).
      *
-     * @return array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}|null
+     * Returns a small discriminated result the screen branches on:
+     *  - 'dialed'  + lead   : the call was placed (show the call card).
+     *  - 'blocked' + phone  : on the do-not-call list, not dialed (show the notice).
+     *  - 'none'             : nothing callable in the campaign (back to ready).
+     *
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
      */
-    public function dial(): ?array
+    public function dial(): array
     {
         $lead = $this->nextCallableLead();
 
         if ($lead === null) {
-            return null;
+            return ['outcome' => 'none'];
+        }
+
+        if ($this->isDncListed($lead->phone)) {
+            return $this->blockServedLead($lead);
         }
 
         $this->matchedLeadId = $lead->id;
         $this->matchedCampaignId = $lead->campaign_id;
 
-        app(TelephonyProvider::class)->placeCall(
-            config('telephony.agent.endpoint'),
-            'agent',
-            tagDetail: $lead->phone,
-        );
+        $this->originateAgentLeg($lead->phone);
 
-        return $this->presentLead($lead);
+        return ['outcome' => 'dialed', 'lead' => $this->presentLead($lead)];
     }
 
     /**
@@ -210,6 +216,54 @@ class AgentConsole extends Page
         if ($lead !== null) {
             $this->skippedLeadIds[] = $lead->id;
         }
+    }
+
+    /**
+     * Dial a number the agent typed by hand (M1 D3 — ad-hoc). Gated by the
+     * dial-adhoc ability. The number is normalized the same way stored phones are
+     * (PhoneNumber, the lookupLead pattern — no length rule, so lab extensions and
+     * real numbers both dial), checked against the do-not-call list FIRST (O1 — the
+     * same guard a served lead gets), then the agent leg is originated carrying it.
+     *
+     * An ad-hoc call has NO lead, so NOTHING is stashed (resetMatch) — its wrap-up
+     * rides M3's no-match path (completeUnmatched, writes nothing). A do-not-call
+     * number is blocked with only an audit line (no lead to close).
+     *
+     * @return array{outcome: 'dialed'|'blocked', phone: string}|array{outcome: 'invalid'}
+     */
+    public function dialAdhoc(string $number): array
+    {
+        Gate::authorize('dial-adhoc');
+
+        $phone = PhoneNumber::normalize($number);
+
+        if ($phone === null) {
+            return ['outcome' => 'invalid'];
+        }
+
+        // No lead behind a typed number — clear any held match so a later wrap-up
+        // takes the no-match path and writes nothing.
+        $this->resetMatch();
+
+        if ($this->isDncListed($phone)) {
+            Audit::dncBlocked(null, $phone);
+
+            return ['outcome' => 'blocked', 'phone' => $phone];
+        }
+
+        $this->originateAgentLeg($phone);
+
+        return ['outcome' => 'dialed', 'phone' => $phone];
+    }
+
+    /**
+     * Whether the agent may type a one-off number (D3). Drives the blade: the
+     * ad-hoc input only renders for a permitted agent. The server-side gate on
+     * dialAdhoc() is the real wall — this just hides UI they cannot use.
+     */
+    public function canDialAdhoc(): bool
+    {
+        return Gate::allows('dial-adhoc');
     }
 
     /**
@@ -241,6 +295,55 @@ class AgentConsole extends Page
             ->orderBy('attempts')
             ->orderBy('id')
             ->first();
+    }
+
+    /**
+     * Originate the AGENT leg first (agent-first), carrying the customer number as
+     * the leg's tag detail so the flow reads it back and dials the customer
+     * (CP-O0 transport). Shared by the served-lead dial and the ad-hoc dial — the
+     * only difference between them is where the number comes from.
+     */
+    private function originateAgentLeg(string $customerNumber): void
+    {
+        app(TelephonyProvider::class)->placeCall(
+            config('telephony.agent.endpoint'),
+            'agent',
+            tagDetail: $customerNumber,
+        );
+    }
+
+    /**
+     * Whether a (normalized) number is on the agent's own client's Do-Not-Call
+     * list (O1). Runs in the web request's tenant context, so BelongsToTenant +
+     * RLS wall the check to this client — another client's list never blocks here.
+     * Presence is the block: expiry is stored but not enforced (M6 D-M6-8), so the
+     * safe compliance default is to block on any match.
+     */
+    private function isDncListed(string $phone): bool
+    {
+        return DncEntry::query()->where('phone', $phone)->exists();
+    }
+
+    /**
+     * Handle a served lead whose number is on the do-not-call list: never dial it,
+     * drop it out of rotation by closing it (a compliance hard-stop — the one
+     * place a wrap-up auto-Closes, since the lead can never legally be called), and
+     * leave an audit trail. Deliberately does NOT bump attempts or mark a contact —
+     * no call was placed, so faking either would lie to the campaign reports. DNC is
+     * a cross-cutting flag, not a funnel disposition (LeadStatus docblock), so no
+     * disposition is written. Clears the held match so wrap-up has nothing to key on.
+     *
+     * @return array{outcome: 'blocked', phone: string}
+     */
+    private function blockServedLead(Lead $lead): array
+    {
+        $lead->update(['status' => LeadStatus::Closed]);
+
+        Audit::dncBlocked($lead);
+
+        $this->resetMatch();
+
+        return ['outcome' => 'blocked', 'phone' => $lead->phone];
     }
 
     /**
