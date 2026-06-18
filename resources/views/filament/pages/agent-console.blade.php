@@ -162,8 +162,8 @@
             {{-- CP-O3 D3: ad-hoc dialing — a one-off typed number, not a served
                  lead. Rendered only for an agent with the dial-adhoc permission
                  (the server gate on dialAdhoc() is the real wall). Do-Not-Call
-                 still applies (O1). An ad-hoc call has no lead, so its wrap-up
-                 records nothing. --}}
+                 still applies (O1). An ad-hoc call has no lead, so its wrap-up logs
+                 a lead-less call row (B3 D5) when the agent clicks Done. --}}
             @if ($this->canDialAdhoc())
                 <div class="mt-6 border-t border-gray-200 pt-5 dark:border-white/10">
                     <label for="adhoc" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Dial a number</label>
@@ -271,7 +271,8 @@
         {{-- B4 CP3: wrap-up. An *answered* call that ended lands here. Matched
              lead -> pick a disposition + Save (writes last outcome + attempt +
              forward status, audited, behind the narrow record-call-outcome gate).
-             No match -> nothing is recorded, just Done (the miss is logged). --}}
+             No match -> Done logs a lead-less call row (B3) + the miss; the calls
+             row is written either way (D2), so Done must be clicked to log it. --}}
         <div
             x-show="state === 'wrapUp'"
             x-cloak
@@ -344,7 +345,7 @@
                         class="text-lg font-semibold text-gray-950 dark:text-white"
                         x-text="callerNumber || 'Unknown number'"
                     ></p>
-                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No matching lead — nothing recorded</p>
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No matching lead — the call is still logged</p>
 
                     <button
                         type="button"

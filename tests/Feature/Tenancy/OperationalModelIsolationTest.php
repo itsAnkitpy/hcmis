@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\CampaignTemplate;
+use App\Models\Call;
 use App\Models\Callback;
 use App\Models\Campaign;
 use App\Models\Disposition;
@@ -25,6 +26,7 @@ afterEach(function () {
 // (app-layer scope + default-deny) AND have RLS enabled on its table. The
 // dataset proves both for each model in one place.
 dataset('tenantModels', [
+    'call' => [Call::class],
     'callback' => [Callback::class],
     'campaign' => [Campaign::class],
     'disposition' => [Disposition::class],

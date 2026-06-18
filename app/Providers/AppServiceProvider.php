@@ -3,6 +3,8 @@
 namespace App\Providers;
 
 use App\Enums\RoleName;
+use App\Events\Telephony\RecordingReady;
+use App\Listeners\AttachRecordingToCall;
 use App\Listeners\LogAuthenticationActivity;
 use App\Models\User;
 use App\Telephony\AsteriskAriProvider;
@@ -35,6 +37,10 @@ class AppServiceProvider extends ServiceProvider
     {
         // Audit the auth events (M7 D-M7-2): login / logout / failed / reset.
         Event::subscribe(LogAuthenticationActivity::class);
+
+        // B3 CP-B3-2 (D3/D6): attach the merged recording to its calls row by UUID,
+        // off the queue (ShouldQueue) with bounded retry for the merge-vs-wrap-up race.
+        Event::listen(RecordingReady::class, AttachRecordingToCall::class);
 
         // B4 CP3 (decision C): the narrow write-gate for recording a handled
         // call's outcome. Same population as AgentConsole::canAccess() — agent +

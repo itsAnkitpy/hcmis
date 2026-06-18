@@ -32,13 +32,16 @@ interface TelephonyProvider
      * D4 rides the customer's number to the agent's screen this way. Left null,
      * the engine uses its own default and no number is presented.
      *
-     * $tagDetail, when given, rides alongside the tag back to the listener on
-     * the event pipe (a second value next to the tag). Outbound uses it to carry
-     * the customer's number on the agent leg, so the flow can dial the customer
-     * without any web<->listener side channel (CP-O0-proven). Left null, only the
+     * $tagDetails, when given, ride alongside the tag back to the listener on the
+     * event pipe as ordered extra values next to it. Outbound uses them to carry
+     * the customer's number AND the call's tracking number (the B3 UUID) on the
+     * agent leg, so the flow can dial the customer and key the recording without
+     * any web<->listener side channel (CP-O0-proven comma-split). Empty, only the
      * bare tag rides.
+     *
+     * @param  array<int, string>  $tagDetails
      */
-    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30, ?string $tagDetail = null): string;
+    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30, array $tagDetails = []): string;
 
     /** Pick up a ringing leg. */
     public function answer(string $legId): void;

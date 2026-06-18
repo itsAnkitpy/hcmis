@@ -15,6 +15,7 @@ use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
 uses(RefreshDatabase::class);
@@ -255,12 +256,14 @@ it('dials a specific due callback, stashes its lead, originates, and marks it do
         ->and($page->matchedLeadId)->toBe($leadId)         // stashed like a served lead
         ->and($page->matchedCampaignId)->toBe($campaignId);
 
-    // The specific lead's number is originated on the agent leg (the C-transport).
+    // The specific lead's number is originated on the agent leg (the C-transport),
+    // with the call's UUID tracking number as the third arg (CP-B3-2 D3).
     Http::assertSent(function (Request $request): bool {
         parse_str(parse_url($request->url(), PHP_URL_QUERY) ?: '', $params);
+        [$tag, $number, $uuid] = array_pad(explode(',', $params['appArgs'] ?? ''), 3, null);
 
         return str_contains($request->url(), '/ari/channels?')
-            && ($params['appArgs'] ?? null) === 'agent,9991234567';
+            && $tag === 'agent' && $number === '9991234567' && Str::isUuid((string) $uuid);
     });
 
     // Dialing consumed the callback — it is now done (off the due-list).

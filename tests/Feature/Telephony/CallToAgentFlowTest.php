@@ -214,6 +214,40 @@ it('dials the customer when the agent leg arrives carrying the number, then join
     );
 });
 
+it('threads the injected UUID (args[2]) as the recording callId so RecordingReady carries our correlation id (CP-B3-2 D3)', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+
+    $session = new RecordingSession('customer-leg', 'call-1', 'snoop-said', 'snoop-heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('placeCall')->once()
+        ->with('PJSIP/1002', 'outbound', '1800555000')
+        ->andReturn('customer-leg');
+    $telephony->shouldReceive('join')->once()->andReturn('conv-1');
+    $telephony->shouldReceive('startRecording')->once()->andReturn($session);
+    $telephony->shouldReceive('stopRecording')->once()->with($session);
+    $telephony->shouldReceive('hangup')->once()->with('agent-leg');
+    $telephony->shouldReceive('endConversation')->once()->with('conv-1');
+
+    $flow = new CallToAgentFlow($telephony);
+
+    // The agent leg now carries the customer number AND the call's UUID (args[2]).
+    $flow->handle(stasisStart('agent-leg', ['agent', '1002', 'the-uuid']));
+    $flow->handle(stasisStart('customer-leg', ['outbound']));
+    $flow->handle(channelDestroyed('customer-leg'));
+
+    $flow->handle(recordingFinished('call-1-said'));
+    $flow->handle(recordingFinished('call-1-heard'));
+
+    // The merge (and thus RecordingReady) is keyed by the UUID, not the leg id —
+    // that is what lets the queued listener find the calls row by correlation_id.
+    Queue::assertPushed(
+        MergeCallRecordingJob::class,
+        fn (MergeCallRecordingJob $job): bool => $job->callId === 'the-uuid' && $job->recordingName === 'call-1',
+    );
+});
+
 it('does not join until the outbound customer actually answers', function () {
     config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
     config()->set('telephony.outbound.caller_id', null);

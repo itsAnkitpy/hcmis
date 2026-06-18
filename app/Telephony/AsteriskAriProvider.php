@@ -18,15 +18,16 @@ use Illuminate\Support\Facades\Http;
  */
 class AsteriskAriProvider implements TelephonyProvider
 {
-    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30, ?string $tagDetail = null): string
+    public function placeCall(string $destination, string $tag, ?string $callerId = null, int $timeoutSeconds = 30, array $tagDetails = []): string
     {
         $params = [
             'endpoint' => $destination,
             'app' => config('telephony.asterisk.app'),
             // ARI comma-splits appArgs into the StasisStart.args array (CP-O0):
-            // "agent,1002" arrives as ["agent", "1002"], so the tag detail rides
-            // back to the listener as args[1] with no side channel.
-            'appArgs' => $tagDetail !== null ? "{$tag},{$tagDetail}" : $tag,
+            // "agent,1002,<uuid>" arrives as ["agent", "1002", "<uuid>"], so the tag
+            // and each ordered detail ride back to the listener as args[0..n] with no
+            // side channel.
+            'appArgs' => implode(',', [$tag, ...$tagDetails]),
             'timeout' => $timeoutSeconds,
         ];
 

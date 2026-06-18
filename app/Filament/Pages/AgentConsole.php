@@ -7,9 +7,12 @@ namespace App\Filament\Pages;
 use App\Actions\AdvanceLeadStatus;
 use App\Audit\Audit;
 use App\Enums\CallbackStatus;
+use App\Enums\CallDirection;
+use App\Enums\CallOutcome;
 use App\Enums\LeadStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
+use App\Models\Call;
 use App\Models\Callback;
 use App\Models\Campaign;
 use App\Models\Disposition;
@@ -24,6 +27,7 @@ use Filament\Support\Icons\Heroicon;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Str;
 use Livewire\Attributes\Locked;
 
 /**
@@ -54,6 +58,34 @@ class AgentConsole extends Page
 
     #[Locked]
     public ?int $matchedCampaignId = null;
+
+    /**
+     * The call's direction + the other party's number, held SERVER-SIDE across the
+     * call so the B3 wrap-up can stamp the `calls` row (D2). Both are set on the
+     * server, never from the browser (#[Locked]): direction flips to Outbound only
+     * in originateAgentLeg (the one shared dial path) and defaults to Inbound, so
+     * anything that arrives — including an anonymous caller with no lookupLead — is
+     * correctly inbound. callPartyNumber is the customer's number (dialled or
+     * calling); null for an anonymous inbound caller. Both reset after every wrap-up.
+     */
+    #[Locked]
+    public CallDirection $callDirection = CallDirection::Inbound;
+
+    #[Locked]
+    public ?string $callPartyNumber = null;
+
+    /**
+     * The call's tracking number (B3 D3) — a UUID we own, generated at dial and
+     * held SERVER-SIDE across the call (#[Locked], the matchedLeadId pattern). It
+     * rides the originate as an ordered tag arg so the listener threads it to the
+     * recording (CP-B3-2); the wrap-up stamps the SAME id onto the `calls` row as
+     * correlation_id, so the queued RecordingReady listener can find the row and
+     * attach the recording by UUID — no fuzzy time/number matching, provider-agnostic.
+     * Set only on the outbound dial path (originateAgentLeg); null for inbound v1
+     * (the customer originates — the SIP-header spike is trunk-era, O1). Reset per call.
+     */
+    #[Locked]
+    public ?string $callCorrelationId = null;
 
     /**
      * The campaign the agent is working (outbound preview — O4). A plain agent
@@ -127,6 +159,10 @@ class AgentConsole extends Page
         if ($phone === null) {
             return null;
         }
+
+        // Inbound: the caller's number rides the B3 row (direction stays Inbound,
+        // reset above). A matched-or-not call still records the calling number.
+        $this->callPartyNumber = $phone;
 
         $lead = Lead::query()
             ->with(['campaign', 'lastDisposition'])
@@ -305,8 +341,9 @@ class AgentConsole extends Page
      * same guard a served lead gets), then the agent leg is originated carrying it.
      *
      * An ad-hoc call has NO lead, so NOTHING is stashed (resetMatch) — its wrap-up
-     * rides M3's no-match path (completeUnmatched, writes nothing). A do-not-call
-     * number is blocked with only an audit line (no lead to close).
+     * rides the no-match path (completeUnmatched), which writes a lead-less calls
+     * row (B3 D5). A do-not-call number is blocked with only an audit line (no lead
+     * to close) — and so writes no calls row.
      *
      * @return array{outcome: 'dialed'|'blocked', phone: string}|array{outcome: 'invalid'}
      */
@@ -388,10 +425,18 @@ class AgentConsole extends Page
      */
     private function originateAgentLeg(string $customerNumber): void
     {
+        // The single outbound dial path (served lead, callback, ad-hoc all route
+        // here) — so it's the one place that stamps the B3 call as Outbound,
+        // records the dialled number, and mints the call's tracking number (D3)
+        // for the wrap-up row + the recording attach.
+        $this->callDirection = CallDirection::Outbound;
+        $this->callPartyNumber = $customerNumber;
+        $this->callCorrelationId = (string) Str::uuid();
+
         app(TelephonyProvider::class)->placeCall(
             config('telephony.agent.endpoint'),
             'agent',
-            tagDetail: $customerNumber,
+            tagDetails: [$customerNumber, $this->callCorrelationId],
         );
     }
 
@@ -545,6 +590,10 @@ class AgentConsole extends Page
         $callbackAt = $isCallback ? $this->validateCallbackSchedule($scheduledAt) : null;
 
         DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes): void {
+            // B3 D2: the calls row is the PRIMARY write; the lead update + the
+            // call.wrapped_up audit are now side-effects of it, same transaction.
+            $this->recordCall($lead, $disposition);
+
             $lead->update([
                 'last_disposition_id' => $disposition->id,
                 'attempts' => $lead->attempts + 1,
@@ -588,21 +637,76 @@ class AgentConsole extends Page
     }
 
     /**
-     * The no-match wrap-up (decision Q6): close the call out writing nothing to any
-     * lead, but log the miss so B3 can measure how often callers arrive unknown.
+     * The no-match / ad-hoc wrap-up: write a lead-less calls row (B3 D2/D5) and log
+     * the miss (so reporting can measure how often callers arrive unknown). No lead
+     * is touched. outcome is null (no disposition picked) — the trunk-era watcher
+     * fills the real line-result later. A DNC-blocked dial never reaches here.
      */
     public function completeUnmatched(): void
     {
         Gate::authorize('record-call-outcome');
 
-        Audit::callWrappedUp(null);
+        // B3 D2/D5: an ad-hoc / no-match call is still a real call — write a
+        // lead-less row (no disposition → outcome null), with the audit miss as a
+        // side-effect, one transaction. A DNC-blocked dial never reaches here, so
+        // it correctly writes no row.
+        DB::transaction(function (): void {
+            $this->recordCall(null, null);
+
+            Audit::callWrappedUp(null);
+        });
 
         $this->resetMatch();
+    }
+
+    /**
+     * Write the B3 calls-table row — the single writer (D2). Shared by the matched
+     * wrap-up and the no-match/ad-hoc path. `agent_id` is the wrapping agent (web
+     * auth); tenant_id is auto-stamped by BelongsToTenant. `ended_at` is COARSE in
+     * v1 (= now, D4); precise timing + the recording arrive later via the listener.
+     */
+    private function recordCall(?Lead $lead, ?Disposition $disposition): void
+    {
+        $isOutbound = $this->callDirection === CallDirection::Outbound;
+        $ourNumber = $isOutbound ? config('telephony.outbound.caller_id') : null;
+
+        Call::create([
+            'direction' => $this->callDirection,
+            'from_number' => $isOutbound ? $ourNumber : $this->callPartyNumber,
+            'to_number' => $isOutbound ? $this->callPartyNumber : $ourNumber,
+            'lead_id' => $lead?->id,
+            'campaign_id' => $lead?->campaign_id,
+            'agent_id' => auth()->id(),
+            'disposition_id' => $disposition?->id,
+            'outcome' => $this->outcomeFor($disposition),
+            'correlation_id' => $this->callCorrelationId,
+            'ended_at' => now(),
+        ]);
+    }
+
+    /**
+     * The v1 (provisional) outcome — see the CallOutcome staging note. A contact
+     * disposition means a human was reached (answered); a non-contact one (No
+     * answer / Voicemail) means no_answer; no disposition (ad-hoc) leaves it null
+     * for the trunk-era watcher to fill with the real line-result. The browser
+     * `answered` flag is deliberately NOT used (it tracks the auto-answered agent
+     * leg and is always true at wrap-up).
+     */
+    private function outcomeFor(?Disposition $disposition): ?CallOutcome
+    {
+        if ($disposition === null) {
+            return null;
+        }
+
+        return $disposition->is_contact ? CallOutcome::Answered : CallOutcome::NoAnswer;
     }
 
     private function resetMatch(): void
     {
         $this->matchedLeadId = null;
         $this->matchedCampaignId = null;
+        $this->callDirection = CallDirection::Inbound;
+        $this->callPartyNumber = null;
+        $this->callCorrelationId = null;
     }
 }

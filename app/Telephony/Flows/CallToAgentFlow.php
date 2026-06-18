@@ -48,6 +48,16 @@ class CallToAgentFlow
 
     private ?string $conversationId = null;
 
+    /**
+     * The call's tracking number (B3 D3): the UUID the web console minted at dial
+     * and rode in as the agent leg's third arg. Used as the recording's callId so
+     * RecordingReady carries our UUID (= the calls row's correlation_id), letting
+     * the queued listener attach the recording by UUID. Null on inbound (no UUID
+     * injected v1, O1) — the recording then falls back to the customer leg id,
+     * harmless since inbound recording-attach is trunk-era.
+     */
+    private ?string $correlationId = null;
+
     private ?RecordingSession $recording = null;
 
     /**
@@ -91,8 +101,10 @@ class CallToAgentFlow
      * tagged them with:
      *   ['snoop']            -> our recording taps; infrastructure, ignored.
      *   ['agent']            -> inbound agent pickup (the agent leg we placed).
-     *   ['agent', <number>]  -> outbound entry: the agent leg, carrying the
-     *                           customer number to dial next (agent-first, CP-O0).
+     *   ['agent', <number>, <uuid?>]
+     *                        -> outbound entry: the agent leg, carrying the customer
+     *                           number to dial next (agent-first, CP-O0) and the
+     *                           call's tracking number (the B3 UUID, CP-B3-2 D3).
      *   ['outbound']         -> outbound customer pickup (the customer leg we placed).
      *   []                   -> an untagged outside caller (inbound entry).
      *
@@ -116,9 +128,11 @@ class CallToAgentFlow
         }
 
         // Outbound entry (agent-first): the agent's own leg arrives first carrying
-        // the customer's number as a second arg, so we dial the customer now.
-        if (is_array($args) && count($args) === 2 && $args[0] === 'agent' && $this->state === CallFlowState::Idle) {
-            $this->beginOutboundCall($legId, (string) $args[1]);
+        // the customer's number as a second arg (and, CP-B3-2, the call's UUID as a
+        // third), so we dial the customer now. >= 2 tolerates both the pre-B3 two-arg
+        // shape and the three-arg one — the UUID is optional, defaulting to null.
+        if (is_array($args) && count($args) >= 2 && $args[0] === 'agent' && $this->state === CallFlowState::Idle) {
+            $this->beginOutboundCall($legId, (string) $args[1], isset($args[2]) ? (string) $args[2] : null);
 
             return;
         }
@@ -171,9 +185,10 @@ class CallToAgentFlow
      * bare number rides as a clean arg; the engine-specific endpoint prefix and
      * the single outbound caller-ID (O2) are read from config here.
      */
-    private function beginOutboundCall(string $agentLegId, string $customerNumber): void
+    private function beginOutboundCall(string $agentLegId, string $customerNumber, ?string $correlationId = null): void
     {
         $this->agentLegId = $agentLegId;
+        $this->correlationId = $correlationId;
         $this->callerLegId = $this->telephony->placeCall(
             config('telephony.outbound.dial_prefix').$customerNumber,
             'outbound',
@@ -251,7 +266,11 @@ class CallToAgentFlow
     private function endCall(string $endedLegId): void
     {
         $recording = $this->recording;
-        $callId = (string) $this->callerLegId;
+        // The recording's correlation token: our UUID when the web injected one
+        // (outbound, CP-B3-2 — so RecordingReady carries the calls row's
+        // correlation_id), else the customer leg id (inbound v1 — harmless, its
+        // attach is trunk-era).
+        $callId = $this->correlationId ?? (string) $this->callerLegId;
         $conversationId = (string) $this->conversationId;
         $survivorLegId = (string) ($endedLegId === $this->callerLegId ? $this->agentLegId : $this->callerLegId);
 
@@ -321,6 +340,7 @@ class CallToAgentFlow
         $this->callerLegId = null;
         $this->agentLegId = null;
         $this->conversationId = null;
+        $this->correlationId = null;
         $this->recording = null;
     }
 }

@@ -15,6 +15,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -77,11 +78,16 @@ it('serves the next callable lead, stashes its locked ids at dial, and originate
     expect($page->matchedLeadId)->toBe($leadId)
         ->and($page->matchedCampaignId)->toBe($campaignId);
 
-    // The agent leg was originated carrying the customer number as the tag detail
-    // (appArgs "agent,<number>" — the CP-O0 transport).
-    Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/ari/channels?')
-        && dialParams($request)['endpoint'] === 'PJSIP/1003'
-        && dialParams($request)['appArgs'] === 'agent,9991234567');
+    // The agent leg was originated carrying the customer number AND the call's UUID
+    // tracking number (appArgs "agent,<number>,<uuid>" — the CP-O0 transport + the
+    // CP-B3-2 D3 correlation seam).
+    Http::assertSent(function (Request $request): bool {
+        [$tag, $number, $uuid] = array_pad(explode(',', dialParams($request)['appArgs']), 3, null);
+
+        return str_contains($request->url(), '/ari/channels?')
+            && dialParams($request)['endpoint'] === 'PJSIP/1003'
+            && $tag === 'agent' && $number === '9991234567' && Str::isUuid((string) $uuid);
+    });
 });
 
 it('writes a no-answer (non-contact) outcome on an unanswered outbound — attempts +1, status forward, audited (CP-O2 / D5)', function () {
@@ -319,9 +325,13 @@ it('dials an ad-hoc typed number, stashing no lead, carrying the typed number on
     expect($result['outcome'])->toBe('dialed')
         ->and($result['phone'])->toBe('9997654321');
 
-    Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/ari/channels?')
-        && dialParams($request)['endpoint'] === 'PJSIP/1003'
-        && dialParams($request)['appArgs'] === 'agent,9997654321');
+    Http::assertSent(function (Request $request): bool {
+        [$tag, $number, $uuid] = array_pad(explode(',', dialParams($request)['appArgs']), 3, null);
+
+        return str_contains($request->url(), '/ari/channels?')
+            && dialParams($request)['endpoint'] === 'PJSIP/1003'
+            && $tag === 'agent' && $number === '9997654321' && Str::isUuid((string) $uuid);
+    });
 });
 
 it('blocks an ad-hoc number on the do-not-call list — never dials, audits, writes nothing (O1)', function () {
