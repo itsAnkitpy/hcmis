@@ -2,6 +2,7 @@
 
 namespace App\Audit;
 
+use App\Models\Callback;
 use App\Models\Disposition;
 use App\Models\Lead;
 use App\Models\User;
@@ -165,6 +166,25 @@ class Audit
                 ->withProperties(self::withoutNulls(['matched' => $lead !== null, 'phone' => $phone]))
                 ->log('dial blocked: do-not-call');
         });
+    }
+
+    /**
+     * Record that an agent grabbed a pooled (unowned) callback, claiming ownership
+     * (B2.0 PC-2). On the model's own `callback` stream — alongside its create /
+     * update auto-logs — because the grab is a query-level atomic update that skips
+     * Eloquent events BY DESIGN (the single statement is what makes the two-agents-
+     * one-row race safe), and so would otherwise leave no trace of who took a shared
+     * callback, when. The causer is the grabbing agent from web auth (the claim
+     * always runs in their request, so the default resolver stamps it). The lead id
+     * rides along so the future supervisor view can name the customer without a join.
+     */
+    public static function callbackGrabbed(Callback $callback): void
+    {
+        self::record('callback', fn (ActivityLogger $log) => $log
+            ->performedOn($callback)
+            ->event('grabbed')
+            ->withProperties(self::withoutNulls(['lead_id' => $callback->lead_id]))
+            ->log('pooled callback grabbed'));
     }
 
     /**

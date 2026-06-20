@@ -233,15 +233,73 @@ class AgentConsole extends Page
             ->where('scheduled_at', '<=', now())
             ->orderBy('scheduled_at')
             ->get()
-            ->map(fn (Callback $callback): array => [
-                'id' => $callback->id,
-                'leadName' => $callback->lead?->name,
-                'phone' => $callback->lead?->phone ?? '',
-                'campaign' => $callback->campaign?->name,
-                'scheduledAtIso' => $callback->scheduled_at->toIso8601String(),
-                'notes' => $callback->notes,
-            ])
+            ->map(fn (Callback $callback): array => $this->presentCallback($callback))
             ->all();
+    }
+
+    /**
+     * The POOLED due callbacks (B2.0): unowned (owner_agent_id null), still
+     * pending, and now due — the "anyone can take this" notes any free agent in
+     * the client may grab. Cross-tenant walled by RLS (the same wall dueCallbacks
+     * leans on); the unowned filter is what makes them shared rather than sticky.
+     * The existing (tenant_id, owner_agent_id, status, scheduled_at) index serves
+     * this owner-IS-NULL lookup, so no new index is needed. Soonest first.
+     *
+     * A grab (claimCallback) stamps the owner, so a grabbed callback leaves this
+     * list and appears in the grabber's own dueCallbacks() — same shape, so the
+     * screen renders both panels identically.
+     *
+     * @return array<int, array{id: int, leadName: ?string, phone: string, campaign: ?string, scheduledAtIso: string, notes: ?string}>
+     */
+    public function pooledCallbacks(): array
+    {
+        return Callback::query()
+            ->with(['lead', 'campaign'])
+            ->whereNull('owner_agent_id')
+            ->where('status', CallbackStatus::Pending)
+            ->where('scheduled_at', '<=', now())
+            ->orderBy('scheduled_at')
+            ->get()
+            ->map(fn (Callback $callback): array => $this->presentCallback($callback))
+            ->all();
+    }
+
+    /**
+     * Grab a pooled (unowned) callback so it becomes the calling agent's own
+     * (B2.0 PC-2). The whole point is the small race: two free agents may click
+     * Grab on the same row at the same instant, and exactly one must win.
+     *
+     * It's a single atomic conditional update — "set owner = me WHERE id = X AND
+     * owner is still null AND still pending" — so the database, not app code,
+     * resolves the race: the winner's update touches one row, the loser's touches
+     * zero. RLS walls the update to the agent's own client, so a cross-tenant id
+     * also touches zero rows and reads as 'taken'. (This is database-row
+     * concurrency, separate from the call-handling concurrency of B2.1.)
+     *
+     * On a win the callback now sits in the agent's own due-list and dials +
+     * completes through the existing dialCallback path, untouched. On a loss the
+     * screen refreshes the pooled list and shows an "already taken" notice.
+     *
+     * A win also logs a `callback.grabbed` audit line (who grabbed it, when) —
+     * recorded explicitly because the atomic query-level update skips the model
+     * events the create/update auto-logs ride on. Only a real claim (one row
+     * touched) is audited; a lost or cross-tenant race writes nothing.
+     *
+     * @return array{outcome: 'claimed'|'taken'}
+     */
+    public function claimCallback(int $callbackId): array
+    {
+        $claimed = Callback::query()
+            ->whereKey($callbackId)
+            ->whereNull('owner_agent_id')
+            ->where('status', CallbackStatus::Pending)
+            ->update(['owner_agent_id' => auth()->id()]);
+
+        if ($claimed === 1) {
+            Audit::callbackGrabbed(Callback::findOrFail($callbackId));
+        }
+
+        return ['outcome' => $claimed === 1 ? 'claimed' : 'taken'];
     }
 
     /**
@@ -515,6 +573,25 @@ class AgentConsole extends Page
     }
 
     /**
+     * The small display shape a callback row shows — shared by the agent's own
+     * due-list (dueCallbacks) and the pooled list (pooledCallbacks), so both
+     * panels render identically (the presentLead pattern, for callbacks).
+     *
+     * @return array{id: int, leadName: ?string, phone: string, campaign: ?string, scheduledAtIso: string, notes: ?string}
+     */
+    private function presentCallback(Callback $callback): array
+    {
+        return [
+            'id' => $callback->id,
+            'leadName' => $callback->lead?->name,
+            'phone' => $callback->lead?->phone ?? '',
+            'campaign' => $callback->campaign?->name,
+            'scheduledAtIso' => $callback->scheduled_at->toIso8601String(),
+            'notes' => $callback->notes,
+        ];
+    }
+
+    /**
      * The dispositions the agent can pick in wrap-up: the matched lead's campaign
      * set plus the tenant-wide ones (reuses the C1/M4.D query, RLS-scoped). Driven
      * by the server-held campaign id, never a browser value.
@@ -564,8 +641,13 @@ class AgentConsole extends Page
      * the row schedules the follow-up. The two writes share one transaction so a
      * lead is never advanced without its callback. scheduled_at is validated
      * (present + future) before either write.
+     *
+     * $poolCallback is the B2.0 capture choice (PC-1): false (default) keeps the
+     * sticky v1 shape — owned by the wrapping agent; true creates it UNOWNED
+     * (owner null) so it lands in the pooled list any free agent can grab. It only
+     * applies to a CALLBACK outcome; it's ignored otherwise.
      */
-    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null): void
+    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null, bool $poolCallback = false): void
     {
         Gate::authorize('record-call-outcome');
 
@@ -589,7 +671,7 @@ class AgentConsole extends Page
         $isCallback = $disposition->code === Disposition::CALLBACK_CODE;
         $callbackAt = $isCallback ? $this->validateCallbackSchedule($scheduledAt) : null;
 
-        DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes): void {
+        DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes, $poolCallback): void {
             // B3 D2: the calls row is the PRIMARY write; the lead update + the
             // call.wrapped_up audit are now side-effects of it, same transaction.
             $this->recordCall($lead, $disposition);
@@ -602,13 +684,14 @@ class AgentConsole extends Page
 
             Audit::callWrappedUp($lead, $disposition);
 
-            // Sticky v1: the callback is owned by the agent wrapping up the call.
+            // B2.0 PC-1: pooled = unowned (any agent grabs it); sticky = owned by
+            // the agent wrapping up. The nullable owner column carries both shapes.
             if ($isCallback) {
                 Callback::create([
                     'lead_id' => $lead->id,
                     'campaign_id' => $lead->campaign_id,
                     'scheduled_at' => $callbackAt,
-                    'owner_agent_id' => auth()->id(),
+                    'owner_agent_id' => $poolCallback ? null : auth()->id(),
                     'status' => CallbackStatus::Pending,
                     'notes' => filled($notes) ? $notes : null,
                 ]);

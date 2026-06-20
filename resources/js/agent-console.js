@@ -48,6 +48,10 @@ const agentConsole = (config) => ({
     callbackAt: '',
     callbackNotes: '',
 
+    // B2.0 PC-1: who can take the callback being captured — false = sticky to me
+    // (default), true = pooled (any free agent can grab it). Sent to saveWrapUp.
+    callbackPooled: false,
+
     // Outbound: true between clicking Dial and the call ending, so the agent
     // leg's inbound INVITE is auto-answered instead of presented as a ring.
     outboundDialing: false,
@@ -250,6 +254,30 @@ const agentConsole = (config) => ({
         }
     },
 
+    /**
+     * B2.0: grab a pooled (unowned) callback so it becomes mine. The page resolves
+     * the small race atomically (claimCallback) — 'claimed' means I won, and the
+     * $wire round-trip re-renders both panels so the row moves from the pooled list
+     * into "My due callbacks"; 'taken' means another agent won first, so show a
+     * short notice (the morph has already dropped the row from the pooled list).
+     * Only acts from 'ready' — grabbing is a between-calls action.
+     */
+    async grabCallback(id) {
+        if (this.state !== 'ready' || this.outboundDialing) {
+            return;
+        }
+
+        try {
+            const result = await this.$wire.claimCallback(id);
+
+            if (result?.outcome === 'taken') {
+                this.notice = 'That callback was just taken by another agent.';
+            }
+        } catch (e) {
+            // A failed grab leaves the row in the pool for the next refresh.
+        }
+    },
+
     /** Outbound: pass the served lead without calling; the page advances the cursor. */
     async skip() {
         if (this.state !== 'ready' || this.outboundDialing) {
@@ -322,6 +350,7 @@ const agentConsole = (config) => ({
                 Number(this.selectedDisposition),
                 scheduledAt,
                 isCallback ? (this.callbackNotes || null) : null,
+                isCallback ? this.callbackPooled : false,
             );
         } finally {
             this.saving = false;
@@ -359,6 +388,7 @@ const agentConsole = (config) => ({
         this.callbackDispositionIds = [];
         this.callbackAt = '';
         this.callbackNotes = '';
+        this.callbackPooled = false;
         this.outboundDialing = false;
         this.notice = null;
     },

@@ -101,6 +101,55 @@
                 </div>
             @endif
 
+            {{-- B2.0 pooled callbacks: "call me back" notes any free agent in the
+                 client can take (the row has no owner). Grab claims it atomically
+                 (claimCallback) — on a win it moves into "My due callbacks" above.
+                 Light auto-refresh (wire:poll.visible) keeps the list live: a row
+                 another agent grabs drops off here, and a freshly pooled one
+                 appears — but ONLY while this panel is on screen. During a call the
+                 whole ready block is hidden, so the poll pauses and never disturbs
+                 a live call (the reason it polls on .visible, not always). Rendered
+                 even when empty so the poll keeps running for an idle agent. --}}
+            @php($pooledCallbacks = $this->pooledCallbacks())
+            <div
+                wire:poll.15s.visible
+                class="mb-6 rounded-lg border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-500/20 dark:bg-indigo-500/10"
+            >
+                <p class="text-sm font-semibold text-indigo-800 dark:text-indigo-300">Pooled callbacks</p>
+                @if (count($pooledCallbacks) > 0)
+                    <ul class="mt-3 flex flex-col gap-3">
+                        @foreach ($pooledCallbacks as $callback)
+                            <li class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <p class="text-sm font-medium text-gray-950 dark:text-white">
+                                        {{ $callback['leadName'] ?? 'Unnamed lead' }}
+                                        <span class="font-normal text-gray-500 dark:text-gray-400">· {{ $callback['phone'] }}</span>
+                                    </p>
+                                    <div class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-gray-500 dark:text-gray-400">
+                                        @if ($callback['campaign'])
+                                            <span>{{ $callback['campaign'] }}</span>
+                                        @endif
+                                        <span>Due <span x-text="formatDue(@js($callback['scheduledAtIso']))"></span></span>
+                                        @if ($callback['notes'])
+                                            <span class="italic">“{{ $callback['notes'] }}”</span>
+                                        @endif
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    x-on:click="grabCallback({{ $callback['id'] }})"
+                                    class="inline-flex items-center self-start rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 sm:self-auto"
+                                >
+                                    Grab
+                                </button>
+                            </li>
+                        @endforeach
+                    </ul>
+                @else
+                    <p class="mt-1 text-xs text-indigo-700/70 dark:text-indigo-300/60">No callbacks waiting in the pool.</p>
+                @endif
+            </div>
+
             <label for="campaign" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Campaign</label>
             <select
                 id="campaign"
@@ -334,6 +383,21 @@
                                 class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
                             ></textarea>
                         </div>
+
+                        {{-- B2.0 PC-1: who can take this callback. Off (default) keeps
+                             it for me; on lets any free agent grab it from the pool. --}}
+                        <label for="callbackPooled" class="flex items-start gap-2">
+                            <input
+                                id="callbackPooled"
+                                type="checkbox"
+                                x-model="callbackPooled"
+                                class="mt-0.5 rounded border-gray-300 text-primary-600 shadow-sm dark:border-white/10 dark:bg-gray-800"
+                            />
+                            <span class="text-sm text-gray-700 dark:text-gray-300">
+                                Let any free agent take this callback
+                                <span class="block text-xs text-gray-400">Leave off to keep it for yourself.</span>
+                            </span>
+                        </label>
                     </div>
                 </div>
             </template>
