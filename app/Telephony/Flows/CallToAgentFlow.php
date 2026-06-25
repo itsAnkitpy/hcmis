@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace App\Telephony\Flows;
 
-use App\Jobs\MergeCallRecordingJob;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * The one call-to-agent flow B4 v1 draws properly, generalised to both
@@ -35,8 +35,10 @@ use Illuminate\Support\Facades\Log;
  * originate timeout, so an unanswered leg simply ends and we see its
  * ChannelDestroyed while still ringing — that is the no-answer signal.
  *
- * One call at a time (v1): a second caller arriving mid-call is announced by the
- * listener's translate() but is not driven here. Concurrency is B2.
+ * One call per handler (B2.1): the switchboard makes a fresh handler for each new
+ * call and routes each event to the right one, so many calls run side by side. This
+ * handler is disposed at teardown — never reused — and registers/forgets the legs it
+ * places, and hands its pending recording merge, through the switchboard (FD-1/2/4).
  */
 class CallToAgentFlow
 {
@@ -58,19 +60,28 @@ class CallToAgentFlow
      */
     private ?string $correlationId = null;
 
+    /**
+     * The call's ticket number (the per-call id, FD-3): a unique id stamped on every
+     * call so many interleaved calls are followable in the log, and — later — the
+     * handle the durable waiting-line points at (FD-7). Outbound REUSES the web's
+     * tracking number (the UUID above); inbound MINTS a fresh one. Kept SEPARATE from
+     * the recording's callId on purpose: inbound recording-attach still skips on a
+     * non-UUID leg id (it is trunk-era), so the ticket must not leak into that path.
+     */
+    private ?string $ticketNumber = null;
+
     private ?RecordingSession $recording = null;
 
-    /**
-     * Recordings whose merge is waiting on Asterisk to confirm both files
-     * finished. Kept off the state machine so the next call is never blocked and
-     * we need no timer: each RecordingFinished event ticks an entry, and the
-     * merge fires only once both sides are in.
-     *
-     * @var array<string, array{callId: string, recording: RecordingSession, finished: array<string, true>}>
-     */
-    private array $pendingMerges = [];
+    public function __construct(
+        private readonly TelephonyProvider $telephony,
+        private readonly HandlerRegistry $registry,
+    ) {}
 
-    public function __construct(private readonly TelephonyProvider $telephony) {}
+    /** This call's ticket number (FD-3): the log tag, and later the durable waiting-line handle. */
+    public function ticketNumber(): ?string
+    {
+        return $this->ticketNumber;
+    }
 
     /**
      * Feed the flow one raw engine event. It never throws on a refused verb — a
@@ -86,7 +97,6 @@ class CallToAgentFlow
             match ($event['type'] ?? '') {
                 'StasisStart' => $this->onArrival($event),
                 'ChannelDestroyed' => $this->onLegEnded($event),
-                'RecordingFinished' => $this->onRecordingFinished($event),
                 default => null,
             };
         } catch (AriConnectionLost $exception) {
@@ -162,6 +172,7 @@ class CallToAgentFlow
     private function beginCall(string $callerLegId, ?string $callerNumber = null): void
     {
         $this->callerLegId = $callerLegId;
+        $this->ticketNumber = (string) Str::uuid();   // inbound mints a fresh ticket (FD-3)
 
         $this->telephony->answer($callerLegId);
         $this->agentLegId = $this->telephony->placeCall(
@@ -169,9 +180,11 @@ class CallToAgentFlow
             'agent',
             $callerNumber,
         );
+        $this->registry->registerLeg($this->agentLegId, $this);   // the leg we placed is ours (FD-2)
         $this->state = CallFlowState::RingingAgent;
 
         Log::info('Inbound call: caller answered, ringing the agent.', [
+            'ticket' => $this->ticketNumber,
             'caller' => $callerLegId,
             'callerNumber' => $callerNumber,
             'agent' => $this->agentLegId,
@@ -189,14 +202,19 @@ class CallToAgentFlow
     {
         $this->agentLegId = $agentLegId;
         $this->correlationId = $correlationId;
+        // Outbound reuses the web's tracking number as the ticket (FD-3); if a pre-B3
+        // two-arg leg carried none, mint one so every call still has a unique ticket.
+        $this->ticketNumber = $correlationId ?? (string) Str::uuid();
         $this->callerLegId = $this->telephony->placeCall(
             config('telephony.outbound.dial_prefix').$customerNumber,
             'outbound',
             config('telephony.outbound.caller_id'),
         );
+        $this->registry->registerLeg($this->callerLegId, $this);   // the leg we placed is ours (FD-2)
         $this->state = CallFlowState::RingingCustomer;
 
         Log::info('Outbound call: agent connected, ringing the customer.', [
+            'ticket' => $this->ticketNumber,
             'agent' => $agentLegId,
             'customer' => $this->callerLegId,
             'customerNumber' => $customerNumber,
@@ -213,7 +231,19 @@ class CallToAgentFlow
         );
         $this->state = CallFlowState::InCall;
 
-        Log::info('Call connected and recording.', ['recording' => $this->recording->name]);
+        // Register the pending merge the MOMENT recording starts — not at hang-up. When the
+        // recorded (caller) leg drops, Asterisk destroys its taps and emits "recording
+        // finished" immediately, BEFORE our teardown runs; if the switchboard's notebook does
+        // not already hold this call, those events land on an empty desk and the merge is lost
+        // (the CP-B2.1 inbound race). The call-id is our UUID when the web injected one
+        // (outbound, CP-B3-2), else the caller leg id (inbound — harmless, its attach is trunk-era).
+        $callId = $this->correlationId ?? (string) $this->callerLegId;
+        $this->registry->depositMerge($callId, $this->recording);
+
+        Log::info('Call connected and recording.', [
+            'ticket' => $this->ticketNumber,
+            'recording' => $this->recording->name,
+        ]);
     }
 
     /**
@@ -242,10 +272,10 @@ class CallToAgentFlow
         if ($this->state === CallFlowState::RingingAgent || $this->state === CallFlowState::RingingCustomer) {
             if ($legId === $this->agentLegId) {
                 $this->telephony->hangup($this->callerLegId);
-                $this->reset();
+                $this->dispose();
             } elseif ($legId === $this->callerLegId) {
                 $this->telephony->hangup($this->agentLegId);
-                $this->reset();
+                $this->dispose();
             }
 
             return;
@@ -258,82 +288,71 @@ class CallToAgentFlow
     }
 
     /**
-     * Tear the call down. Recording is stopped first (it produces the
-     * RecordingFinished facts the merge waits on) and the merge is registered
-     * before the best-effort cleanup, so a survivor that has already vanished
-     * can never cost us the recording.
+     * Tear the call down. The pending merge was already registered at connect time
+     * (connectAgent), so the recording survives whoever hangs up first. Stopping the
+     * recording here is best-effort: when the RECORDED (caller) leg is the one that
+     * dropped (inbound hang-up), Asterisk has already finished and destroyed the taps,
+     * so an explicit stop would refuse — expected, not an error. When the survivor is
+     * the recorded leg (outbound agent hang-up) the explicit stop is what finishes it;
+     * and if that ever fails, hanging up the survivor below finishes it anyway.
      */
     private function endCall(string $endedLegId): void
     {
         $recording = $this->recording;
-        // The recording's correlation token: our UUID when the web injected one
-        // (outbound, CP-B3-2 — so RecordingReady carries the calls row's
-        // correlation_id), else the customer leg id (inbound v1 — harmless, its
-        // attach is trunk-era).
-        $callId = $this->correlationId ?? (string) $this->callerLegId;
         $conversationId = (string) $this->conversationId;
         $survivorLegId = (string) ($endedLegId === $this->callerLegId ? $this->agentLegId : $this->callerLegId);
 
-        $this->telephony->stopRecording($recording);
+        rescue(fn () => $this->telephony->stopRecording($recording), report: false);
 
-        $this->pendingMerges[$recording->name] = [
-            'callId' => $callId,
-            'recording' => $recording,
-            'finished' => [],
-        ];
-
-        $this->reset();
+        $this->dispose();
 
         rescue(fn () => $this->telephony->hangup($survivorLegId), report: false);
         rescue(fn () => $this->telephony->endConversation($conversationId), report: false);
     }
 
-    /**
-     * One recording file finished. Tick its entry; queue the stereo merge only
-     * once both sides are confirmed (events are facts; a 2xx on the stop request
-     * is not). Runs in any state so a recording that confirms after the next
-     * call has started still merges.
-     *
-     * @param  array<string, mixed>  $event
-     */
-    private function onRecordingFinished(array $event): void
-    {
-        $name = $event['recording']['name'] ?? '';
-
-        foreach (array_keys($this->pendingMerges) as $key) {
-            $session = $this->pendingMerges[$key]['recording'];
-
-            if ($name !== $session->saidRecordingName() && $name !== $session->heardRecordingName()) {
-                continue;
-            }
-
-            $this->pendingMerges[$key]['finished'][$name] = true;
-            $finished = $this->pendingMerges[$key]['finished'];
-
-            if (isset($finished[$session->saidRecordingName()], $finished[$session->heardRecordingName()])) {
-                MergeCallRecordingJob::dispatch($this->pendingMerges[$key]['callId'], $session->name);
-                unset($this->pendingMerges[$key]);
-            }
-
-            return;
-        }
-    }
-
-    /** A verb was refused mid-call: drop any legs we still hold, then reset. */
+    /** A verb was refused mid-call: drop any legs we still hold, then tear this call down. */
     private function abort(TelephonyException $exception): void
     {
-        Log::warning('Inbound flow aborted after a telephony error; resetting.', [
+        Log::warning('Call aborted after a telephony error; tearing down just this call.', [
+            'ticket' => $this->ticketNumber,
             'error' => $exception->getMessage(),
         ]);
 
-        foreach (array_filter([$this->callerLegId, $this->agentLegId]) as $legId) {
-            rescue(fn () => $this->telephony->hangup($legId), report: false);
-        }
+        $this->hangupHeldLegs();
+        $this->dispose();
+    }
 
+    /**
+     * Tear this handler down for good: wipe its state and ask the switchboard to forget
+     * its legs. Handlers are one-per-call now (FD-4) — never reused — so every teardown
+     * path (no-answer reset, hang-up, abort) ends here.
+     */
+    private function dispose(): void
+    {
+        $this->reset();
+        $this->registry->release($this);
+    }
+
+    /**
+     * The switchboard's backstop caught an unexpected error on this call (FD-6):
+     * best-effort drop any legs we still hold. The switchboard forgets us separately,
+     * so this does not call the registry.
+     */
+    public function discard(): void
+    {
+        $this->hangupHeldLegs();
         $this->reset();
     }
 
-    /** Back to Idle, ready for the next call. Pending merges outlive a call. */
+    /** Best-effort hang up whichever of our two legs we still hold. */
+    private function hangupHeldLegs(): void
+    {
+        foreach (array_filter([$this->callerLegId, $this->agentLegId]) as $legId) {
+            rescue(fn () => $this->telephony->hangup($legId), report: false);
+        }
+    }
+
+    /** Wipe this call's state. Part of disposal — a handler is one-per-call now (B2.1). */
     private function reset(): void
     {
         $this->state = CallFlowState::Idle;
@@ -341,6 +360,7 @@ class CallToAgentFlow
         $this->agentLegId = null;
         $this->conversationId = null;
         $this->correlationId = null;
+        $this->ticketNumber = null;
         $this->recording = null;
     }
 }

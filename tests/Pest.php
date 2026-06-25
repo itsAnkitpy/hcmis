@@ -88,3 +88,47 @@ function writeLeadCsv(string $path, array $rows, array $headers = ['phone', 'nam
 
     Storage::disk('local')->put($path, implode("\n", $lines));
 }
+
+/*
+| Raw ARI event shapes the telephony switchboard + flow read off the pipe. Only the
+| fields the code actually inspects are built. Shared by CallToAgentFlowTest and
+| SwitchboardTest (B2.1).
+*/
+
+/**
+ * A leg entered our Stasis app. The `args` are the appArgs tag we placed it with
+ * (e.g. [] = an outside caller, ['agent'] = the agent leg, ['snoop'] = a recording tap).
+ *
+ * @param  array<int, string>  $args
+ * @return array<string, mixed>
+ */
+function stasisStart(string $legId, array $args, ?string $callerNumber = null): array
+{
+    $channel = ['id' => $legId];
+
+    if ($callerNumber !== null) {
+        $channel['caller'] = ['number' => $callerNumber];
+    }
+
+    return ['type' => 'StasisStart', 'args' => $args, 'channel' => $channel];
+}
+
+/**
+ * A leg ended (hang-up, no-answer timeout, or abandon).
+ *
+ * @return array<string, mixed>
+ */
+function channelDestroyed(string $legId): array
+{
+    return ['type' => 'ChannelDestroyed', 'channel' => ['id' => $legId]];
+}
+
+/**
+ * One recording file finished writing.
+ *
+ * @return array<string, mixed>
+ */
+function recordingFinished(string $name): array
+{
+    return ['type' => 'RecordingFinished', 'recording' => ['name' => $name]];
+}

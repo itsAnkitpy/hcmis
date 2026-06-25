@@ -2,9 +2,11 @@
 
 use App\Jobs\MergeCallRecordingJob;
 use App\Telephony\Flows\CallToAgentFlow;
+use App\Telephony\Flows\Switchboard;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 
 /**
  * The call-to-agent flow, event-driven, both directions. Inbound: an outside
@@ -15,39 +17,14 @@ use Illuminate\Support\Facades\Queue;
  *
  * The flow is fed the same raw event shapes the listener reads off ARI; only
  * the fields the flow actually inspects are built here.
+ *
+ * B2.1: each handler is now given a Switchboard (its HandlerRegistry) at birth — it
+ * registers the legs it places and hands its pending recording merge there. These
+ * tests pass a real (lightweight) Switchboard; because RecordingFinished is the
+ * switchboard's job now (FD-4), the merge-cycle tests feed it to the switchboard.
+ * The switchboard's own routing/isolation lives in SwitchboardTest. The raw event
+ * builders (stasisStart/channelDestroyed/recordingFinished) live in tests/Pest.php.
  */
-
-/**
- * @param  array<int, string>  $args
- * @return array<string, mixed>
- */
-function stasisStart(string $legId, array $args, ?string $callerNumber = null): array
-{
-    $channel = ['id' => $legId];
-
-    if ($callerNumber !== null) {
-        $channel['caller'] = ['number' => $callerNumber];
-    }
-
-    return ['type' => 'StasisStart', 'args' => $args, 'channel' => $channel];
-}
-
-/**
- * @return array<string, mixed>
- */
-function channelDestroyed(string $legId): array
-{
-    return ['type' => 'ChannelDestroyed', 'channel' => ['id' => $legId]];
-}
-
-/**
- * @return array<string, mixed>
- */
-function recordingFinished(string $name): array
-{
-    return ['type' => 'RecordingFinished', 'recording' => ['name' => $name]];
-}
-
 beforeEach(function () {
     config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Queue::fake();
@@ -67,7 +44,8 @@ it('connects an answering agent and merges the call once both recordings finish'
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');         // the survivor
     $telephony->shouldReceive('endConversation')->once()->with('conv-1');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', []));        // caller dials in
     $flow->handle(stasisStart('agent-leg', ['agent']));   // agent picks up
@@ -75,10 +53,10 @@ it('connects an answering agent and merges the call once both recordings finish'
 
     Queue::assertNothingPushed();                         // not until both files are confirmed
 
-    $flow->handle(recordingFinished('call-1-said'));
+    $switchboard->handle(recordingFinished('call-1-said'));   // RecordingFinished is the switchboard's job now (FD-4)
     Queue::assertNothingPushed();                         // one side is not enough
 
-    $flow->handle(recordingFinished('call-1-heard'));
+    $switchboard->handle(recordingFinished('call-1-heard'));
 
     Queue::assertPushed(
         MergeCallRecordingJob::class,
@@ -94,7 +72,8 @@ it('hangs up the agent leg when the caller abandons before pickup', function () 
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', []));
     $flow->handle(channelDestroyed('caller-leg'));        // gives up while the agent rings
@@ -110,7 +89,8 @@ it('hangs up the caller when the agent never answers', function () {
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', []));
     $flow->handle(channelDestroyed('agent-leg'));         // Asterisk's 30s originate timeout fired
@@ -125,7 +105,8 @@ it('passes the caller number to placeCall as the agent leg caller-ID (B4 D4)', f
         ->with('PJSIP/1003', 'agent', '9991234567')
         ->andReturn('agent-leg');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', [], '9991234567'));   // caller presents a number
 
@@ -139,7 +120,8 @@ it('presents no caller-ID when the caller is anonymous (empty number)', function
         ->with('PJSIP/1003', 'agent', null)
         ->andReturn('agent-leg');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', [], ''));   // anonymous caller → empty number
 
@@ -155,7 +137,8 @@ it('does not drive a second caller while a call is already in progress', functio
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', []));
     $flow->handle(stasisStart('agent-leg', ['agent']));
@@ -197,7 +180,8 @@ it('dials the customer when the agent leg arrives carrying the number, then join
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');          // the survivor
     $telephony->shouldReceive('endConversation')->once()->with('conv-1');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // agent leg up, carrying the customer number
     $flow->handle(stasisStart('customer-leg', ['outbound']));     // customer picks up
@@ -205,8 +189,8 @@ it('dials the customer when the agent leg arrives carrying the number, then join
 
     Queue::assertNothingPushed();                                 // not until both files are confirmed
 
-    $flow->handle(recordingFinished('call-1-said'));
-    $flow->handle(recordingFinished('call-1-heard'));
+    $switchboard->handle(recordingFinished('call-1-said'));
+    $switchboard->handle(recordingFinished('call-1-heard'));
 
     Queue::assertPushed(
         MergeCallRecordingJob::class,
@@ -230,15 +214,16 @@ it('threads the injected UUID (args[2]) as the recording callId so RecordingRead
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');
     $telephony->shouldReceive('endConversation')->once()->with('conv-1');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     // The agent leg now carries the customer number AND the call's UUID (args[2]).
     $flow->handle(stasisStart('agent-leg', ['agent', '1002', 'the-uuid']));
     $flow->handle(stasisStart('customer-leg', ['outbound']));
     $flow->handle(channelDestroyed('customer-leg'));
 
-    $flow->handle(recordingFinished('call-1-said'));
-    $flow->handle(recordingFinished('call-1-heard'));
+    $switchboard->handle(recordingFinished('call-1-said'));
+    $switchboard->handle(recordingFinished('call-1-heard'));
 
     // The merge (and thus RecordingReady) is keyed by the UUID, not the leg id —
     // that is what lets the queued listener find the calls row by correlation_id.
@@ -259,7 +244,8 @@ it('does not join until the outbound customer actually answers', function () {
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // customer is now ringing, not up
 
@@ -281,7 +267,8 @@ it('tears down the agent leg when the outbound customer never answers (no-answer
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // agent up, customer dialed
     $flow->handle(channelDestroyed('customer-leg'));              // customer ring timed out
@@ -303,10 +290,51 @@ it('cancels the customer leg when the agent abandons before the customer answers
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
-    $flow = new CallToAgentFlow($telephony);
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // agent up, customer ringing
     $flow->handle(channelDestroyed('agent-leg'));                 // agent abandons mid-ring
 
     Queue::assertNothingPushed();
+});
+
+/*
+|--------------------------------------------------------------------------
+| Per-call ticket number — FD-3 (the log tag / future durable-waiting-line handle)
+|--------------------------------------------------------------------------
+|
+| Inbound MINTS a fresh ticket; outbound REUSES the web's tracking number (args[2]).
+| The ticket is kept separate from the recording's callId on purpose (see the field
+| docblock), so these read it straight off the handler.
+|
+*/
+
+it('mints a fresh ticket number when an inbound call is born (FD-3)', function () {
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once()->with('caller-leg');
+    $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+
+    $flow->handle(stasisStart('caller-leg', []));
+
+    expect($flow->ticketNumber())->not->toBeNull()
+        ->and(Str::isUuid($flow->ticketNumber()))->toBeTrue();
+});
+
+it('reuses the web-minted UUID (args[2]) as the ticket number for an outbound call (FD-3)', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+
+    $flow->handle(stasisStart('agent-leg', ['agent', '1002', 'the-uuid']));
+
+    expect($flow->ticketNumber())->toBe('the-uuid');
 });

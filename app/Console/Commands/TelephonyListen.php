@@ -10,7 +10,7 @@ use App\Events\Telephony\CallRinging;
 use App\Events\Telephony\RecordingFailed;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\AriWebSocket;
-use App\Telephony\Flows\CallToAgentFlow;
+use App\Telephony\Flows\Switchboard;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Console\Attributes\Description;
@@ -25,9 +25,9 @@ use Illuminate\Console\Command;
  * The in-process reconnect loop rides over network blips.
  *
  * It is transport + translation only (B4 D5): it reads engine events, turns
- * them into app events (translate()), and hands each raw event to the call flow
- * that drives call control. A fresh flow is built per connection, so a
- * reconnect starts with no half-finished call in hand.
+ * them into app events (translate()), and hands each raw event to the switchboard
+ * that drives call control across many concurrent calls (B2.1). A fresh switchboard
+ * is built per connection, so a reconnect starts with no half-finished calls in hand.
  */
 #[Signature('telephony:listen')]
 #[Description('Hold the ARI event pipe open: register the app with Asterisk, translate engine events into app events, and run the call flow')]
@@ -66,7 +66,7 @@ class TelephonyListen extends Command
                 ));
                 $backoff = self::BACKOFF_INITIAL_SECONDS;
 
-                $this->listen($pipe, new CallToAgentFlow($this->telephony));
+                $this->listen($pipe, new Switchboard($this->telephony));
             } catch (TelephonyException $exception) {
                 $this->error("Event pipe lost: {$exception->getMessage()} — reconnecting in {$backoff}s.");
                 $pipe->close();
@@ -89,10 +89,10 @@ class TelephonyListen extends Command
 
     /**
      * The main loop — only leaves by throwing (connection loss). Each event is
-     * both translated into app events and handed to the flow for call control;
+     * both translated into app events and handed to the switchboard for call control;
      * the two are independent readers of the same event.
      */
-    private function listen(AriWebSocket $pipe, CallToAgentFlow $flow): void
+    private function listen(AriWebSocket $pipe, Switchboard $switchboard): void
     {
         while (true) {
             $event = $pipe->readEvent(self::READ_TIMEOUT_SECONDS);
@@ -104,7 +104,7 @@ class TelephonyListen extends Command
             }
 
             $this->translate($event);
-            $flow->handle($event);
+            $switchboard->handle($event);
         }
     }
 
