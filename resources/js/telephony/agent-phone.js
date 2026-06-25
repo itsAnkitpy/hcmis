@@ -31,6 +31,12 @@ export class AgentPhone {
         this.session = null;
         this.remoteAudio = null;
 
+        // B2.2a — "don't ring a busy agent". The screen sets this true while it's
+        // away with NO active call (wrap-up / on break); onSession then rejects an
+        // incoming INVITE. (On a live call the session-in-hand check below already
+        // rejects a 2nd INVITE, so this only has to cover the no-session states.)
+        this.busy = false;
+
         // event name -> Set<callback>; the only way the outside world hears the phone.
         this.listeners = new Map();
     }
@@ -98,6 +104,18 @@ export class AgentPhone {
      */
     onSession(data) {
         if (data.originator !== 'remote') {
+            return;
+        }
+
+        // B2.2a auto-decline — the screen-side half of "don't ring a busy agent",
+        // and the fix for the CP-B2.1 hijack. A second INVITE arriving while a call
+        // is already in hand (this.session set), OR while the screen has marked
+        // itself away (this.busy: wrap-up / on break), is rejected with 486 Busy.
+        // We return BEFORE the assignment below, so the live call's session pointer
+        // and the screen's state are left completely untouched.
+        if (this.session || this.busy) {
+            data.session.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
+
             return;
         }
 

@@ -16,23 +16,33 @@
                     </p>
                 </div>
 
+                {{-- B2.2a: the who's-free board indicator (PD-2). The pill reads the
+                     agent's live status off the screen state — Ready / On a call /
+                     Wrapping up / On break / Offline — the same value the screen
+                     writes to the agent_presence board over $wire. --}}
                 <span
                     class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium"
                     :class="{
-                        'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300': state === 'offline' && ! error,
-                        'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400': state === 'ready',
                         'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400': error,
+                        'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300': ! error && state === 'offline',
+                        'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400': ! error && state === 'ready',
+                        'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400': ! error && (state === 'ringing' || state === 'calling' || state === 'onCall'),
+                        'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400': ! error && state === 'wrapUp',
+                        'bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-400': ! error && state === 'onBreak',
                     }"
                 >
                     <span
                         class="h-2 w-2 rounded-full"
                         :class="{
-                            'bg-gray-400': state === 'offline' && ! error,
-                            'bg-green-500': state === 'ready',
                             'bg-red-500': error,
+                            'bg-gray-400': ! error && state === 'offline',
+                            'bg-green-500': ! error && state === 'ready',
+                            'bg-blue-500': ! error && (state === 'ringing' || state === 'calling' || state === 'onCall'),
+                            'bg-amber-500': ! error && state === 'wrapUp',
+                            'bg-orange-500': ! error && state === 'onBreak',
                         }"
                     ></span>
-                    <span x-text="error ? 'registration failed' : (state === 'ready' ? 'ready' : 'connecting…')"></span>
+                    <span x-text="error ? 'registration failed' : presenceLabel()"></span>
                 </span>
             </div>
 
@@ -51,6 +61,20 @@
             x-cloak
             class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
         >
+            {{-- B2.2a (PD-2): the one manual board control — step away to "On break"
+                 so the system stops ringing this agent. Returns via the On break
+                 panel's "I'm back". Only offered between calls (the ready block). --}}
+            <div class="mb-4 flex items-center justify-between gap-3">
+                <p class="text-sm text-gray-500 dark:text-gray-400">You're ready for calls.</p>
+                <button
+                    type="button"
+                    x-on:click="startBreak()"
+                    class="inline-flex items-center rounded-lg bg-gray-200 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-300 dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/20"
+                >
+                    Take a break
+                </button>
+            </div>
+
             {{-- CP-O3 O1: a dial that never rang (blocked by Do-Not-Call, or an
                  unusable number) drops back here with a short notice. --}}
             <div
@@ -237,6 +261,29 @@
                     <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">One-off call to a typed number. Do-Not-Call still applies.</p>
                 </div>
             @endif
+        </div>
+
+        {{-- B2.2a (PD-2/PD-3): on break. An away state the system won't ring — a
+             call that arrives while here is auto-declined at the phone (busy flag),
+             never shown. "I'm back" returns to ready and the board flips back. --}}
+        <div
+            x-show="state === 'onBreak'"
+            x-cloak
+            class="mt-4 rounded-xl border border-orange-200 bg-orange-50 p-6 shadow-sm dark:border-orange-500/20 dark:bg-orange-500/10"
+        >
+            <div class="flex items-center justify-between gap-4">
+                <div>
+                    <p class="text-base font-semibold text-orange-800 dark:text-orange-300">On break</p>
+                    <p class="mt-1 text-sm text-orange-700/80 dark:text-orange-300/70">You won't be rung while you're on break.</p>
+                </div>
+                <button
+                    type="button"
+                    x-on:click="endBreak()"
+                    class="inline-flex items-center rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500"
+                >
+                    I'm back
+                </button>
+            </div>
         </div>
 
         {{-- B4 CP2a/CP2b + B-outbound CP-O1: the call panel. Inbound: the app

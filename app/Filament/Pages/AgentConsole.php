@@ -10,8 +10,10 @@ use App\Enums\CallbackStatus;
 use App\Enums\CallDirection;
 use App\Enums\CallOutcome;
 use App\Enums\LeadStatus;
+use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
+use App\Models\AgentPresence;
 use App\Models\Call;
 use App\Models\Callback;
 use App\Models\Campaign;
@@ -29,6 +31,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Str;
 use Livewire\Attributes\Locked;
+use Livewire\Attributes\Renderless;
 
 /**
  * Agent Console (B4 D1) — the agent's one screen: a browser SIP phone plus the
@@ -129,6 +132,44 @@ class AgentConsole extends Page
             'wsUrl' => config('telephony.agent.ws_url'),
             'sipDomain' => config('telephony.agent.sip_domain'),
         ];
+    }
+
+    /**
+     * Write the agent's spot on the who's-free board (B2.2 PD-3) — the screen is the
+     * single writer. Upserts the ONE overwritten row per agent (PD-6): a status change
+     * replaces it in place, never appends. Keyed to auth()->id() in the request's tenant
+     * context, so an agent can only ever write their OWN row in their OWN client
+     * (BelongsToTenant stamps tenant_id on create; the unique (tenant_id, user_id) backs
+     * the upsert). The browser calls this over $wire on each state transition. Renderless:
+     * it fires mid-call (entering on-call / wrap-up), so it must not morph the live console.
+     */
+    #[Renderless]
+    public function setPresence(string $status): void
+    {
+        $presence = PresenceStatus::tryFrom($status);
+
+        abort_if($presence === null, 422, 'Unknown presence status.');
+
+        AgentPresence::query()->updateOrCreate(
+            ['user_id' => auth()->id()],
+            ['status' => $presence, 'last_seen_at' => now()],
+        );
+    }
+
+    /**
+     * The screen quietly saying "still here" (B2.2 PD-4) on its ~15s timer. Refreshes
+     * the heartbeat stamp WITHOUT touching status, so a long call keeps the agent shown
+     * alive on the board (a stale stamp reads as Offline — AgentPresence::effectiveStatus).
+     * Touches the existing row only: it keeps a live agent alive, but never resurrects a
+     * logged-out one (no row ⇒ harmless no-op). Own-row + tenant-scoped by auth()->id().
+     * Renderless — a heartbeat must never disturb a live call.
+     */
+    #[Renderless]
+    public function heartbeat(): void
+    {
+        AgentPresence::query()
+            ->where('user_id', auth()->id())
+            ->update(['last_seen_at' => now()]);
     }
 
     /**

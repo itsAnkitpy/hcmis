@@ -98,4 +98,22 @@ return [
         'disk' => env('TELEPHONY_RECORDINGS_DISK', 'local'),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Presence — the who's-free board (B2.2 PD-4)
+    |--------------------------------------------------------------------------
+    |
+    | The agent's screen stamps "still here" every 'heartbeat_seconds'. A board
+    | row whose last stamp is older than 'stale_after_seconds' reads as Offline
+    | (a crashed tab must not leave a lying "Ready"). The default ~15s/~60s is the
+    | common heartbeat/timeout pattern (PD-4 internet check). The browser timer
+    | reads heartbeat_seconds; the server staleness check reads stale_after.
+    |
+    */
+
+    'presence' => [
+        'heartbeat_seconds' => (int) env('TELEPHONY_PRESENCE_HEARTBEAT', 15),
+        'stale_after_seconds' => (int) env('TELEPHONY_PRESENCE_STALE_AFTER', 60),
+    ],
+
 ];

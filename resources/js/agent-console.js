@@ -42,6 +42,12 @@ const agentConsole = (config) => ({
     saving: false,
     phone: null,
 
+    // B2.2a presence (the who's-free board): the last status pushed to the server,
+    // so the per-transition writes dedupe (PD-3, the screen is the single writer);
+    // and the handle for the ~15s heartbeat timer (PD-4), cleared on unmount.
+    presence: null,
+    heartbeatTimer: null,
+
     // M4 callback capture: the disposition ids that mean "schedule a callback"
     // (server-derived), and the schedule fields revealed when one is picked.
     callbackDispositionIds: [],
@@ -140,7 +146,87 @@ const agentConsole = (config) => ({
             }
         });
 
+        // B2.2a PD-4 — the heartbeat: "still here" every ~15s on its OWN timer. It
+        // deliberately does NOT piggyback the pooled-callbacks wire:poll: that poll
+        // is `.visible` and lives inside the ready-only block, so it PAUSES during a
+        // call — exactly when the board must keep the agent shown alive. heartbeat()
+        // is renderless server-side, so this never disturbs a live call.
+        this.heartbeatTimer = setInterval(() => this.$wire.heartbeat(), 15000);
+
+        // B2.2a PD-3 — one place maps every screen transition to a board write (+
+        // the busy flag that declines rings during wrap-up / break). Catches every
+        // state change, so no transition can silently skip the board.
+        this.$watch('state', (state) => this.syncPresence(state));
+
         this.phone.start();
+    },
+
+    /**
+     * B2.2a — reflect the screen state onto the who's-free board (PD-3). One status
+     * per state group; deduped so the rapid transitions (ringing -> onCall) write
+     * once. Also toggles the phone's busy flag: a ring while away with no active
+     * call (wrap-up / on break) is declined (on a live call the phone's own
+     * session-in-hand check already rejects a 2nd INVITE).
+     */
+    syncPresence(state) {
+        const status = {
+            offline: 'offline',
+            ready: 'ready',
+            ringing: 'on_call',
+            calling: 'on_call',
+            onCall: 'on_call',
+            wrapUp: 'wrapping_up',
+            onBreak: 'on_break',
+        }[state];
+
+        if (status) {
+            this.pushPresence(status);
+        }
+
+        if (this.phone) {
+            this.phone.busy = state === 'wrapUp' || state === 'onBreak';
+        }
+    },
+
+    /** Push a board status to the server (renderless), skipping a no-op repeat. */
+    pushPresence(status) {
+        if (this.presence === status) {
+            return;
+        }
+
+        this.presence = status;
+        this.$wire.setPresence(status);
+    },
+
+    /** A human label for the agent's current board status (drives the status pill). */
+    presenceLabel() {
+        return {
+            offline: 'Offline',
+            ready: 'Ready',
+            ringing: 'On a call',
+            calling: 'On a call',
+            onCall: 'On a call',
+            wrapUp: 'Wrapping up',
+            onBreak: 'On break',
+        }[this.state] ?? '—';
+    },
+
+    /** B2.2a — go on break (PD-2): only from ready. An away state that declines rings. */
+    startBreak() {
+        if (this.state !== 'ready') {
+            return;
+        }
+
+        this.state = 'onBreak';
+    },
+
+    /** B2.2a — come back from break to ready (the $watch flips the board + busy flag). */
+    endBreak() {
+        if (this.state !== 'onBreak') {
+            return;
+        }
+
+        this.state = 'ready';
     },
 
     answer() {
@@ -394,6 +480,7 @@ const agentConsole = (config) => ({
     },
 
     destroy() {
+        clearInterval(this.heartbeatTimer);
         this.phone?.stop();
     },
 });
