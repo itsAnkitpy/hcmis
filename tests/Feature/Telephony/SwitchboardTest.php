@@ -18,6 +18,12 @@ use Illuminate\Support\Facades\Queue;
  */
 beforeEach(function () {
     config()->set('telephony.agent.endpoint', 'PJSIP/1003');
+    config()->set('telephony.agent.directory', []);   // the single-endpoint fallback rings 'PJSIP/1003'
+
+    // B2.2b: each per-call handler reserves a free agent before ringing. The switchboard
+    // tests prove the multiplexing/isolation, not the routing DB, so the router is stubbed
+    // to hand back one agent (the real reserve/release is proven in AgentRouterTest).
+    fakeAgentRouter();
     Queue::fake();
 });
 

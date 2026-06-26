@@ -27,6 +27,12 @@ use Illuminate\Support\Str;
  */
 beforeEach(function () {
     config()->set('telephony.agent.endpoint', 'PJSIP/1003');
+    config()->set('telephony.agent.directory', []);   // these tests use the single-endpoint fallback
+
+    // B2.2b: the inbound flow now reserves a free agent before ringing. These mechanics
+    // tests stub the router to always hand back one agent (so the resolver's fallback
+    // rings 'PJSIP/1003'); the real board read + reserve/release live in AgentRouterTest.
+    fakeAgentRouter();
     Queue::fake();
 });
 

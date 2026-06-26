@@ -2,6 +2,7 @@
 
 use App\Models\Tenant;
 use App\Models\User;
+use App\Telephony\AgentRouter;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
@@ -102,7 +103,7 @@ function writeLeadCsv(string $path, array $rows, array $headers = ['phone', 'nam
  * @param  array<int, string>  $args
  * @return array<string, mixed>
  */
-function stasisStart(string $legId, array $args, ?string $callerNumber = null): array
+function stasisStart(string $legId, array $args, ?string $callerNumber = null, ?string $tenantId = '3'): array
 {
     $channel = ['id' => $legId];
 
@@ -110,7 +111,51 @@ function stasisStart(string $legId, array $args, ?string $callerNumber = null): 
         $channel['caller'] = ['number' => $callerNumber];
     }
 
+    // B2.2b RD-1: the front-door dialplan stamps a company label (Asterisk's native
+    // Tenant ID) on every inbound call, so the company-blind listener reads it off the
+    // arrival event. Defaulted because real inbound calls always carry one; pass
+    // tenantId: null to model an unlabelled call (the RD-5 no-company branch).
+    if ($tenantId !== null) {
+        $channel['tenantid'] = $tenantId;
+    }
+
     return ['type' => 'StasisStart', 'args' => $args, 'channel' => $channel];
+}
+
+/**
+ * Bind a stub AgentRouter (B2.2b) that always reserves the given agent id (or null
+ * for "all busy"), recording every reserve/release. Lets the flow + switchboard tests
+ * stay focused on call MECHANICS — the real board read + atomic reserve/release are
+ * proven against the DB in AgentRouterTest. Returns the stub for assertions.
+ */
+function fakeAgentRouter(?int $agentId = 6): AgentRouter
+{
+    $router = new class($agentId) extends AgentRouter
+    {
+        /** @var array<int, int> */
+        public array $reserved = [];
+
+        /** @var array<int, array{int, int}> */
+        public array $released = [];
+
+        public function __construct(private readonly ?int $agentId) {}
+
+        public function reserveFreeAgent(int $tenantId): ?int
+        {
+            $this->reserved[] = $tenantId;
+
+            return $this->agentId;
+        }
+
+        public function releaseReservation(int $tenantId, int $userId): void
+        {
+            $this->released[] = [$tenantId, $userId];
+        }
+    };
+
+    app()->instance(AgentRouter::class, $router);
+
+    return $router;
 }
 
 /**

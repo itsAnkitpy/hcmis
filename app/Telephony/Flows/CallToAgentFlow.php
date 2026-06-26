@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Telephony\Flows;
 
+use App\Telephony\AgentDirectory;
+use App\Telephony\AgentRouter;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
@@ -72,10 +74,30 @@ class CallToAgentFlow
 
     private ?RecordingSession $recording = null;
 
+    /**
+     * The reservation this handler holds on the who's-free board (B2.2b RD-4): the
+     * company + agent it tagged "On a call" the instant it rang them. RELEASED if the
+     * agent never connects (Fold B — they ring out, or the caller abandons mid-ring);
+     * CLEARED but not released once they answer, when the agent's own screen takes over
+     * the status. Null for outbound (the agent picked themselves — no reservation).
+     */
+    private ?int $reservedTenantId = null;
+
+    private ?int $reservedAgentId = null;
+
+    private readonly AgentRouter $router;
+
+    private readonly AgentDirectory $directory;
+
     public function __construct(
         private readonly TelephonyProvider $telephony,
         private readonly HandlerRegistry $registry,
-    ) {}
+        ?AgentRouter $router = null,
+        ?AgentDirectory $directory = null,
+    ) {
+        $this->router = $router ?? app(AgentRouter::class);
+        $this->directory = $directory ?? app(AgentDirectory::class);
+    }
 
     /** This call's ticket number (FD-3): the log tag, and later the durable waiting-line handle. */
     public function ticketNumber(): ?string
@@ -160,35 +182,106 @@ class CallToAgentFlow
             // the same field translate() reads). An anonymous caller presents an
             // empty string — treat that as "no number" so we present nothing.
             $callerNumber = $event['channel']['caller']['number'] ?? null;
-            $this->beginCall($legId, $callerNumber !== '' ? $callerNumber : null);
+            $this->beginCall($event, $legId, $callerNumber !== '' ? $callerNumber : null);
         }
     }
 
     /**
-     * Answer the caller and ring the agent's extension (D7 config map), carrying
-     * the caller's own number as the agent leg's caller-ID — the browser reads it
-     * off the ringing call to look up the lead (B4 D4).
+     * Pick a free agent among several and ring THEM (B2.2b — the headline). Read the
+     * company label off the call (RD-1), reserve the first free agent on that company's
+     * board the instant we ring them (RD-3/RD-4), and ring that specific agent's phone
+     * (RD-2 resolver) — carrying the caller's own number as the agent leg's caller-ID so
+     * the browser reads it off the ringing call to look up the lead (B4 D4).
+     *
+     * No free agent (or an unlabelled call) -> clean end + log "all busy" (RD-5): hang
+     * the caller up without a blind ring. (Today's code blindly rang one fixed extension
+     * and waited for a no-answer; now the system KNOWS nobody's free and stops cleanly —
+     * the exact spot B2.3 later turns into "join the queue".)
+     *
+     * @param  array<string, mixed>  $event
      */
-    private function beginCall(string $callerLegId, ?string $callerNumber = null): void
+    private function beginCall(array $event, string $callerLegId, ?string $callerNumber = null): void
     {
         $this->callerLegId = $callerLegId;
         $this->ticketNumber = (string) Str::uuid();   // inbound mints a fresh ticket (FD-3)
 
+        $tenantId = $this->companyLabel($event);
+        $reservedAgentId = $tenantId === null ? null : $this->router->reserveFreeAgent($tenantId);
+
+        // RD-5: nobody free (or no company label) -> clean end + log, no blind ring.
+        if ($reservedAgentId === null) {
+            rescue(fn () => $this->telephony->hangup($callerLegId), report: false);
+            Log::info('Inbound call: no free agent available — ending the call (all busy).', [
+                'ticket' => $this->ticketNumber,
+                'caller' => $callerLegId,
+                'tenant' => $tenantId,
+            ]);
+            $this->dispose();
+
+            return;
+        }
+
+        // Reserved-at-ring (RD-4): remember the tag so a no-answer can release it (Fold B).
+        $this->reservedTenantId = $tenantId;
+        $this->reservedAgentId = $reservedAgentId;
+
         $this->telephony->answer($callerLegId);
         $this->agentLegId = $this->telephony->placeCall(
-            config('telephony.agent.endpoint'),
+            $this->directory->endpointFor($reservedAgentId),
             'agent',
             $callerNumber,
         );
         $this->registry->registerLeg($this->agentLegId, $this);   // the leg we placed is ours (FD-2)
         $this->state = CallFlowState::RingingAgent;
 
-        Log::info('Inbound call: caller answered, ringing the agent.', [
+        Log::info('Inbound call: reserved a free agent, caller answered, ringing them.', [
             'ticket' => $this->ticketNumber,
             'caller' => $callerLegId,
             'callerNumber' => $callerNumber,
+            'tenant' => $tenantId,
+            'agentUser' => $reservedAgentId,
             'agent' => $this->agentLegId,
         ]);
+    }
+
+    /**
+     * Read the company label (Asterisk's native Tenant ID) off the call's arrival
+     * event (RD-1) so the company-blind listener knows which company's board to read.
+     *
+     * Fold C (S49): the EXACT ARI field is verified live against the running container's
+     * own api-docs before this is trusted — `tenantid` is stamped in the front-door
+     * dialplan (Set(CHANNEL(tenantid)=...)) and rides the channel. We read the two most
+     * likely event shapes (a first-class `tenantid` on the channel snapshot, or a
+     * configured `channelvars` entry); if neither carries it on the event, the named
+     * fallback is one ARI channel-variable GET (CHANNEL(tenantid)) — a localized change
+     * here. Returns null when unlabelled (no company -> RD-5 clean end).
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function companyLabel(array $event): ?int
+    {
+        $channel = $event['channel'] ?? [];
+        $label = $channel['tenantid'] ?? ($channel['channelvars']['tenantid'] ?? null);
+
+        return ($label === null || $label === '') ? null : (int) $label;
+    }
+
+    /**
+     * Release a reservation this handler still holds (Fold B): used when a reserved
+     * agent never connected. CONDITIONAL inside the router (flips on_call -> ready only
+     * if still the tag we set), so it never overwrites a status the agent's own screen
+     * set during the ring. A no-op for outbound or once the agent has answered (the refs
+     * are cleared on connect), so it is safe to call on every ring-stage teardown.
+     */
+    private function releaseReservationIfHeld(): void
+    {
+        if ($this->reservedTenantId === null || $this->reservedAgentId === null) {
+            return;
+        }
+
+        $this->router->releaseReservation($this->reservedTenantId, $this->reservedAgentId);
+        $this->reservedTenantId = null;
+        $this->reservedAgentId = null;
     }
 
     /**
@@ -231,6 +324,13 @@ class CallToAgentFlow
         );
         $this->state = CallFlowState::InCall;
 
+        // The agent answered (RD-4): drop the reservation refs WITHOUT releasing — the
+        // tag stays "On a call", and the agent's own screen now owns the status (it will
+        // write On-a-call / Wrap-up). Clearing here guarantees no later teardown releases
+        // a tag for a call that genuinely connected.
+        $this->reservedTenantId = null;
+        $this->reservedAgentId = null;
+
         // Register the pending merge the MOMENT recording starts — not at hang-up. When the
         // recorded (caller) leg drops, Asterisk destroys its taps and emits "recording
         // finished" immediately, BEFORE our teardown runs; if the switchboard's notebook does
@@ -270,6 +370,12 @@ class CallToAgentFlow
         //     the answered agent leg flips the browser to wrap-up; the agent leg
         //     ending is the agent abandoning mid-ring, which cancels the customer.
         if ($this->state === CallFlowState::RingingAgent || $this->state === CallFlowState::RingingCustomer) {
+            // Fold B: a reserved inbound agent never connected — release the reservation
+            // on BOTH no-answer paths (the agent rang out = their leg ended; the caller
+            // abandoned mid-ring = the caller leg ended), so neither leaks a stuck tag.
+            // A no-op for outbound (no reservation held).
+            $this->releaseReservationIfHeld();
+
             if ($legId === $this->agentLegId) {
                 $this->telephony->hangup($this->callerLegId);
                 $this->dispose();
@@ -318,6 +424,11 @@ class CallToAgentFlow
             'error' => $exception->getMessage(),
         ]);
 
+        // Release any reservation we hold so an error before the agent connects can't
+        // leave them stuck "On a call" (Fold B lifecycle — the stale-heartbeat net won't
+        // free a leaked tag while the tab keeps stamping). Best-effort: never mask the
+        // original telephony error.
+        rescue(fn () => $this->releaseReservationIfHeld(), report: false);
         $this->hangupHeldLegs();
         $this->dispose();
     }
@@ -340,6 +451,10 @@ class CallToAgentFlow
      */
     public function discard(): void
     {
+        // Same reservation safety as abort() (Fold B lifecycle): the switchboard backstop
+        // fires on an UNEXPECTED error, which could strike after we reserved an agent but
+        // before they connected — release the tag so they are not stuck "On a call".
+        rescue(fn () => $this->releaseReservationIfHeld(), report: false);
         $this->hangupHeldLegs();
         $this->reset();
     }
@@ -362,5 +477,7 @@ class CallToAgentFlow
         $this->correlationId = null;
         $this->ticketNumber = null;
         $this->recording = null;
+        $this->reservedTenantId = null;
+        $this->reservedAgentId = null;
     }
 }

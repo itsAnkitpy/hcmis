@@ -61,6 +61,33 @@ return [
         'password' => env('TELEPHONY_AGENT_PASSWORD'),
         'ws_url' => env('TELEPHONY_AGENT_WS_URL'),
         'sip_domain' => env('TELEPHONY_AGENT_SIP_DOMAIN', 'asterisk.lab'),
+
+        /*
+        | B2.2b (RD-2 + S49 Fold A): the per-agent phone directory — the settings-list
+        | that lets the listener ring a CHOSEN agent AND lets each agent's own browser
+        | register as THEIR phone, not the one shared extension above. Keyed by user id;
+        | lab rows only (real per-agent provisioning is the trunk-era table that replaces
+        | this — only the resolver's source changes, its callers don't). The shared
+        | ws_url + sip_domain stay above (same Asterisk for everyone). Passwords env-only.
+        |
+        | Read by App\Telephony\AgentDirectory: endpointFor() (listener dials a chosen
+        | agent) and browserIdentityFor() (a logged-in agent's browser registers as self).
+        */
+        'directory' => [
+            // user 6 (Abhikesh, abc@gmail.com) keeps the existing single-agent env,
+            // so the established 1003 lab identity needs no .env churn.
+            6 => [
+                'extension' => env('TELEPHONY_AGENT_EXTENSION', '1003'),
+                'endpoint' => env('TELEPHONY_AGENT_ENDPOINT', 'PJSIP/1003'),
+                'password' => env('TELEPHONY_AGENT_PASSWORD'),
+            ],
+            // user 7 (Demo Agent Two, def@gmail.com) — the 2nd distinct lab phone (RD-6).
+            7 => [
+                'extension' => env('TELEPHONY_AGENT2_EXTENSION', '1004'),
+                'endpoint' => env('TELEPHONY_AGENT2_ENDPOINT', 'PJSIP/1004'),
+                'password' => env('TELEPHONY_AGENT2_PASSWORD'),
+            ],
+        ],
     ],
 
     /*

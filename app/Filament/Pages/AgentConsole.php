@@ -22,6 +22,7 @@ use App\Models\DncEntry;
 use App\Models\Lead;
 use App\Models\User;
 use App\Support\PhoneNumber;
+use App\Telephony\AgentDirectory;
 use App\Telephony\TelephonyProvider;
 use BackedEnum;
 use Filament\Pages\Page;
@@ -122,16 +123,16 @@ class AgentConsole extends Page
      * the Alpine state machine; the lab SIP secret is a throwaway and prod must
      * not register the browser this way (see config/telephony.php agent note).
      *
+     * B2.2b Fold A: resolved PER LOGGED-IN AGENT via the directory, so a 2nd agent
+     * registers as their OWN phone (1004) instead of the one global extension every
+     * agent used to get. Users not in the directory fall back to the single-agent
+     * config, so the one-agent lab path is unbroken.
+     *
      * @return array{extension: ?string, password: ?string, wsUrl: ?string, sipDomain: string}
      */
     public function getPhoneConfig(): array
     {
-        return [
-            'extension' => config('telephony.agent.extension'),
-            'password' => config('telephony.agent.password'),
-            'wsUrl' => config('telephony.agent.ws_url'),
-            'sipDomain' => config('telephony.agent.sip_domain'),
-        ];
+        return app(AgentDirectory::class)->browserIdentityFor((int) auth()->id());
     }
 
     /**
