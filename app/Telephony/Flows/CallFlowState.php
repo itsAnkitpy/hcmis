@@ -14,10 +14,12 @@ namespace App\Telephony\Flows;
  *   - inbound:  caller answered -> RingingAgent    (the agent's phone rings)
  *   - outbound: agent leg is up -> RingingCustomer (the customer's phone rings)
  *
- * B2.4a adds one extra stage that hangs off InCall, not Idle: a cold transfer
- * briefly rings a SECOND agent (B) while the first (A) keeps talking, so the
- * machine leaves InCall for Transferring and returns to InCall either way — B
- * answered (now serving the caller) or B didn't (A still serving).
+ * B2.4a/B2.4b add one extra stage that hangs off InCall, not Idle: the live call is
+ * still joined to its serving agent(s) while a SECOND agent (B) is being rung in. The
+ * ring is identical for a cold transfer and a 3-way conference (the caller is never left
+ * alone); an intent flag on the handler forks only what happens when B answers — drop A
+ * (transfer) or keep A (conference). The machine leaves InCall for AddingAgent and
+ * returns to InCall either way: B answered, or B didn't (the call is unchanged).
  */
 enum CallFlowState
 {
@@ -30,14 +32,15 @@ enum CallFlowState
     /** Outbound: agent leg is up; the customer's phone is ringing (awaiting pickup or timeout). */
     case RingingCustomer;
 
-    /** Both legs are joined and talking; both sides are being recorded. */
+    /** The caller is joined to one or more connected agents and being recorded. */
     case InCall;
 
     /**
-     * Cold transfer in progress (B2.4a TD-5): the caller is still joined to the
-     * serving agent (A) while a free agent (B) is being rung. B answering promotes
-     * B and drops A; B not answering (or the caller leaving) returns to InCall with
-     * A unchanged. The caller is never alone — "supervised cold transfer".
+     * Adding a second agent to a live call (B2.4b CD-5; was B2.4a's Transferring): the
+     * caller stays joined to the serving agent (A) while a free agent (B) is being rung.
+     * B answering forks on the handler's intent — transfer (drop A) or conference (keep
+     * A, the 3-way). B not answering (or the caller leaving) returns to InCall. The
+     * caller is never alone — the never-strand rule, shared with the cold transfer.
      */
-    case Transferring;
+    case AddingAgent;
 }

@@ -368,6 +368,19 @@
                         x-text="transferring ? 'Transferring…' : 'Transfer'"
                     ></button>
 
+                    {{-- B2.4b conference: pull a free agent into a 3-way (CD-3/CD-6). Non-blocking
+                         — A keeps full call control and stays on the call; the listener rings the
+                         new agent while A keeps talking, and on answer adds them WITHOUT dropping A.
+                         The button only disables while its own ring is in flight (one at a time). --}}
+                    <button
+                        type="button"
+                        x-show="state === 'onCall'"
+                        x-on:click="conference()"
+                        :disabled="conferencing"
+                        class="inline-flex items-center rounded-lg bg-teal-600 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        x-text="conferencing ? 'Ringing…' : 'Conference'"
+                    ></button>
+
                     <button
                         type="button"
                         x-on:click="hangup()"
@@ -385,6 +398,21 @@
                 x-cloak
                 class="mt-3 text-sm text-amber-600 dark:text-amber-400"
                 x-text="transferNotice"
+            ></p>
+
+            {{-- B2.4b (CD-6): the conference feedback. A lightweight, non-blocking "ringing
+                 to join…" line while B rings; after the ring window a neutral note (there is
+                 no listener->screen signal, so success is confirmed by audio — A hears B join). --}}
+            <p
+                x-show="conferencing"
+                x-cloak
+                class="mt-3 text-sm text-teal-600 dark:text-teal-400"
+            >Ringing an agent to join the call…</p>
+            <p
+                x-show="conferenceNotice"
+                x-cloak
+                class="mt-3 text-sm text-amber-600 dark:text-amber-400"
+                x-text="conferenceNotice"
             ></p>
         </div>
 

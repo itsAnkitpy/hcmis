@@ -406,6 +406,30 @@ it('signals a cold transfer carrying the agent user id and the server-derived te
     });
 });
 
+it('signals a conference carrying the agent user id and the server-derived tenant (B2.4b CD-6)', function () {
+    config()->set('telephony.asterisk.app', 'hcmis-test');
+    Http::fake(['*' => Http::response(null, 204)]);
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($agent, $tenant): void {
+        (new AgentConsole)->conferenceCall();
+
+        // The SAME source-less user-event as a transfer, named 'conference' instead: the
+        // app rides the query, the correlator (agent user id) + the server-derived tenant
+        // ride the JSON body. Only the signal name differs.
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/ari/events/user/conference?')
+            && dialParams($request) === ['application' => 'hcmis-test']
+            && $request->data() === ['variables' => [
+                'agentUserId' => (string) $agent->id,
+                'tenantId' => (string) $tenant->id,
+            ]]);
+    });
+});
+
 it('threads the dialing agent user id as the 4th app-arg so an outbound call is transferable (B2.4a)', function () {
     config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);

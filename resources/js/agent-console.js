@@ -78,6 +78,17 @@ const agentConsole = (config) => ({
     transferTimer: null,
     transferNotice: null,
 
+    // B2.4b conference: `conferencing` flips on while a conference ring is in flight (drives
+    // the non-blocking "ringing to join…" indicator + disables the Conference button so a
+    // second ring isn't fired — the listener also no-ops a second signal while a ring is in
+    // flight). Unlike transfer it does NOT lock the call: A keeps mute/hang-up and STAYS on
+    // the (now 3-way) call on success. There is no listener->screen signal (CD-6), so on
+    // success A simply hears B join (audio confirms); `conferenceTimer` is the ring window
+    // and `conferenceNotice` the neutral line shown after it — true whether B joined or not.
+    conferencing: false,
+    conferenceTimer: null,
+    conferenceNotice: null,
+
     init() {
         this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
 
@@ -137,6 +148,12 @@ const agentConsole = (config) => ({
             clearTimeout(this.transferTimer);
             this.transferring = false;
             this.transferNotice = null;
+
+            // B2.4b: A's leg ending also ends any conference indicator — either A dropped
+            // out of the 3-way (the other two continue server-side) or the whole call ended.
+            clearTimeout(this.conferenceTimer);
+            this.conferencing = false;
+            this.conferenceNotice = null;
 
             // Only an answered call opens wrap-up (CP3 decision A). A declined or
             // abandoned ring (never answered) goes straight back to ready.
@@ -429,6 +446,36 @@ const agentConsole = (config) => ({
         }, 35000);
     },
 
+    /**
+     * B2.4b — conference a free agent into the live call (CD-3/CD-6). Signal the listener
+     * (over $wire -> conferenceCall(), the same web→provider POST as transfer, only named
+     * 'conference'); the listener reserves a free agent and rings them while this agent
+     * KEEPS TALKING. Non-blocking: unlike transfer this does NOT lock the call — A retains
+     * mute/hang-up and stays on the (now 3-way) call. On success A simply hears B join
+     * (there is no listener->screen signal, CD-6); on no-answer / nobody-free nothing
+     * changes server-side, so a screen-side timer clears the indicator after the ring
+     * window with a NEUTRAL note (true either way, since A stays on the call regardless).
+     * Only from 'onCall', and only one ring in flight at a time.
+     */
+    conference() {
+        if (this.state !== 'onCall' || this.conferencing) {
+            return;
+        }
+
+        this.conferencing = true;
+        this.conferenceNotice = null;
+        this.$wire.conferenceCall();
+
+        // The ring window: a touch longer than Asterisk's 30s originate timeout, so a real
+        // no-answer (B's leg ending) resolves first. The note must NOT claim failure — on
+        // success B has already joined audibly, so this just confirms the ring window closed.
+        clearTimeout(this.conferenceTimer);
+        this.conferenceTimer = setTimeout(() => {
+            this.conferencing = false;
+            this.conferenceNotice = 'Conference ring ended — if no one joined, you’re still on the call.';
+        }, 35000);
+    },
+
     /** Whether the picked outcome schedules a callback (reveals the date/time fields). */
     isCallbackSelected() {
         return this.callbackDispositionIds.includes(Number(this.selectedDisposition));
@@ -525,11 +572,15 @@ const agentConsole = (config) => ({
         clearTimeout(this.transferTimer);
         this.transferring = false;
         this.transferNotice = null;
+        clearTimeout(this.conferenceTimer);
+        this.conferencing = false;
+        this.conferenceNotice = null;
     },
 
     destroy() {
         clearInterval(this.heartbeatTimer);
         clearTimeout(this.transferTimer);
+        clearTimeout(this.conferenceTimer);
         this.phone?.stop();
     },
 });

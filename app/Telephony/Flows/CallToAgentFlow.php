@@ -41,6 +41,11 @@ use Illuminate\Support\Str;
  * call and routes each event to the right one, so many calls run side by side. This
  * handler is disposed at teardown — never reused — and registers/forgets the legs it
  * places, and hands its pending recording merge, through the switchboard (FD-1/2/4).
+ *
+ * Many agents on one call (B2.4b CD-2): the call is one caller leg + a SET of agent
+ * legs (AgentLeg, each ringing or connected) sharing one voice mixer — generalised
+ * from B2.4a's fixed "one caller + one agent (+ a transient transfer leg)" so cold
+ * transfer, 3-way conference, and later supervisor-barge all just add or drop a member.
  */
 class CallToAgentFlow
 {
@@ -48,27 +53,27 @@ class CallToAgentFlow
 
     private ?string $callerLegId = null;
 
-    private ?string $agentLegId = null;
-
     private ?string $conversationId = null;
 
     /**
-     * The new agent (B)'s ringing leg during a cold transfer (B2.4a TD-5): set when
-     * beginTransfer rings B, promoted to agentLegId when B answers (completeTransfer),
-     * cleared when B doesn't (back to a normal InCall). Null at every other time.
+     * This call's agent legs (B2.4b CD-2), keyed by leg id — one connected agent in a
+     * plain 1:1 call, plus a *ringing* one while a transfer/conference is bringing a
+     * second agent in, plus a second *connected* one during a live 3-way. Replaces
+     * B2.4a's `agentLegId` + `transferLegId` + `servingAgentId` scalars: the serving
+     * agent is now "any connected member" (isServingAgent), and teardown follows the
+     * uniform participant-set rule (onLegEnded) instead of hard-coded 2-leg branches.
+     *
+     * @var array<string, AgentLeg>
      */
-    private ?string $transferLegId = null;
+    private array $agents = [];
 
     /**
-     * The user id of the agent CURRENTLY serving this call (B2.4a TD-4 fold) — kept
-     * for the call's whole life so a transfer signal can find this handler by "which
-     * agent is on it" (the switchboard scan, reusable for TD-7). Set the moment the
-     * agent connects: inbound COPIES it from reservedAgentId BEFORE the connect-wipe;
-     * outbound takes it from the agent-id tag the web threaded onto the agent leg. A
-     * completed transfer re-points it at the new agent (B), so a chained transfer / a
-     * later hang-up treats B exactly as A. Null until an agent is actually on the call.
+     * Why a second agent is currently being rung in (B2.4b CD-5): transfer (drop the
+     * existing agent when B answers) vs conference (keep them — the 3-way). Set when the
+     * ring starts (beginAddedAgent), read once on B's answer, then cleared. Null whenever
+     * no added-agent ring is in flight. The ring itself is identical for both intents.
      */
-    private ?int $servingAgentId = null;
+    private ?AddedAgentIntent $addedAgentIntent = null;
 
     /**
      * The call's tracking number (B3 D3): the UUID the web console minted at dial
@@ -91,17 +96,6 @@ class CallToAgentFlow
     private ?string $ticketNumber = null;
 
     private ?RecordingSession $recording = null;
-
-    /**
-     * The reservation this handler holds on the who's-free board (B2.2b RD-4): the
-     * company + agent it tagged "On a call" the instant it rang them. RELEASED if the
-     * agent never connects (Fold B — they ring out, or the caller abandons mid-ring);
-     * CLEARED but not released once they answer, when the agent's own screen takes over
-     * the status. Null for outbound (the agent picked themselves — no reservation).
-     */
-    private ?int $reservedTenantId = null;
-
-    private ?int $reservedAgentId = null;
 
     private readonly AgentRouter $router;
 
@@ -150,11 +144,13 @@ class CallToAgentFlow
      * A leg entered our Stasis app. The kinds are told apart by the args we
      * tagged them with:
      *   ['snoop']            -> our recording taps; infrastructure, ignored.
-     *   ['agent']            -> inbound agent pickup (the agent leg we placed).
-     *   ['agent', <number>, <uuid?>]
+     *   ['agent']            -> an agent leg WE placed (inbound pickup, or a
+     *                           transfer/conference's added agent) answering.
+     *   ['agent', <number>, <uuid?>, <agentId?>]
      *                        -> outbound entry: the agent leg, carrying the customer
-     *                           number to dial next (agent-first, CP-O0) and the
-     *                           call's tracking number (the B3 UUID, CP-B3-2 D3).
+     *                           number to dial next (agent-first, CP-O0), the call's
+     *                           tracking number (the B3 UUID), and the serving agent's
+     *                           user id (B2.4a, so an outbound call is transferable).
      *   ['outbound']         -> outbound customer pickup (the customer leg we placed).
      *   []                   -> an untagged outside caller (inbound entry).
      *
@@ -170,21 +166,28 @@ class CallToAgentFlow
         }
 
         if ($args === ['agent']) {
-            if ($this->state === CallFlowState::RingingAgent && $legId === $this->agentLegId) {
+            // A ringing agent leg we placed answered. Which kind depends on where we are:
+            // the inbound bootstrap pickup (RingingAgent) connects the call; an added
+            // agent (AddingAgent) forks on intent — transfer drops A, conference keeps A.
+            $agent = $this->agents[$legId] ?? null;
+
+            if ($agent === null || $agent->connected) {
+                return;
+            }
+
+            if ($this->state === CallFlowState::RingingAgent) {
                 $this->connectAgent();
-            } elseif ($this->state === CallFlowState::Transferring && $legId === $this->transferLegId) {
-                // The transfer target (B) picked up — slip them in, drop A (TD-5).
-                $this->completeTransfer();
+            } elseif ($this->state === CallFlowState::AddingAgent) {
+                $this->onAddedAgentAnswered($legId);
             }
 
             return;
         }
 
-        // Outbound entry (agent-first): the agent's own leg arrives first carrying
-        // the customer's number as a second arg (CP-B3-2: the call's UUID as a third;
-        // B2.4a: the serving agent's user id as a fourth, so an outbound call can be
-        // transferred too). >= 2 tolerates the pre-B3 two-arg shape, the three-arg
-        // one, and the four-arg one — each trailing detail is optional, default null.
+        // Outbound entry (agent-first): the agent's own leg arrives first carrying the
+        // customer's number (arg 1), the call's UUID (arg 2), and the serving agent's
+        // user id (arg 3). >= 2 tolerates the pre-B3 two-arg shape, the three-arg one,
+        // and the four-arg one — each trailing detail is optional, default null.
         if (is_array($args) && count($args) >= 2 && $args[0] === 'agent' && $this->state === CallFlowState::Idle) {
             $this->beginOutboundCall(
                 $legId,
@@ -248,17 +251,22 @@ class CallToAgentFlow
             return;
         }
 
-        // Reserved-at-ring (RD-4): remember the tag so a no-answer can release it (Fold B).
-        $this->reservedTenantId = $tenantId;
-        $this->reservedAgentId = $reservedAgentId;
-
         $this->telephony->answer($callerLegId);
-        $this->agentLegId = $this->telephony->placeCall(
+        $agentLegId = $this->telephony->placeCall(
             $this->directory->endpointFor($reservedAgentId),
             'agent',
             $callerNumber,
         );
-        $this->registry->registerLeg($this->agentLegId, $this);   // the leg we placed is ours (FD-2)
+        // The first agent enters the set RINGING, carrying the reservation so a no-answer
+        // can release it (Fold B); it flips to connected when they pick up (connectAgent).
+        $this->agents[$agentLegId] = new AgentLeg(
+            $agentLegId,
+            userId: $reservedAgentId,
+            connected: false,
+            reservedTenantId: $tenantId,
+            reservedAgentId: $reservedAgentId,
+        );
+        $this->registry->registerLeg($agentLegId, $this);   // the leg we placed is ours (FD-2)
         $this->state = CallFlowState::RingingAgent;
 
         Log::info('Inbound call: reserved a free agent, caller answered, ringing them.', [
@@ -267,7 +275,7 @@ class CallToAgentFlow
             'callerNumber' => $callerNumber,
             'tenant' => $tenantId,
             'agentUser' => $reservedAgentId,
-            'agent' => $this->agentLegId,
+            'agent' => $agentLegId,
         ]);
     }
 
@@ -294,24 +302,6 @@ class CallToAgentFlow
     }
 
     /**
-     * Release a reservation this handler still holds (Fold B): used when a reserved
-     * agent never connected. CONDITIONAL inside the router (flips on_call -> ready only
-     * if still the tag we set), so it never overwrites a status the agent's own screen
-     * set during the ring. A no-op for outbound or once the agent has answered (the refs
-     * are cleared on connect), so it is safe to call on every ring-stage teardown.
-     */
-    private function releaseReservationIfHeld(): void
-    {
-        if ($this->reservedTenantId === null || $this->reservedAgentId === null) {
-            return;
-        }
-
-        $this->router->releaseReservation($this->reservedTenantId, $this->reservedAgentId);
-        $this->reservedTenantId = null;
-        $this->reservedAgentId = null;
-    }
-
-    /**
      * Outbound entry (B-outbound M2): the agent's leg is already up (the web
      * console placed it agent-first); now dial the customer. The customer maps
      * onto callerLegId so the join/record/teardown below reuse unchanged. The
@@ -320,15 +310,17 @@ class CallToAgentFlow
      */
     private function beginOutboundCall(string $agentLegId, string $customerNumber, ?string $correlationId = null, ?int $servingAgentId = null): void
     {
-        $this->agentLegId = $agentLegId;
         $this->correlationId = $correlationId;
-        // B2.4a: the web threaded the dialing agent's user id onto the agent leg, so
-        // an outbound call can be transferred (the switchboard finds this handler by
-        // it). The agent leg is already up, so they are serving from this moment.
-        $this->servingAgentId = $servingAgentId;
         // Outbound reuses the web's tracking number as the ticket (FD-3); if a pre-B3
         // two-arg leg carried none, mint one so every call still has a unique ticket.
         $this->ticketNumber = $correlationId ?? (string) Str::uuid();
+        // The agent's leg is already up and committed to this call, so it enters the set
+        // CONNECTED (no reservation — they picked themselves). It carries the dialing
+        // agent's user id (B2.4a thread, may be null on a pre-B2.4a leg) so an outbound
+        // call is transferable too; the switchboard finds this handler by it. The
+        // switchboard already registered this leg when it made the handler.
+        $this->agents[$agentLegId] = new AgentLeg($agentLegId, userId: $servingAgentId, connected: true);
+
         $this->callerLegId = $this->telephony->placeCall(
             config('telephony.outbound.dial_prefix').$customerNumber,
             'outbound',
@@ -345,31 +337,32 @@ class CallToAgentFlow
         ]);
     }
 
-    /** Agent picked up: put both in one conversation and record both sides (D4). */
+    /**
+     * The first agent picked up: put them and the caller in one conversation and record
+     * both sides (D4). The sole agent leg flips ringing -> connected; its reservation is
+     * cleared WITHOUT releasing (the agent answered, so the tag stays "On a call" and the
+     * agent's own screen now owns the status). Reached by both directions — inbound's
+     * agent answering, and outbound's customer answering the already-up agent.
+     */
     private function connectAgent(): void
     {
-        $this->conversationId = $this->telephony->join($this->callerLegId, $this->agentLegId);
+        $agent = $this->soleAgent();
+
+        if ($agent === null) {
+            return;
+        }
+
+        $this->conversationId = $this->telephony->join((string) $this->callerLegId, $agent->legId);
         $this->recording = $this->telephony->startRecording(
-            $this->callerLegId,
+            (string) $this->callerLegId,
             'call-'.now()->format('Ymd-His'),
         );
         $this->state = CallFlowState::InCall;
 
-        // B2.4a (TD-4 fold): remember WHO is serving this call before the refs below
-        // are wiped — inbound's serving agent is the one we reserved. This is the
-        // handle the transfer signal finds this handler by (it survives the wipe).
-        // Outbound captured it already in beginOutboundCall (no reservation there), so
-        // only copy when we actually hold one — never clobber the outbound id with null.
-        if ($this->reservedAgentId !== null) {
-            $this->servingAgentId = $this->reservedAgentId;
-        }
-
-        // The agent answered (RD-4): drop the reservation refs WITHOUT releasing — the
-        // tag stays "On a call", and the agent's own screen now owns the status (it will
-        // write On-a-call / Wrap-up). Clearing here guarantees no later teardown releases
-        // a tag for a call that genuinely connected.
-        $this->reservedTenantId = null;
-        $this->reservedAgentId = null;
+        // Flip ringing -> connected and clear (not release) the reservation. The serving
+        // agent's user id already rode in with the AgentLeg, so there is nothing to copy
+        // here (the B2.4a "copy before the wipe" dance is gone — each member owns its id).
+        $agent->markConnected();
 
         // Register the pending merge the MOMENT recording starts — not at hang-up. When the
         // recorded (caller) leg drops, Asterisk destroys its taps and emits "recording
@@ -387,114 +380,195 @@ class CallToAgentFlow
     }
 
     /**
-     * Is THIS handler's live call currently served by the given agent (B2.4a TD-4)?
-     * The switchboard scans live handlers with this to find "which call is agent X
-     * on" — kept as a plain identity check (no state filter) so it stays the general
-     * lookup TD-7's supervisor-monitor reuses; the "only transfer a connected call"
-     * rule lives in beginTransfer, not here.
+     * Is THIS handler's live call currently served by the given agent (B2.4a TD-4,
+     * B2.4b CD-2)? The switchboard scans live handlers with this to find "which call is
+     * agent X on" — now a set-membership check across the CONNECTED agents, so it reaches
+     * a 3-way conference by EITHER agent (a second conference click; supervisor-monitor
+     * later). A ringing-but-not-yet-answered agent is not yet "serving" (no transfer
+     * before connect — that rule lives in beginAddedAgent, not here).
      */
     public function isServingAgent(int $userId): bool
     {
-        return $this->servingAgentId === $userId;
+        foreach ($this->agents as $agent) {
+            if ($agent->connected && $agent->userId === $userId) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
-     * Begin a cold transfer (B2.4a TD-5): reserve a free agent (B) on the given
-     * company's board and ring them WHILE the caller stays with the current agent
-     * (A) — the caller is never left alone ("supervised cold transfer"). B answering
-     * arrives as their agent-leg StasisStart and runs completeTransfer; B not
-     * answering ends as a ringing-leg ChannelDestroyed and reuses the Fold-B release.
-     *
-     * Driven by the switchboard off the web's transfer signal (TD-4). The tenant is
-     * the signal's server-derived one — A is provably in the call's company (A was
-     * reserved from that board), so it is authoritative for the reserve (TD-6).
+     * Begin a cold transfer (B2.4a TD-5): ring a free agent (B) and, when they answer,
+     * drop the current agent (A) — the caller ends up with B. A public name over the
+     * shared add-an-agent ring (beginAddedAgent) so the switchboard + tests read clearly.
      */
     public function beginTransfer(int $tenantId): void
     {
-        // Only a connected call can be transferred (TD-5): A must be talking to the
-        // caller. Ignore a signal that arrives any other time — a double-click while B
-        // already rings (state Transferring), or after the call ended.
+        $this->beginAddedAgent($tenantId, AddedAgentIntent::Transfer);
+    }
+
+    /**
+     * Begin a 3-way conference (B2.4b CD-3/CD-4): ring a free agent (B) and, when they
+     * answer, ADD them while keeping the current agent (A) — caller + A + B all talking.
+     * Identical ring to a transfer; only the on-answer action differs (no drop of A).
+     */
+    public function beginConference(int $tenantId): void
+    {
+        $this->beginAddedAgent($tenantId, AddedAgentIntent::Conference);
+    }
+
+    /**
+     * Ring a free agent (B) into a live call while the caller stays with the current
+     * agent(s) — the caller is never left alone (the never-strand rule, shared by cold
+     * transfer and conference). B answering arrives as their agent-leg StasisStart and
+     * forks on $intent (drop A vs keep A); B not answering ends as a ringing-leg
+     * ChannelDestroyed and reuses the Fold-B release. Driven by the switchboard off the
+     * web's transfer/conference signal (TD-4); the tenant is the signal's server-derived
+     * one — A is provably in the call's company (A was reserved from that board, TD-6).
+     */
+    private function beginAddedAgent(int $tenantId, AddedAgentIntent $intent): void
+    {
+        // Only a connected call can take a second agent: there must be a live
+        // conversation. Ignore a signal at any other time — a double-click while B
+        // already rings (state AddingAgent), or after the call ended.
         if ($this->state !== CallFlowState::InCall) {
+            return;
+        }
+
+        // Cap this slice at 3-way (CD-5): one caller + at most two connected agents. A
+        // signal on an already-3-party call is a no-op — 4-way+ is a free later cap-lift
+        // (the participant set already holds N), so capping now costs nothing future.
+        if (count($this->connectedAgents()) >= 2) {
             return;
         }
 
         $reservedAgentId = $this->router->reserveFreeAgent($tenantId);
 
-        // Nobody free (RD-5 flavour): touch nothing — A keeps the caller. A's screen
-        // learns it via its own transfer timeout (no listener->screen DB signal, TD-5).
+        // Nobody free (RD-5 flavour): touch nothing — the caller keeps the current
+        // agent(s). The screen learns it via its own ring-window timeout (no
+        // listener->screen DB signal, TD-5/CD-6).
         if ($reservedAgentId === null) {
-            Log::info('Transfer: no free agent available — leaving the call with the current agent.', [
+            Log::info('Add agent: no free agent available — leaving the call with the current agent(s).', [
                 'ticket' => $this->ticketNumber,
                 'tenant' => $tenantId,
-                'servingAgent' => $this->servingAgentId,
+                'intent' => $intent->name,
             ]);
 
             return;
         }
 
-        // Reserve B exactly as an inbound ring does (RD-4). The refs are FRESH — A's
-        // were cleared at connect — so from here releaseReservationIfHeld() guards B's
-        // tag, never A's (A is no longer reserved). B's leg carries no caller-ID in
-        // B2.4a (the customer number isn't retained past the first ring; a nicety
-        // parked for later), so B sees an unknown number until they are bridged in.
-        $this->reservedTenantId = $tenantId;
-        $this->reservedAgentId = $reservedAgentId;
-
-        $this->transferLegId = $this->telephony->placeCall(
+        // B's leg carries no caller-ID in this slice (the customer number isn't retained
+        // past the first ring; a nicety parked for later). It enters the set RINGING with
+        // a FRESH reservation, so releaseReservation guards B's tag, never a connected
+        // agent's (theirs were cleared at connect).
+        $legId = $this->telephony->placeCall(
             $this->directory->endpointFor($reservedAgentId),
             'agent',
         );
-        $this->registry->registerLeg($this->transferLegId, $this);   // B's leg is ours (FD-2)
-        $this->state = CallFlowState::Transferring;
+        $this->agents[$legId] = new AgentLeg(
+            $legId,
+            userId: $reservedAgentId,
+            connected: false,
+            reservedTenantId: $tenantId,
+            reservedAgentId: $reservedAgentId,
+        );
+        $this->registry->registerLeg($legId, $this);   // B's leg is ours (FD-2)
+        $this->addedAgentIntent = $intent;
+        $this->state = CallFlowState::AddingAgent;
 
-        Log::info('Transfer: reserved a free agent, ringing them while the caller stays with the current agent.', [
+        Log::info('Add agent: reserved a free agent, ringing them while the caller stays with the current agent(s).', [
             'ticket' => $this->ticketNumber,
             'tenant' => $tenantId,
-            'fromAgent' => $this->servingAgentId,
+            'intent' => $intent->name,
             'toAgent' => $reservedAgentId,
-            'transferLeg' => $this->transferLegId,
+            'addedLeg' => $legId,
         ]);
     }
 
     /**
-     * B picked up: complete the cold transfer (B2.4a TD-5). Add-first then remove —
-     * slip B into the live conversation BEFORE dropping A, so the caller never hears
-     * a gap (the conversation is a mixing bridge, so it briefly holds caller + A + B).
-     * Then hang up A (A's screen moves to wrap-up on its own) and promote B to the
-     * agent leg. The recording is untouched: its snoop sits on the caller leg, which
-     * never moved (TD-3/TD-6) — A's part then B's part land as one continuous file.
+     * The added agent (B) picked up: fork on why they were rung (CD-5). The ring was
+     * identical; only the completion differs — transfer drops the existing agent,
+     * conference keeps them.
      */
-    private function completeTransfer(): void
+    private function onAddedAgentAnswered(string $legId): void
     {
-        $this->telephony->addToBridge((string) $this->conversationId, (string) $this->transferLegId);
-        $this->telephony->removeFromBridge((string) $this->conversationId, (string) $this->agentLegId);
-        $this->telephony->hangup((string) $this->agentLegId);
+        match ($this->addedAgentIntent) {
+            AddedAgentIntent::Transfer => $this->completeTransfer($legId),
+            AddedAgentIntent::Conference => $this->completeConference($legId),
+            null => null,
+        };
+    }
 
-        // From here B IS the serving agent: a later hang-up — or a SECOND transfer —
-        // treats B exactly as A was treated.
-        $this->agentLegId = $this->transferLegId;
-        $this->transferLegId = null;
-        $this->servingAgentId = $this->reservedAgentId;
+    /**
+     * B picked up on a TRANSFER (B2.4a TD-5). Add-first then remove — slip B into the
+     * live conversation BEFORE dropping the existing agent(s), so the caller never hears
+     * a gap (the conversation is a mixing bridge, so it briefly holds caller + A + B).
+     * Then hang up A (A's screen moves to wrap-up on its own). The recording is
+     * untouched: its snoop sits on the caller leg, which never moved (TD-3/TD-6) — A's
+     * part then B's part land as one continuous file.
+     */
+    private function completeTransfer(string $bLegId): void
+    {
+        $b = $this->agents[$bLegId];
 
-        // B genuinely connected (RD-4): drop the reservation refs WITHOUT releasing —
-        // the tag stays "On a call" and B's own screen now owns the status. Same as
-        // connectAgent: clearing here guarantees no later teardown releases B's tag.
-        $this->reservedTenantId = null;
-        $this->reservedAgentId = null;
+        $this->telephony->addToBridge((string) $this->conversationId, $bLegId);
 
+        foreach ($this->connectedAgents() as $a) {
+            $this->telephony->removeFromBridge((string) $this->conversationId, $a->legId);
+            $this->telephony->hangup($a->legId);
+            unset($this->agents[$a->legId]);
+        }
+
+        $b->markConnected();
+        $this->addedAgentIntent = null;
         $this->state = CallFlowState::InCall;
 
         Log::info('Transfer complete: the new agent is on the call; the previous agent has been dropped.', [
             'ticket' => $this->ticketNumber,
-            'servingAgent' => $this->servingAgentId,
-            'agentLeg' => $this->agentLegId,
+            'servingAgent' => $b->userId,
+            'agentLeg' => $bLegId,
         ]);
     }
 
     /**
-     * A leg ended. What it means depends on where we are: while ringing it is a
-     * no-answer (the agent leg) or an abandoned caller; in a call it is a hang-up.
-     * Snoop legs and a freshly-dropped survivor never match a tracked id, so they
+     * B picked up on a CONFERENCE (B2.4b CD-4). Add B and KEEP the existing agent — the
+     * 3-way: caller + A + B all talking, the conversation's mixing bridge now holding all
+     * three. The ENTIRE difference from a transfer is the absence of the remove + hang-up
+     * of A. The recording rides through untouched (the caller-leg snoop never moves), so
+     * one continuous file captures the whole conference.
+     */
+    private function completeConference(string $bLegId): void
+    {
+        $b = $this->agents[$bLegId];
+
+        $this->telephony->addToBridge((string) $this->conversationId, $bLegId);
+
+        $b->markConnected();
+        $this->addedAgentIntent = null;
+        $this->state = CallFlowState::InCall;
+
+        Log::info('Conference: the added agent joined; all parties are now on the call.', [
+            'ticket' => $this->ticketNumber,
+            'agents' => array_map(fn (AgentLeg $a): ?int => $a->userId, $this->connectedAgents()),
+        ]);
+    }
+
+    /**
+     * A leg ended. What it means depends on where we are and which leg it was.
+     *
+     * Bootstrap ring (no conversation yet — establishing the FIRST connection): the
+     * shape is direction-asymmetric and unchanged from B2.4a. Inbound (RingingAgent):
+     * the agent leg ending is a no-answer, the caller leg ending is an abandoned caller —
+     * either drops the survivor and goes back to ready. Outbound (RingingCustomer): the
+     * agent leg is already up, so the CUSTOMER leg ending is the no-answer (drop the
+     * agent), the agent leg ending is the agent abandoning mid-ring (cancel the customer).
+     *
+     * Live call (InCall / AddingAgent — the participant-set rule, CD-2): the caller
+     * leaving ends the whole call; a *ringing* added agent ending is a no-answer (release
+     * + drop, the call carries on with whoever was connected); a *connected* agent ending
+     * is a hang-up (drop them, continue if any connected agent remains, else the caller is
+     * alone -> end). Snoop legs and a freshly-dropped survivor match no tracked id and
      * fall through untouched.
      *
      * @param  array<string, mixed>  $event
@@ -503,66 +577,70 @@ class CallToAgentFlow
     {
         $legId = $event['channel']['id'] ?? '';
 
-        // While ringing, a leg ending tears the other one down and resets. The
-        // shape is identical both directions — end one ringing leg, hang up the
-        // other — but what the agent's browser does next differs, and is decided
-        // there (on the answered flag), not here:
-        //   - inbound (RingingAgent): the agent leg never answered; its end is a
-        //     silent reset, the caller leg ending is an abandoned caller — both
-        //     drop the survivor and go back to ready.
-        //   - outbound (RingingCustomer): the agent leg is already up, so the
-        //     CUSTOMER leg ending is the no-answer signal (CP-O2 / D5) — dropping
-        //     the answered agent leg flips the browser to wrap-up; the agent leg
-        //     ending is the agent abandoning mid-ring, which cancels the customer.
         if ($this->state === CallFlowState::RingingAgent || $this->state === CallFlowState::RingingCustomer) {
-            // Fold B: a reserved inbound agent never connected — release the reservation
-            // on BOTH no-answer paths (the agent rang out = their leg ended; the caller
-            // abandoned mid-ring = the caller leg ended), so neither leaks a stuck tag.
-            // A no-op for outbound (no reservation held).
-            $this->releaseReservationIfHeld();
+            // Fold B: a reserved agent never connected — release on BOTH no-answer paths
+            // (the agent rang out, or the caller abandoned mid-ring). A no-op for outbound.
+            $this->releaseAllReservations();
 
-            if ($legId === $this->agentLegId) {
-                $this->telephony->hangup($this->callerLegId);
+            if (isset($this->agents[$legId])) {
+                $this->telephony->hangup((string) $this->callerLegId);
                 $this->dispose();
             } elseif ($legId === $this->callerLegId) {
-                $this->telephony->hangup($this->agentLegId);
+                foreach (array_keys($this->agents) as $agentLegId) {
+                    $this->telephony->hangup($agentLegId);
+                }
                 $this->dispose();
             }
 
             return;
         }
 
-        // Mid-transfer (B2.4a TD-5): a leg ending means one of three things.
-        if ($this->state === CallFlowState::Transferring) {
-            if ($legId === $this->transferLegId) {
-                // B never answered (rang out / declined): release B's tag (Fold B) and
-                // leave the caller with A — back to a normal InCall, nothing else moved.
-                $this->releaseReservationIfHeld();
-                $this->transferLegId = null;
+        if ($this->state === CallFlowState::InCall || $this->state === CallFlowState::AddingAgent) {
+            // The caller leaving ends the whole call — never leave an agent (or a
+            // still-ringing added agent) on a dead call. Release any held tag (a ringing
+            // added agent, Fold B), then end, hanging up everyone still held.
+            if ($legId === $this->callerLegId) {
+                $this->releaseAllReservations();
+                $this->endCall($legId);
+
+                return;
+            }
+
+            $agent = $this->agents[$legId] ?? null;
+
+            if ($agent === null) {
+                return;   // not a leg we track (a snoop, a freshly-dropped survivor)
+            }
+
+            if (! $agent->connected) {
+                // A ringing added agent ended (rang out / declined): release its tag
+                // (Fold B), drop it, the call carries on with whoever was connected.
+                $this->releaseReservation($agent);
+                unset($this->agents[$legId]);
                 $this->state = CallFlowState::InCall;
 
-                Log::info('Transfer: the new agent did not answer — the call stays with the current agent.', [
+                Log::info('Add agent: the new agent did not answer — the call stays with the current agent(s).', [
                     'ticket' => $this->ticketNumber,
-                    'servingAgent' => $this->servingAgentId,
                 ]);
 
                 return;
             }
 
-            // The caller left, or A dropped mid-ring (shouldn't, but) — either way the
-            // call is over: never leave the caller alone with a still-ringing B. Release
-            // B's tag, hang up the still-ringing B, then tear down like any hang-up.
-            if ($legId === $this->callerLegId || $legId === $this->agentLegId) {
-                $this->releaseReservationIfHeld();
-                rescue(fn () => $this->telephony->hangup((string) $this->transferLegId), report: false);
-                $this->endCall($legId);
+            // A connected agent hung up. Drop them — the leg is already gone, so no
+            // removeFromBridge. If a connected agent still remains the call continues
+            // (caller + the rest); otherwise the caller would be alone -> end the call,
+            // hanging up any still-ringing added agent too (never strand the caller).
+            unset($this->agents[$legId]);
+
+            if ($this->connectedAgents() !== []) {
+                Log::info('An agent left the call; it continues with the remaining agent(s).', [
+                    'ticket' => $this->ticketNumber,
+                ]);
+
+                return;
             }
 
-            return;
-        }
-
-        if ($this->state === CallFlowState::InCall
-            && ($legId === $this->callerLegId || $legId === $this->agentLegId)) {
+            $this->releaseAllReservations();
             $this->endCall($legId);
         }
     }
@@ -572,21 +650,25 @@ class CallToAgentFlow
      * (connectAgent), so the recording survives whoever hangs up first. Stopping the
      * recording here is best-effort: when the RECORDED (caller) leg is the one that
      * dropped (inbound hang-up), Asterisk has already finished and destroyed the taps,
-     * so an explicit stop would refuse — expected, not an error. When the survivor is
-     * the recorded leg (outbound agent hang-up) the explicit stop is what finishes it;
-     * and if that ever fails, hanging up the survivor below finishes it anyway.
+     * so an explicit stop would refuse — expected, not an error. Hangs up every leg we
+     * still hold except the one that just ended (the caller + any agents, including a
+     * still-ringing added agent), then folds the conversation.
      */
     private function endCall(string $endedLegId): void
     {
         $recording = $this->recording;
         $conversationId = (string) $this->conversationId;
-        $survivorLegId = (string) ($endedLegId === $this->callerLegId ? $this->agentLegId : $this->callerLegId);
+        $legsToHangUp = array_filter($this->allLegIds(), fn (string $legId): bool => $legId !== $endedLegId);
 
-        rescue(fn () => $this->telephony->stopRecording($recording), report: false);
+        if ($recording !== null) {
+            rescue(fn () => $this->telephony->stopRecording($recording), report: false);
+        }
 
         $this->dispose();
 
-        rescue(fn () => $this->telephony->hangup($survivorLegId), report: false);
+        foreach ($legsToHangUp as $legId) {
+            rescue(fn () => $this->telephony->hangup($legId), report: false);
+        }
         rescue(fn () => $this->telephony->endConversation($conversationId), report: false);
     }
 
@@ -598,11 +680,11 @@ class CallToAgentFlow
             'error' => $exception->getMessage(),
         ]);
 
-        // Release any reservation we hold so an error before the agent connects can't
+        // Release any reservation we hold so an error before an agent connects can't
         // leave them stuck "On a call" (Fold B lifecycle — the stale-heartbeat net won't
         // free a leaked tag while the tab keeps stamping). Best-effort: never mask the
         // original telephony error.
-        rescue(fn () => $this->releaseReservationIfHeld(), report: false);
+        rescue(fn () => $this->releaseAllReservations(), report: false);
         $this->hangupHeldLegs();
         $this->dispose();
     }
@@ -628,16 +710,70 @@ class CallToAgentFlow
         // Same reservation safety as abort() (Fold B lifecycle): the switchboard backstop
         // fires on an UNEXPECTED error, which could strike after we reserved an agent but
         // before they connected — release the tag so they are not stuck "On a call".
-        rescue(fn () => $this->releaseReservationIfHeld(), report: false);
+        rescue(fn () => $this->releaseAllReservations(), report: false);
         $this->hangupHeldLegs();
         $this->reset();
     }
 
-    /** Best-effort hang up whichever of our legs we still hold (incl. a mid-transfer B leg). */
+    /** The sole agent on the call — used at connect, where exactly one agent exists. */
+    private function soleAgent(): ?AgentLeg
+    {
+        return array_values($this->agents)[0] ?? null;
+    }
+
+    /**
+     * The agents currently connected (in the conversation) — excludes a still-ringing
+     * added agent. The serving set: who isServingAgent matches, and who a transfer drops.
+     *
+     * @return array<int, AgentLeg>
+     */
+    private function connectedAgents(): array
+    {
+        return array_values(array_filter($this->agents, fn (AgentLeg $agent): bool => $agent->connected));
+    }
+
+    /** Every leg we still hold — the caller plus all agent legs (ringing or connected). */
+    private function allLegIds(): array
+    {
+        $legIds = array_keys($this->agents);
+
+        if ($this->callerLegId !== null) {
+            $legIds[] = $this->callerLegId;
+        }
+
+        return $legIds;
+    }
+
+    /** Best-effort hang up every leg we still hold (caller + all agent legs). */
     private function hangupHeldLegs(): void
     {
-        foreach (array_filter([$this->callerLegId, $this->agentLegId, $this->transferLegId]) as $legId) {
+        foreach ($this->allLegIds() as $legId) {
             rescue(fn () => $this->telephony->hangup($legId), report: false);
+        }
+    }
+
+    /**
+     * Release one agent's board reservation if it still holds one (Fold B): used when a
+     * reserved agent never connected. CONDITIONAL inside the router (flips on_call ->
+     * ready only if still the tag we set), so it never overwrites a status the agent's
+     * own screen set during the ring. Clears the refs so it is safe to call again.
+     */
+    private function releaseReservation(AgentLeg $agent): void
+    {
+        if ($agent->reservedTenantId === null || $agent->reservedAgentId === null) {
+            return;
+        }
+
+        $this->router->releaseReservation($agent->reservedTenantId, $agent->reservedAgentId);
+        $agent->reservedTenantId = null;
+        $agent->reservedAgentId = null;
+    }
+
+    /** Release every reservation we still hold (a ringing inbound/added agent). */
+    private function releaseAllReservations(): void
+    {
+        foreach ($this->agents as $agent) {
+            $this->releaseReservation($agent);
         }
     }
 
@@ -646,14 +782,11 @@ class CallToAgentFlow
     {
         $this->state = CallFlowState::Idle;
         $this->callerLegId = null;
-        $this->agentLegId = null;
-        $this->transferLegId = null;
-        $this->servingAgentId = null;
+        $this->agents = [];
+        $this->addedAgentIntent = null;
         $this->conversationId = null;
         $this->correlationId = null;
         $this->ticketNumber = null;
         $this->recording = null;
-        $this->reservedTenantId = null;
-        $this->reservedAgentId = null;
     }
 }

@@ -162,8 +162,8 @@ class TelephonyListen extends Command
         } elseif (isset($event['recording'])) {
             $label .= " — {$event['recording']['name']} ({$event['recording']['state']})";
         } elseif (isset($event['eventname'])) {
-            // The web's control signal (B2.4a TD-4) — show which signal it was so the
-            // transfer is followable in this terminal alongside the call's own events.
+            // The web's control signal (B2.4a TD-4) — show which signal it was (transfer,
+            // conference, …) so it is followable in this terminal alongside the call's events.
             $label .= " — {$event['eventname']}";
         }
 

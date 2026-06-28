@@ -201,6 +201,9 @@ class Switchboard implements HandlerRegistry
             'transfer' => $tenantId === null
                 ? null
                 : $this->guard($handler, fn () => $handler->beginTransfer($tenantId)),
+            'conference' => $tenantId === null
+                ? null
+                : $this->guard($handler, fn () => $handler->beginConference($tenantId)),
             default => null,   // an unknown signal is harmlessly ignored
         };
     }

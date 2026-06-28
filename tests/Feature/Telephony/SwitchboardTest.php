@@ -308,3 +308,75 @@ it('ignores a transfer user-event for an agent who has no live call', function (
 
     expect($switchboard->activeCallCount())->toBe(1);   // call A undisturbed
 });
+
+/*
+|--------------------------------------------------------------------------
+| B2.4b-i — the web's conference signal (ChannelUserevent) routing (CD-3/CD-6)
+|--------------------------------------------------------------------------
+|
+| Conference reuses the SAME signal plumbing as transfer — only the eventname differs
+| ('conference' vs 'transfer'). The switchboard finds the handler serving that agent by
+| the same general scan and begins the conference on THAT call. The proof it forks
+| correctly: addToBridge fires and removeFromBridge does NOT (the existing agent is kept,
+| unlike a transfer). After the join, isServingAgent is true for BOTH agents (CD-2 set
+| membership), so a second conference click — or supervisor-monitor later — reaches it
+| by either one.
+*/
+
+it('routes a conference user-event to the handler serving that agent, adding B WITHOUT dropping A', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+    fakeAgentRouter(9);   // the conference target B
+
+    $sessionSix = new RecordingSession('cust-6', 'call-6', '6-said', '6-heard');
+    $sessionSeven = new RecordingSession('cust-7', 'call-7', '7-said', '7-heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    // Two outbound calls connect — one served by agent 6, one by agent 7 (the threaded id).
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/111', 'outbound', '1800555000')->andReturn('cust-6');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/222', 'outbound', '1800555000')->andReturn('cust-7');
+    $telephony->shouldReceive('join')->once()->with('cust-6', 'agent-6')->andReturn('conv-6');
+    $telephony->shouldReceive('join')->once()->with('cust-7', 'agent-7')->andReturn('conv-7');
+    $telephony->shouldReceive('startRecording')->once()->with('cust-6', Mockery::type('string'))->andReturn($sessionSix);
+    $telephony->shouldReceive('startRecording')->once()->with('cust-7', Mockery::type('string'))->andReturn($sessionSeven);
+    // The conference fires for agent 7 ONLY: ring B, then on answer ADD B to call-7's
+    // conversation and KEEP agent 7 — no removeFromBridge anywhere (that would be a transfer,
+    // and naming conv-6 would be the wrong handler). Both are the proof of correct routing + fork.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('bcleg');
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-7', 'bcleg');
+    $telephony->shouldNotReceive('removeFromBridge');
+
+    $switchboard = new Switchboard($telephony);
+
+    $switchboard->handle(stasisStart('agent-6', ['agent', '111', 'uuid-6', '6']));
+    $switchboard->handle(stasisStart('cust-6', ['outbound']));
+    $switchboard->handle(stasisStart('agent-7', ['agent', '222', 'uuid-7', '7']));
+    $switchboard->handle(stasisStart('cust-7', ['outbound']));
+
+    expect($switchboard->activeCallCount())->toBe(2);
+
+    $switchboard->handle(channelUserevent('conference', ['agentUserId' => '7', 'tenantId' => '3']));
+    $switchboard->handle(stasisStart('bcleg', ['agent']));   // B answers -> completeConference on call-7
+
+    expect($switchboard->activeCallCount())->toBe(2);   // both calls still live; call-6 untouched
+});
+
+it('ignores a conference user-event for an agent who has no live call', function () {
+    fakeAgentRouter();
+    $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once()->with('caller-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
+    $telephony->shouldReceive('join')->once()->andReturn('conv-A');
+    $telephony->shouldReceive('startRecording')->once()->andReturn($session);
+    // No conference placeCall — agent 99 is on no call, so nothing is rung.
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-A', []));
+    $switchboard->handle(stasisStart('agent-A', ['agent']));   // serving agent = 6
+
+    $switchboard->handle(channelUserevent('conference', ['agentUserId' => '99', 'tenantId' => '3']));
+
+    expect($switchboard->activeCallCount())->toBe(1);   // call A undisturbed
+});

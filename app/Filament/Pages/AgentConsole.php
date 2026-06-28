@@ -583,6 +583,37 @@ class AgentConsole extends Page
     }
 
     /**
+     * Conference a free agent into the live call (B2.4b CD-3/CD-6). The browser calls
+     * this over $wire when the agent clicks Conference mid-call: it POSTs the same
+     * control signal as a transfer, only named 'conference', carrying the agent's own
+     * user id (the correlator — they are on exactly one call) and the server-derived
+     * tenant id. The listener finds this agent's live call, reserves a free agent, and
+     * rings them while the caller keeps talking; on answer it ADDS them without dropping
+     * the current agent — caller + A + B all talking. The ENTIRE difference from
+     * transferCall is the signal name.
+     *
+     * Renderless: it fires mid-call and the agent STAYS on the (now 3-way) call, so it
+     * must not morph the live console — the screen drives its own non-blocking "ringing
+     * to join…" indicator and no-answer timeout (CD-6).
+     */
+    #[Renderless]
+    public function conferenceCall(): void
+    {
+        $tenantId = TenantContext::id();
+
+        // No tenant context (a global-staff demo session, not a tenant agent) -> nothing
+        // to reserve against; the reserve is tenant-scoped (TD-6), so there is no call.
+        if ($tenantId === null) {
+            return;
+        }
+
+        app(TelephonyProvider::class)->signal('conference', [
+            'agentUserId' => (string) auth()->id(),
+            'tenantId' => (string) $tenantId,
+        ]);
+    }
+
+    /**
      * Whether a (normalized) number is on the agent's own client's Do-Not-Call
      * list (O1). Runs in the web request's tenant context, so BelongsToTenant +
      * RLS wall the check to this client — another client's list never blocks here.
