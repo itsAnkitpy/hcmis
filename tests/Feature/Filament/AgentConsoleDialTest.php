@@ -376,3 +376,101 @@ it('forbids ad-hoc dialing without the dial-adhoc ability (D3 gate)', function (
             ->toThrow(AuthorizationException::class);
     });
 });
+
+/*
+|--------------------------------------------------------------------------
+| B2.4a — the web's cold-transfer signal + the outbound agent-id thread (TD-4)
+|--------------------------------------------------------------------------
+*/
+
+it('signals a cold transfer carrying the agent user id and the server-derived tenant (B2.4a TD-4)', function () {
+    config()->set('telephony.asterisk.app', 'hcmis-test');
+    Http::fake(['*' => Http::response(null, 204)]);
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($agent, $tenant): void {
+        (new AgentConsole)->transferCall();
+
+        // A source-less user-event named 'transfer': the app rides the query, the
+        // correlator (agent user id) + the server-derived tenant ride the JSON body.
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/ari/events/user/transfer?')
+            && dialParams($request) === ['application' => 'hcmis-test']
+            && $request->data() === ['variables' => [
+                'agentUserId' => (string) $agent->id,
+                'tenantId' => (string) $tenant->id,
+            ]]);
+    });
+});
+
+it('threads the dialing agent user id as the 4th app-arg so an outbound call is transferable (B2.4a)', function () {
+    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
+    Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    $campaignId = TenantContext::run($tenant->id, function (): int {
+        $campaign = Campaign::factory()->create(['is_active' => true]);
+        Lead::factory()->forCampaign($campaign)->status(LeadStatus::New)->create([
+            'phone' => '9991234567',
+            'attempts' => 0,
+        ]);
+
+        return $campaign->id;
+    });
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($campaignId): void {
+        $page = new AgentConsole;
+        $page->selectedCampaignId = $campaignId;
+        $page->dial();
+    });
+
+    Http::assertSent(function (Request $request) use ($agent): bool {
+        [$tag, $number, $uuid, $agentId] = array_pad(explode(',', dialParams($request)['appArgs']), 4, null);
+
+        return str_contains($request->url(), '/ari/channels?')
+            && $tag === 'agent' && $number === '9991234567' && Str::isUuid((string) $uuid)
+            && $agentId === (string) $agent->id;
+    });
+});
+
+it('rings the logged-in agent own phone on outbound, not the one fixed endpoint (B2.4a §7 outbound-per-agent)', function () {
+    config()->set('telephony.agent.endpoint', 'PJSIP/1003');   // the fixed fallback (agent A)
+    Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    // This agent's OWN phone, keyed by their user id (the B2.2b Fold A directory).
+    config()->set('telephony.agent.directory', [
+        $agent->id => ['endpoint' => 'PJSIP/1004'],
+    ]);
+
+    $campaignId = TenantContext::run($tenant->id, function (): int {
+        $campaign = Campaign::factory()->create(['is_active' => true]);
+        Lead::factory()->forCampaign($campaign)->status(LeadStatus::New)->create([
+            'phone' => '9991234567',
+            'attempts' => 0,
+        ]);
+
+        return $campaign->id;
+    });
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($campaignId): void {
+        $page = new AgentConsole;
+        $page->selectedCampaignId = $campaignId;
+        $page->dial();
+    });
+
+    // The agent leg rang THIS agent's own endpoint, not the fixed PJSIP/1003.
+    Http::assertSent(fn (Request $request): bool => str_contains($request->url(), '/ari/channels?')
+        && dialParams($request)['endpoint'] === 'PJSIP/1004');
+});

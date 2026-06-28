@@ -177,3 +177,21 @@ function recordingFinished(string $name): array
 {
     return ['type' => 'RecordingFinished', 'recording' => ['name' => $name]];
 }
+
+/**
+ * The web's control signal arriving on the event pipe (B2.4a TD-4). Mirrors the live
+ * container shape verified against Asterisk 20.19.0: a source-less user-event arrives
+ * as a `ChannelUserevent` with its name on `eventname` and the custom variables under
+ * `userevent` (Asterisk also echoes `eventname` into that object — harmless).
+ *
+ * @param  array<string, string>  $variables
+ * @return array<string, mixed>
+ */
+function channelUserevent(string $name, array $variables): array
+{
+    return [
+        'type' => 'ChannelUserevent',
+        'eventname' => $name,
+        'userevent' => array_merge($variables, ['eventname' => $name]),
+    ];
+}

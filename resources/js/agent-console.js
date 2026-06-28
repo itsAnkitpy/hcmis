@@ -67,6 +67,17 @@ const agentConsole = (config) => ({
     adhocNumber: '',
     notice: null,
 
+    // B2.4a cold transfer: `transferring` flips on while a transfer is in flight (drives
+    // the button's "Transferring…" label); `transferTimer` is the screen-side no-answer
+    // window (TD-5 — on success A's own leg hangs up and the 'ended' handler takes over,
+    // so this only has to revert on no-answer / nobody-free, where nothing changes
+    // server-side); `transferNotice` is the short "didn't go through" line shown back on
+    // the call. There is deliberately no listener->screen signal, so the timeout is the
+    // one feedback path (the listener log shows no-answer vs nobody-free; the screen can't).
+    transferring: false,
+    transferTimer: null,
+    transferNotice: null,
+
     init() {
         this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
 
@@ -119,6 +130,13 @@ const agentConsole = (config) => ({
         this.phone.on('ended', async () => {
             // The dial is over either way — stop auto-answering.
             this.outboundDialing = false;
+
+            // B2.4a: a successful transfer hangs up THIS agent's leg, which lands here.
+            // Cancel the screen-side no-answer timer so it can't fire during wrap-up, and
+            // clear the transfer flags — the call moving to wrap-up is the success signal.
+            clearTimeout(this.transferTimer);
+            this.transferring = false;
+            this.transferNotice = null;
 
             // Only an answered call opens wrap-up (CP3 decision A). A declined or
             // abandoned ring (never answered) goes straight back to ready.
@@ -384,6 +402,33 @@ const agentConsole = (config) => ({
         this.muted = ! this.muted;
     },
 
+    /**
+     * B2.4a — cold-transfer the live call to a free agent. Signal the listener (over
+     * $wire -> transferCall(), which POSTs the user-event); the listener reserves a
+     * free agent and rings them while this agent keeps talking. On success this
+     * agent's own leg is hung up by the listener -> the 'ended' handler moves us to
+     * wrap-up. On no-answer / nobody-free nothing changes server-side, so a screen-side
+     * timer (TD-5) reverts the button after the ring window with a short note. Only
+     * from 'onCall', and only one at a time.
+     */
+    transfer() {
+        if (this.state !== 'onCall' || this.transferring) {
+            return;
+        }
+
+        this.transferring = true;
+        this.transferNotice = null;
+        this.$wire.transferCall();
+
+        // The ring window: a touch longer than Asterisk's 30s originate timeout, so the
+        // real no-answer (B's leg ending) is always given the chance to resolve first.
+        clearTimeout(this.transferTimer);
+        this.transferTimer = setTimeout(() => {
+            this.transferring = false;
+            this.transferNotice = "Transfer didn't go through — you're still on the call.";
+        }, 35000);
+    },
+
     /** Whether the picked outcome schedules a callback (reveals the date/time fields). */
     isCallbackSelected() {
         return this.callbackDispositionIds.includes(Number(this.selectedDisposition));
@@ -477,10 +522,14 @@ const agentConsole = (config) => ({
         this.callbackPooled = false;
         this.outboundDialing = false;
         this.notice = null;
+        clearTimeout(this.transferTimer);
+        this.transferring = false;
+        this.transferNotice = null;
     },
 
     destroy() {
         clearInterval(this.heartbeatTimer);
+        clearTimeout(this.transferTimer);
         this.phone?.stop();
     },
 });

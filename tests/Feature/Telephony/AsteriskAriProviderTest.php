@@ -143,6 +143,42 @@ it('joins two legs into one conversation and returns its id', function () {
         && ariParams($request)['channel'] === 'leg-a,leg-b');
 });
 
+it('adds a leg to an existing conversation (B2.4a transfer surgery)', function () {
+    Http::fake(['*' => Http::response()]);
+
+    $this->telephony->addToBridge('conv-1', 'leg-b');
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && str_contains($request->url(), '/bridges/conv-1/addChannel')
+        && ariParams($request)['channel'] === 'leg-b');
+});
+
+it('removes a leg from a conversation without ending it (B2.4a transfer surgery)', function () {
+    Http::fake(['*' => Http::response()]);
+
+    $this->telephony->removeFromBridge('conv-1', 'leg-a');
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && str_contains($request->url(), '/bridges/conv-1/removeChannel')
+        && ariParams($request)['channel'] === 'leg-a');
+});
+
+it('signals the listener with a source-less user-event, variables in the JSON body (B2.4a TD-4)', function () {
+    Http::fake(['*' => Http::response(null, 204)]);
+
+    $this->telephony->signal('transfer', ['agentUserId' => '6', 'tenantId' => '3']);
+
+    Http::assertSent(function (Request $request): bool {
+        // The app name rides the query (source omitted -> a source-less event); the
+        // custom variables ride the BODY under 'variables' (verified live: query-string
+        // variables are dropped, the body lands under the received 'userevent' object).
+        return $request->method() === 'POST'
+            && str_starts_with($request->url(), 'http://voice.test:8088/ari/events/user/transfer?')
+            && ariParams($request) === ['application' => 'hcmis-test']
+            && $request->data() === ['variables' => ['agentUserId' => '6', 'tenantId' => '3']];
+    });
+});
+
 it('transfers a leg out of its conversation to another destination', function () {
     Http::fake(['*' => Http::response()]);
 

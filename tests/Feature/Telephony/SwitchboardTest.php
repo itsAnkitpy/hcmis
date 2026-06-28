@@ -236,3 +236,75 @@ it('forgets a disposed call legs, so a later event for a dead leg matches nothin
     $switchboard->handle(channelDestroyed('agent-A'));
     expect($switchboard->activeCallCount())->toBe(0);
 });
+
+/*
+|--------------------------------------------------------------------------
+| B2.4a — the web's transfer signal (ChannelUserevent) routing (TD-4 / TD-7)
+|--------------------------------------------------------------------------
+|
+| The switchboard learns one new event type: the web's control signal. It names
+| which AGENT it is about (their user id) + the company; the switchboard finds
+| that agent's live call by a scan of live handlers (the general lookup TD-7
+| reuses) and begins the transfer on THAT call, never a sibling. Two outbound
+| calls give two distinct serving agents (the id rides args[3]); the signal for
+| one must touch only that one.
+*/
+
+it('routes a transfer user-event to the handler serving that agent user id, leaving the other call untouched', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+    fakeAgentRouter(9);   // the transfer target B (whichever call transfers)
+
+    $sessionSix = new RecordingSession('cust-6', 'call-6', '6-said', '6-heard');
+    $sessionSeven = new RecordingSession('cust-7', 'call-7', '7-said', '7-heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    // Two outbound calls connect — one served by agent 6, one by agent 7.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/111', 'outbound', '1800555000')->andReturn('cust-6');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/222', 'outbound', '1800555000')->andReturn('cust-7');
+    $telephony->shouldReceive('join')->once()->with('cust-6', 'agent-6')->andReturn('conv-6');
+    $telephony->shouldReceive('join')->once()->with('cust-7', 'agent-7')->andReturn('conv-7');
+    $telephony->shouldReceive('startRecording')->once()->with('cust-6', Mockery::type('string'))->andReturn($sessionSix);
+    $telephony->shouldReceive('startRecording')->once()->with('cust-7', Mockery::type('string'))->andReturn($sessionSeven);
+    // The transfer fires for agent 7 ONLY: ring B, then on answer do the surgery on
+    // call-7 (its conversation + its agent leg). A removeFromBridge naming conv-6 /
+    // agent-6 would be an unexpected call under Mockery's strict matching — the proof
+    // the signal reached the RIGHT handler.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('btleg');
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-7', 'btleg');
+    $telephony->shouldReceive('removeFromBridge')->once()->with('conv-7', 'agent-7');
+    $telephony->shouldReceive('hangup')->once()->with('agent-7');
+
+    $switchboard = new Switchboard($telephony);
+
+    $switchboard->handle(stasisStart('agent-6', ['agent', '111', 'uuid-6', '6']));
+    $switchboard->handle(stasisStart('cust-6', ['outbound']));
+    $switchboard->handle(stasisStart('agent-7', ['agent', '222', 'uuid-7', '7']));
+    $switchboard->handle(stasisStart('cust-7', ['outbound']));
+
+    expect($switchboard->activeCallCount())->toBe(2);
+
+    $switchboard->handle(channelUserevent('transfer', ['agentUserId' => '7', 'tenantId' => '3']));
+    $switchboard->handle(stasisStart('btleg', ['agent']));   // B answers -> completeTransfer on call-7
+});
+
+it('ignores a transfer user-event for an agent who has no live call', function () {
+    fakeAgentRouter();
+    $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once()->with('caller-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
+    $telephony->shouldReceive('join')->once()->andReturn('conv-A');
+    $telephony->shouldReceive('startRecording')->once()->andReturn($session);
+    // No transfer placeCall — agent 99 is on no call, so nothing is rung. Under strict
+    // Mockery a stray 2-arg placeCall here would fail the test.
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-A', []));
+    $switchboard->handle(stasisStart('agent-A', ['agent']));   // serving agent = 6
+
+    $switchboard->handle(channelUserevent('transfer', ['agentUserId' => '99', 'tenantId' => '3']));
+
+    expect($switchboard->activeCallCount())->toBe(1);   // call A undisturbed
+});

@@ -354,6 +354,20 @@
                         class="inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold"
                         x-text="muted ? 'Unmute' : 'Mute'"
                     ></button>
+
+                    {{-- B2.4a cold transfer: hand the live caller to a free agent. The
+                         listener rings the new agent while this agent keeps talking; on
+                         success this agent's leg hangs up and the screen moves to wrap-up,
+                         on no-answer the button reverts after the ring window (TD-5). --}}
+                    <button
+                        type="button"
+                        x-show="state === 'onCall'"
+                        x-on:click="transfer()"
+                        :disabled="transferring"
+                        class="inline-flex items-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        x-text="transferring ? 'Transferring…' : 'Transfer'"
+                    ></button>
+
                     <button
                         type="button"
                         x-on:click="hangup()"
@@ -362,6 +376,16 @@
                     ></button>
                 </div>
             </div>
+
+            {{-- B2.4a (TD-5): the screen-side transfer feedback. A failed transfer
+                 (no-answer / nobody-free) reverts here with a neutral note, since there
+                 is no listener->screen signal to tell the two apart. --}}
+            <p
+                x-show="transferNotice"
+                x-cloak
+                class="mt-3 text-sm text-amber-600 dark:text-amber-400"
+                x-text="transferNotice"
+            ></p>
         </div>
 
         {{-- B4 CP3: wrap-up. An *answered* call that ended lands here. Matched

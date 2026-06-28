@@ -24,6 +24,7 @@ use App\Models\User;
 use App\Support\PhoneNumber;
 use App\Telephony\AgentDirectory;
 use App\Telephony\TelephonyProvider;
+use App\Tenancy\TenantContext;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
@@ -534,10 +535,51 @@ class AgentConsole extends Page
         $this->callCorrelationId = (string) Str::uuid();
 
         app(TelephonyProvider::class)->placeCall(
-            config('telephony.agent.endpoint'),
+            // Ring the LOGGED-IN agent's OWN phone (B2.2b Fold A directory), not the one
+            // fixed endpoint — so a 2nd agent's outbound leg rings 1004, not 1003 (closes
+            // the §7 outbound-per-agent gap). Falls back to the single-agent config for a
+            // user not in the directory, so the one-agent lab path stays unbroken. With
+            // the agent id now threaded below, an outbound call is fully transferable too.
+            app(AgentDirectory::class)->endpointFor((int) auth()->id()),
             'agent',
-            tagDetails: [$customerNumber, $this->callCorrelationId],
+            // B2.4a (TD-4 fold): thread the dialing agent's user id onto the agent leg
+            // (the 4th ordered tag value) so the handler retains WHO is serving and an
+            // OUTBOUND call can be transferred too — the transfer signal finds the
+            // B2.4a (TD-4 fold): thread the dialing agent's user id onto the agent leg
+            // (the 4th ordered tag value) so the handler retains WHO is serving and an
+            // OUTBOUND call can be transferred too — the transfer signal finds the
+            // handler by it. Backwards-compatible: the flow's >= 2 arg guard tolerates
+            // the extra value, and CP-B2.4a demos the inbound path either way.
+            tagDetails: [$customerNumber, $this->callCorrelationId, (string) auth()->id()],
         );
+    }
+
+    /**
+     * Cold-transfer the live call to a free agent (B2.4a TD-4). The browser calls this
+     * over $wire when the agent clicks Transfer mid-call: it POSTs a control signal to
+     * the running listener (web->provider-direct, the placeCall precedent) carrying the
+     * agent's own user id (the correlator — they are on exactly one call) and the
+     * server-derived tenant id. The listener finds this agent's live call, reserves a
+     * free agent, and rings them while the caller stays put — no database table, no poll.
+     *
+     * Renderless: it fires mid-call, so it must not morph the live console — the screen
+     * drives its own "Transferring…" state and no-answer timeout (TD-5).
+     */
+    #[Renderless]
+    public function transferCall(): void
+    {
+        $tenantId = TenantContext::id();
+
+        // No tenant context (a global-staff demo session, not a tenant agent) -> nothing
+        // to reserve against; the reserve is tenant-scoped (TD-6), so there is no call.
+        if ($tenantId === null) {
+            return;
+        }
+
+        app(TelephonyProvider::class)->signal('transfer', [
+            'agentUserId' => (string) auth()->id(),
+            'tenantId' => (string) $tenantId,
+        ]);
     }
 
     /**

@@ -49,6 +49,36 @@ interface TelephonyProvider
     /** Put two legs into one conversation (they hear each other); returns the conversation id. */
     public function join(string $legIdA, string $legIdB): string;
 
+    /**
+     * Add a leg to a conversation that ALREADY exists (B2.4a TD-3): the bridge
+     * surgery a cold transfer leans on — slip a freshly-answered agent into the
+     * live conversation before dropping the old one, so the caller never hears a
+     * gap. The conversation is a mixing one (join() makes it that way), so it
+     * holds more than two legs for the moment both agents are in it.
+     */
+    public function addToBridge(string $conversationId, string $legId): void;
+
+    /**
+     * Remove a leg from a conversation without ending it (B2.4a TD-3): the other
+     * half of the transfer surgery — take the old agent out once the new one is
+     * in. The leg itself is hung up separately; this only detaches it from the
+     * conversation.
+     */
+    public function removeFromBridge(string $conversationId, string $legId): void;
+
+    /**
+     * Send a free-form control signal to the running call-control listener (B2.4a
+     * TD-4): the web→listener side channel that needs no database table and no
+     * poll. The listener receives it on the event pipe it already holds; the
+     * $details ride along so it can find the live call the signal is about (B2.4a
+     * uses the agent's user id + tenant id). Reusable beyond transfer (TD-7) — the
+     * signal $name is what the listener routes on. The web calls this directly,
+     * the same web→provider precedent as outbound placeCall.
+     *
+     * @param  array<string, string>  $details
+     */
+    public function signal(string $name, array $details): void;
+
     /** Move a leg out of its conversation and send it to another destination (e.g. an extension). */
     public function transfer(string $legId, string $conversationId, string $destination): void;
 

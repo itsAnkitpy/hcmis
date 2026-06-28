@@ -62,8 +62,9 @@ class Switchboard implements HandlerRegistry
     /**
      * Feed the switchboard one raw engine event. RecordingFinished goes to the
      * shared notebook; a leg-entering event (StasisStart) is classified new-vs-known;
-     * every other per-leg event is routed to the leg's handler, or harmlessly dropped
-     * if no handler owns it (exactly today's fall-through).
+     * a ChannelUserevent is the web's control signal (B2.4a TD-4), routed by which
+     * agent it names; every other per-leg event is routed to the leg's handler, or
+     * harmlessly dropped if no handler owns it (exactly today's fall-through).
      *
      * @param  array<string, mixed>  $event
      */
@@ -76,6 +77,10 @@ class Switchboard implements HandlerRegistry
                 return;
             case 'StasisStart':
                 $this->onArrival($event);
+
+                return;
+            case 'ChannelUserevent':
+                $this->onUserEvent($event);
 
                 return;
             default:
@@ -130,18 +135,30 @@ class Switchboard implements HandlerRegistry
     }
 
     /**
-     * Hand one event to one handler behind the failure backstop (FD-6). A known
-     * telephony error is already handled inside the handler (it tidies its own call);
-     * this catches the UNEXPECTED — a bug — and tears down only that one call, logging
-     * it, so its siblings keep running. "The line dropped" (AriConnectionLost) is
-     * re-thrown untouched: it is everyone's problem and drives the reconnect.
+     * Route one raw event to one handler behind the failure backstop (FD-6).
      *
      * @param  array<string, mixed>  $event
      */
     private function dispatch(CallToAgentFlow $handler, array $event): void
     {
+        $this->guard($handler, fn () => $handler->handle($event));
+    }
+
+    /**
+     * Run one action against one handler behind the failure backstop (FD-6). A known
+     * telephony error is already handled inside the handler (it tidies its own call);
+     * this catches the UNEXPECTED — a bug — and tears down only that one call, logging
+     * it, so its siblings keep running. "The line dropped" (AriConnectionLost) is
+     * re-thrown untouched: it is everyone's problem and drives the reconnect. Shared by
+     * event routing (dispatch) and the web-signal actions (onUserEvent), so a transfer
+     * that blows up takes down only its own call.
+     *
+     * @param  callable(): void  $action
+     */
+    private function guard(CallToAgentFlow $handler, callable $action): void
+    {
         try {
-            $handler->handle($event);
+            $action();
         } catch (AriConnectionLost $exception) {
             throw $exception;
         } catch (Throwable $exception) {
@@ -152,6 +169,57 @@ class Switchboard implements HandlerRegistry
             $handler->discard();
             $this->release($handler);
         }
+    }
+
+    /**
+     * The web's control signal arrived on the event pipe (B2.4a TD-4): no database
+     * table, no poll — the listener hears it on the websocket it already holds. The
+     * signal names which AGENT it is about (their server-derived user id) + the
+     * company (tenant id), both carried in the user-event's variables. We find that
+     * agent's live call and act on it; the signal NAME (eventname) is what we route
+     * on, so this stays general for TD-7's supervisor-monitor, not transfer-only.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function onUserEvent(array $event): void
+    {
+        $variables = $event['userevent'] ?? [];
+        $agentUserId = isset($variables['agentUserId']) ? (int) $variables['agentUserId'] : null;
+        $tenantId = isset($variables['tenantId']) ? (int) $variables['tenantId'] : null;
+
+        if ($agentUserId === null) {
+            return;
+        }
+
+        $handler = $this->handlerServingAgent($agentUserId);
+
+        if ($handler === null) {
+            return;   // no live call for that agent (already ended, or never connected)
+        }
+
+        match ($event['eventname'] ?? '') {
+            'transfer' => $tenantId === null
+                ? null
+                : $this->guard($handler, fn () => $handler->beginTransfer($tenantId)),
+            default => null,   // an unknown signal is harmlessly ignored
+        };
+    }
+
+    /**
+     * Which live handler is serving the given agent (B2.4a TD-4)? A scan of the live
+     * handlers — chosen over a second index (fewer moving parts to keep in sync at our
+     * volume, FD-8) — and the SAME general lookup TD-7's supervisor-monitor will reuse.
+     * Each handler appears once per leg it holds, so dedupe by object as we go.
+     */
+    private function handlerServingAgent(int $agentUserId): ?CallToAgentFlow
+    {
+        foreach ($this->handlers as $handler) {
+            if ($handler->isServingAgent($agentUserId)) {
+                return $handler;
+            }
+        }
+
+        return null;
     }
 
     /**

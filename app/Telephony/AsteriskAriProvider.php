@@ -54,6 +54,28 @@ class AsteriskAriProvider implements TelephonyProvider
         return $conversationId;
     }
 
+    public function addToBridge(string $conversationId, string $legId): void
+    {
+        $this->command('POST', "/bridges/{$conversationId}/addChannel", ['channel' => $legId]);
+    }
+
+    public function removeFromBridge(string $conversationId, string $legId): void
+    {
+        $this->command('POST', "/bridges/{$conversationId}/removeChannel", ['channel' => $legId]);
+    }
+
+    public function signal(string $name, array $details): void
+    {
+        // POST /events/user/{name}: 'application' rides the query string, but the
+        // custom variables MUST ride the request BODY under a 'variables' key —
+        // query-string variables are dropped (verified live against the running
+        // container: a body-carried, source-less user-event arrives as a
+        // ChannelUserevent with the variables under its 'userevent' object).
+        $this->command('POST', "/events/user/{$name}", [
+            'application' => config('telephony.asterisk.app'),
+        ], ['variables' => $details]);
+    }
+
     public function transfer(string $legId, string $conversationId, string $destination): void
     {
         $this->command('POST', "/bridges/{$conversationId}/removeChannel", ['channel' => $legId]);
@@ -130,27 +152,36 @@ class AsteriskAriProvider implements TelephonyProvider
     }
 
     /**
-     * One ARI command. Parameters ride the query string — that is how ARI
-     * takes them. A 2xx only means "Asterisk heard me"; whether it actually
-     * happened arrives later on the event pipe.
+     * One ARI command. Parameters ride the query string — that is how ARI takes
+     * most of them. A few endpoints (POST /events/user) want their payload in a
+     * JSON request BODY instead; pass $body for those (verified live). A 2xx only
+     * means "Asterisk heard me"; whether it actually happened arrives later on the
+     * event pipe.
      *
      * @param  array<string, int|string>  $params
+     * @param  array<string, mixed>  $body
      */
-    private function command(string $method, string $path, array $params = []): Response
+    private function command(string $method, string $path, array $params = [], array $body = []): Response
     {
         if ($params !== []) {
             $path .= '?'.http_build_query($params);
         }
 
         try {
-            return Http::baseUrl(sprintf(
+            $request = Http::baseUrl(sprintf(
                 'http://%s:%d/ari',
                 config('telephony.asterisk.host'),
                 config('telephony.asterisk.port'),
             ))
                 ->withBasicAuth(config('telephony.asterisk.username'), config('telephony.asterisk.password'))
                 ->connectTimeout(5)
-                ->timeout(10)
+                ->timeout(10);
+
+            if ($body !== []) {
+                $request = $request->withBody(json_encode($body), 'application/json');
+            }
+
+            return $request
                 ->send($method, $path)
                 ->throw();
         } catch (RequestException $exception) {
