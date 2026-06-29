@@ -2,6 +2,7 @@
 
 namespace App\Audit;
 
+use App\Models\Call;
 use App\Models\Callback;
 use App\Models\Disposition;
 use App\Models\Lead;
@@ -185,6 +186,24 @@ class Audit
             ->event('grabbed')
             ->withProperties(self::withoutNulls(['lead_id' => $callback->lead_id]))
             ->log('pooled callback grabbed'));
+    }
+
+    /**
+     * Record that a user listened to or downloaded a call recording (Call Review
+     * CR-5). Customer-voice audio is PII (DPDP / FR-QC05), so every access is
+     * trailed on the `call` stream — who, which call, and whether they streamed it
+     * inline (play) or downloaded the file. The causer is the viewer from web auth
+     * (the access always runs in their request, so the default resolver stamps it).
+     *
+     * @param  'play'|'download'  $mode
+     */
+    public static function recordingAccessed(Call $call, string $mode): void
+    {
+        self::record('call', fn (ActivityLogger $log) => $log
+            ->performedOn($call)
+            ->event('recording_accessed')
+            ->withProperties(['mode' => $mode, 'call_id' => $call->id])
+            ->log("call recording {$mode}"));
     }
 
     /**
