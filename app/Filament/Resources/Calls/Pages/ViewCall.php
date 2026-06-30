@@ -11,15 +11,14 @@ class ViewCall extends ViewRecord
 {
     protected static string $resource = CallResource::class;
 
-    /** Play / Download the recording via the gated stream route (CR-2), shown only when one exists. */
+    /**
+     * Download the recording via the gated stream route (CR-2), shown only when one
+     * exists. Play is no longer a header action (HD-1): the embedded AudioPlayerEntry
+     * in the infolist plays it in-page, so the new-tab Play link is redundant.
+     */
     protected function getHeaderActions(): array
     {
         return [
-            Action::make('play')
-                ->icon(Heroicon::Play)
-                ->url(fn (): string => route('calls.recording', $this->getRecord()))
-                ->openUrlInNewTab()
-                ->visible(fn (): bool => filled($this->getRecord()->recording_path)),
             Action::make('download')
                 ->icon(Heroicon::ArrowDownTray)
                 ->color('gray')

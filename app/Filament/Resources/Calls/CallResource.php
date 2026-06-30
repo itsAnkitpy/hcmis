@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Calls;
 
 use App\Enums\CallDirection;
 use App\Enums\CallOutcome;
+use App\Filament\Infolists\Components\AudioPlayerEntry;
 use App\Filament\Resources\Calls\Pages\ListCalls;
 use App\Filament\Resources\Calls\Pages\ViewCall;
 use App\Filament\Resources\Calls\Tables\CallsTable;
@@ -70,12 +71,15 @@ class CallResource extends Resource
                 ]),
             Section::make('Recording')
                 ->schema([
+                    // HD-1: the embedded play bar when a recording exists; the existing
+                    // "No recording" text otherwise (inbound v1, or retention-pruned).
+                    AudioPlayerEntry::make('recording_path')
+                        ->hiddenLabel()
+                        ->visible(fn (Call $record): bool => filled($record->recording_path)),
                     TextEntry::make('recording_path')
                         ->hiddenLabel()
-                        ->placeholder('No recording')
-                        ->formatStateUsing(fn (?string $state): string => $state
-                            ? 'Recording available — use Play / Download above.'
-                            : 'No recording for this call.'),
+                        ->placeholder('No recording for this call.')
+                        ->visible(fn (Call $record): bool => blank($record->recording_path)),
                 ]),
         ]);
     }

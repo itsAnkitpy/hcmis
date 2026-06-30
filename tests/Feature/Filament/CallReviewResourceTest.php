@@ -3,6 +3,7 @@
 use App\Enums\RoleName;
 use App\Filament\Resources\Calls\CallResource;
 use App\Filament\Resources\Calls\Pages\ListCalls;
+use App\Filament\Resources\Calls\Pages\ViewCall;
 use App\Models\Call;
 use App\Models\Tenant;
 use App\Models\User;
@@ -88,4 +89,38 @@ it('loads the call-review list for a permitted user', function () {
     TenantContext::applyWebRequest(null, crossTenant: true);
 
     Livewire::test(ListCalls::class)->assertOk();
+});
+
+// --- HD-1: the view page embeds the player when a recording exists, the fallback when not ---
+
+it('renders the embedded audio player when the call has a recording', function () {
+    $admin = callReviewHcUser(RoleName::HcAdmin->value);
+    $call = TenantContext::run(
+        Tenant::factory()->create()->id,
+        fn (): Call => Call::factory()->withRecording()->create(),
+    );
+
+    $this->actingAs($admin);
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(ViewCall::class, ['record' => $call->getRouteKey()])
+        ->assertOk()
+        ->assertSee('<audio', false)
+        ->assertSee(route('calls.recording', $call), false);
+});
+
+it('shows the no-recording fallback and no player when the call has none', function () {
+    $admin = callReviewHcUser(RoleName::HcAdmin->value);
+    $call = TenantContext::run(
+        Tenant::factory()->create()->id,
+        fn (): Call => Call::factory()->create(),
+    );
+
+    $this->actingAs($admin);
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(ViewCall::class, ['record' => $call->getRouteKey()])
+        ->assertOk()
+        ->assertSee('No recording for this call.')
+        ->assertDontSee('<audio', false);
 });

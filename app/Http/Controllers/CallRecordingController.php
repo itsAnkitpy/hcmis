@@ -9,7 +9,7 @@ use App\Models\Call;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Storage;
-use Symfony\Component\HttpFoundation\StreamedResponse;
+use Symfony\Component\HttpFoundation\Response;
 
 /**
  * Serve a call recording (Call Review CR-2) — the ONLY way the private audio file
@@ -28,11 +28,18 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  *  3. the recording must actually exist on disk (else 404 — inbound v1 has no
  *     recording, and retention may have pruned an old file).
  *
- * Every successful access is audited (CR-5): customer-voice audio is PII (FR-QC05).
+ * The inline-play branch is served through Symfony's BinaryFileResponse (HD-2),
+ * which answers Range requests with 206 partial content — so the player's progress
+ * line can seek, and Safari (which refuses <audio> without range) will play.
+ *
+ * Access is audited (CR-5): customer-voice audio is PII (FR-QC05). One listen is one
+ * trail entry, not one-per-slice — range makes a single listen hit this route several
+ * times, so we audit only the listen-START request (HD-3), and a download (one
+ * deliberate click) is always one entry.
  */
 class CallRecordingController extends Controller
 {
-    public function __invoke(Request $request, string $record): StreamedResponse
+    public function __invoke(Request $request, string $record): Response
     {
         $call = Call::query()->findOrFail($record);
 
@@ -44,14 +51,36 @@ class CallRecordingController extends Controller
 
         abort_unless($disk->exists($call->recording_path), 404);
 
-        $download = $request->boolean('download');
-
-        Audit::recordingAccessed($call, $download ? 'download' : 'play');
-
         $filename = "call-{$call->id}.mp3";
 
-        return $download
-            ? $disk->download($call->recording_path, $filename)
-            : $disk->response($call->recording_path, $filename, ['Content-Type' => 'audio/mpeg']);
+        if ($request->boolean('download')) {
+            Audit::recordingAccessed($call, 'download');
+
+            return $disk->download($call->recording_path, $filename);
+        }
+
+        // HD-3: count one listen as one PII-access entry. A seek (or Safari's
+        // mid-file probe) re-hits this route with `Range: bytes=N-` (N > 0); only the
+        // start of a listen carries no Range header or a range from byte 0.
+        if ($this->isListenStart($request)) {
+            Audit::recordingAccessed($call, 'play');
+        }
+
+        // HD-2: BinaryFileResponse (via response()->file) auto-answers `Range` → 206 +
+        // `Content-Range`, and sets `Accept-Ranges: bytes`. path() is local-driver
+        // only; an S3 future swaps this for a redirect to a signed URL (range native).
+        return response()->file($disk->path($call->recording_path), ['Content-Type' => 'audio/mpeg']);
+    }
+
+    /**
+     * Is this request the start of a listen (vs a mid-file seek / Safari continuation)?
+     * A fresh play sends no `Range` header, or one starting at byte 0 (`bytes=0-...`);
+     * a scrub sends `bytes=N-` with N > 0.
+     */
+    private function isListenStart(Request $request): bool
+    {
+        $range = $request->header('Range');
+
+        return $range === null || preg_match('/^bytes=0-/', $range) === 1;
     }
 }

@@ -27,6 +27,22 @@ function putRecordingFor(Call $call): void
     Storage::disk($call->recording_disk)->put($call->recording_path, 'FAKE-MP3-BYTES');
 }
 
+/** A larger stand-in so byte ranges (HD-2) have room to slice; default 10 000 bytes. */
+function putLargeRecordingFor(Call $call, int $bytes = 10000): void
+{
+    Storage::disk($call->recording_disk)->put($call->recording_path, str_repeat('A', $bytes));
+}
+
+/** Count the recording.accessed audit entries for a call (RLS-scoped to its client). */
+function recordingAccessCount(Call $call, Tenant $tenant): int
+{
+    return TenantContext::run($tenant->id, fn (): int => ActivityLog::query()
+        ->where('log_name', 'call')
+        ->where('event', 'recording_accessed')
+        ->where('subject_id', $call->id)
+        ->count());
+}
+
 it('streams a recording inline to a permitted reader of the owning client', function () {
     Storage::fake('recordings');
     $tenant = Tenant::factory()->create();
@@ -97,6 +113,98 @@ it('does not serve a recording to a guest', function () {
     $response = $this->get(route('calls.recording', $call));
 
     expect($response->status())->toBeIn([302, 401, 403]);
+});
+
+it('advertises range support on a no-range inline play (HD-2)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $call = recordedCall($tenant);
+    putLargeRecordingFor($call);
+
+    $this->actingAs($tl)
+        ->get(route('calls.recording', $call))
+        ->assertOk()
+        ->assertHeader('content-type', 'audio/mpeg')
+        ->assertHeader('accept-ranges', 'bytes');
+});
+
+it('answers a mid-file range request with 206 partial content (HD-2 — seek + Safari)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $call = recordedCall($tenant);
+    putLargeRecordingFor($call);
+
+    $this->actingAs($tl)
+        ->get(route('calls.recording', $call), ['Range' => 'bytes=5000-5099'])
+        ->assertStatus(206)
+        ->assertHeader('content-range', 'bytes 5000-5099/10000')
+        ->assertHeader('content-length', '100');
+});
+
+it('audits a listen-start (no range) as exactly one play entry (HD-3)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $call = recordedCall($tenant);
+    putLargeRecordingFor($call);
+
+    $this->actingAs($tl)->get(route('calls.recording', $call))->assertOk();
+
+    expect(recordingAccessCount($call, $tenant))->toBe(1);
+});
+
+it('audits a range starting at byte 0 as a listen-start (HD-3 — Safari probe)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $call = recordedCall($tenant);
+    putLargeRecordingFor($call);
+
+    $this->actingAs($tl)
+        ->get(route('calls.recording', $call), ['Range' => 'bytes=0-1'])
+        ->assertStatus(206);
+
+    expect(recordingAccessCount($call, $tenant))->toBe(1);
+});
+
+it('does not audit a mid-file seek continuation (HD-3)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $call = recordedCall($tenant);
+    putLargeRecordingFor($call);
+
+    $this->actingAs($tl)
+        ->get(route('calls.recording', $call), ['Range' => 'bytes=5000-'])
+        ->assertStatus(206);
+
+    expect(recordingAccessCount($call, $tenant))->toBe(0);
+});
+
+it('audits a download as exactly one entry (HD-3)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $call = recordedCall($tenant);
+    putLargeRecordingFor($call);
+
+    $this->actingAs($tl)
+        ->get(route('calls.recording', ['record' => $call, 'download' => 1]))
+        ->assertOk();
+
+    expect(recordingAccessCount($call, $tenant))->toBe(1);
+
+    TenantContext::run($tenant->id, function () use ($call) {
+        $entry = ActivityLog::query()
+            ->where('event', 'recording_accessed')
+            ->where('subject_id', $call->id)
+            ->latest('id')
+            ->first();
+
+        expect($entry->properties['mode'] ?? null)->toBe('download');
+    });
 });
 
 it('audits each recording access as a PII-access trail (CR-5)', function () {
