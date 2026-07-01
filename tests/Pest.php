@@ -1,5 +1,10 @@
 <?php
 
+use App\Enums\CallDirection;
+use App\Enums\CallOutcome;
+use App\Models\Call;
+use App\Models\Campaign;
+use App\Models\Disposition;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Telephony\AgentRouter;
@@ -70,6 +75,55 @@ function clientUserWithRole(Tenant $tenant, string $role): User
     });
 
     return $user;
+}
+
+/**
+ * A known, deterministic call set inside one tenant, shared by the Reporting tests
+ * (RP-1..RP-6). Five calls across two agents (Alice, Bob) and three dispositions —
+ * a sale, a plain contact, a non-contact — plus one dispositionless ad-hoc call, so
+ * every aggregate has a hand-computed expected value:
+ *   total 5 · inbound 2 · outbound 3 · contacts 3 · sales 1 · no_answer(outcome) 2 ·
+ *   with_recording 1. Alice: 3 calls (2 contacts, 1 sale, 1 rec). Bob: 2 (1 contact).
+ *
+ * @return array{alice: User, bob: User}
+ */
+function seedCallReportFixture(Tenant $tenant): array
+{
+    return TenantContext::run($tenant->id, function (): array {
+        $alice = User::factory()->create(['name' => 'Alice']);
+        $bob = User::factory()->create(['name' => 'Bob']);
+        $campaign = Campaign::factory()->create();
+
+        $sale = Disposition::factory()->sale()->create(['label' => 'Sold']);
+        $contact = Disposition::factory()->create(['label' => 'Interested', 'is_contact' => true, 'is_sale' => false]);
+        $noContact = Disposition::factory()->create(['label' => 'No answer', 'is_contact' => false, 'is_sale' => false]);
+
+        $day = now();
+
+        Call::factory()->forAgent($alice)->withRecording()->create([
+            'direction' => CallDirection::Outbound, 'outcome' => CallOutcome::Answered,
+            'campaign_id' => $campaign->id, 'disposition_id' => $sale->id, 'created_at' => $day,
+        ]);
+        Call::factory()->forAgent($alice)->create([
+            'direction' => CallDirection::Outbound, 'outcome' => CallOutcome::Answered,
+            'campaign_id' => $campaign->id, 'disposition_id' => $contact->id, 'created_at' => $day,
+        ]);
+        Call::factory()->forAgent($alice)->create([
+            'direction' => CallDirection::Inbound, 'outcome' => CallOutcome::NoAnswer,
+            'campaign_id' => $campaign->id, 'disposition_id' => $noContact->id, 'created_at' => $day,
+        ]);
+
+        Call::factory()->forAgent($bob)->create([
+            'direction' => CallDirection::Inbound, 'outcome' => CallOutcome::Answered,
+            'campaign_id' => $campaign->id, 'disposition_id' => $contact->id, 'created_at' => $day,
+        ]);
+        Call::factory()->forAgent($bob)->create([
+            'direction' => CallDirection::Outbound, 'outcome' => CallOutcome::NoAnswer,
+            'disposition_id' => null, 'created_at' => $day,
+        ]);
+
+        return ['alice' => $alice, 'bob' => $bob];
+    });
 }
 
 /**
