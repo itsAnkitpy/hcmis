@@ -8,7 +8,6 @@ use App\Models\User;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Livewire\Livewire;
-use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
@@ -17,15 +16,8 @@ afterEach(function () {
     TenantContext::forget();
 });
 
-/** An HC user holding a global role at the reserved global team. */
-function reportsHcUser(string $role): User
-{
-    $user = User::factory()->create(['email_verified_at' => now()]);
-    Role::findOrCreate($role, 'web');
-    $user->assignRole($role);
-
-    return $user;
-}
+// reportsHcUser() + clientUserWithRole() + seedCallReportFixture() live in tests/Pest.php
+// (shared with the dashboard-widget tests).
 
 // --- RP-4: the report gate mirrors Call Review (reuses CallPolicy verbatim) ---
 

@@ -61,6 +61,20 @@ function something()
 }
 
 /**
+ * An HC user holding a GLOBAL role at the reserved global team (Super Admin /
+ * HC Admin / Ops Manager) — no tenant membership, runs cross-tenant. Shared by
+ * the Reporting feature tests (report Pages + dashboard widgets).
+ */
+function reportsHcUser(string $role): User
+{
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    Role::findOrCreate($role, 'web');
+    $user->assignRole($role);
+
+    return $user;
+}
+
+/**
  * Create a user holding a per-client role scoped to the given tenant's team
  * (the spatie-teams posture). Shared by the Filament feature tests.
  */
