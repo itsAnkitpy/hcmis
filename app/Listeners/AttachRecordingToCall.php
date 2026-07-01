@@ -45,9 +45,12 @@ class AttachRecordingToCall implements ShouldQueue
 
     public function handle(RecordingReady $event): void
     {
-        // Only web-correlated (outbound v1) recordings carry our UUID. Inbound / lab
-        // recordings carry a raw Asterisk leg id with no `calls` row to attach (the
-        // inbound SIP-header spike is trunk-era, O1) — skip without burning retries.
+        // The recording's id must be a UUID we own to have a `calls` row to attach to.
+        // Outbound carries the web's tracking UUID; inbound now carries the call's TICKET
+        // (also a UUID), the SAME id the screen stamped on the row via the listener->
+        // browser handoff (B2.4b TH-4) — so this guard now passes BOTH directions. A
+        // genuine non-UUID id (a stray lab/raw-leg recording with no matching row) is
+        // still skipped here without burning retries.
         if (! Str::isUuid($event->callId)) {
             return;
         }

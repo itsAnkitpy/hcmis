@@ -1,5 +1,6 @@
 <?php
 
+use App\Enums\CallDirection;
 use App\Events\Telephony\RecordingReady;
 use App\Listeners\AttachRecordingToCall;
 use App\Models\Call;
@@ -85,9 +86,32 @@ it('gives up gracefully — logs, does not retry — once the bound is reached (
     $listener->handle(recordingReadyFor($uuid)); // reaches here without throwing
 });
 
-it('skips a non-UUID callId without retrying (inbound / lab recording, O1)', function () {
+it('attaches an INBOUND recording whose id is the call ticket — the gap this slice closes (TH-4)', function () {
+    $tenant = Tenant::factory()->create();
+    $ticket = (string) Str::uuid(); // the listener's ticket, now the inbound recording id (TH-4)
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->create([
+        'direction' => CallDirection::Inbound,
+        'correlation_id' => $ticket,   // stamped by the ring-time claim + wrap-up
+        'recording_disk' => null,
+        'recording_path' => null,
+    ]));
+
+    // The merge pipeline names the inbound recording with the ticket, so RecordingReady
+    // carries it; the stapler's existing UUID guard now PASSES inbound (no logic change).
+    (new AttachRecordingToCall)->handle(recordingReadyFor($ticket));
+
+    $call = TenantContext::run($tenant->id, fn (): ?Call => Call::query()->where('correlation_id', $ticket)->first());
+
+    expect($call->recording_disk)->toBe('recordings')
+        ->and($call->recording_path)->toBe('recordings/call-1.mp3');
+});
+
+it('still skips a genuine non-UUID callId without retrying (a stray raw-leg / lab recording)', function () {
     [$listener, $job] = listenerWithJob(attempts: 1);
     $job->shouldNotReceive('release'); // the guard returns before the retry path
 
-    $listener->handle(recordingReadyFor('1718999999.42')); // a raw Asterisk leg id
+    // A raw Asterisk leg id (no ticket was ever minted for it) — never a `calls` row to
+    // attach. Inbound calls are no longer in this bucket (they now carry the ticket, TH-4).
+    $listener->handle(recordingReadyFor('1718999999.42'));
 });

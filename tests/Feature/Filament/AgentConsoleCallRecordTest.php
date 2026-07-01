@@ -7,6 +7,7 @@ use App\Enums\RoleName;
 use App\Filament\Pages\AgentConsole;
 use App\Models\ActivityLog;
 use App\Models\Call;
+use App\Models\CallHandoff;
 use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\DncEntry;
@@ -203,7 +204,7 @@ it('mints a uuid correlation_id at dial and stamps it on the outbound row (CP-B3
         ->and(Str::isUuid($call->correlation_id))->toBeTrue();
 });
 
-it('leaves correlation_id null on an inbound row (no UUID injected in v1, O1)', function () {
+it('leaves correlation_id null on an inbound row when no handoff note was claimed (the graceful miss, TH-2)', function () {
     config()->set('telephony.outbound.caller_id', OUTBOUND_CALLER_ID);
 
     $tenant = Tenant::factory()->create();
@@ -214,7 +215,10 @@ it('leaves correlation_id null on an inbound row (no UUID injected in v1, O1)', 
 
     TenantContext::run($tenant->id, function () use ($dispositionId): void {
         $page = new AgentConsole;
-        $page->lookupLead('9995551111'); // incoming caller — the customer originates, no UUID
+        // No handoff note claimed (listener missed it / process restarted) — the call
+        // still records, the row's correlation_id stays null, the recording stays
+        // orphaned on disk. Never a crash, never the wrong recording (TH-2).
+        $page->lookupLead('9995551111');
         $page->saveWrapUp($dispositionId);
     });
 
@@ -222,6 +226,31 @@ it('leaves correlation_id null on an inbound row (no UUID injected in v1, O1)', 
 
     expect($call->direction)->toBe(CallDirection::Inbound)
         ->and($call->correlation_id)->toBeNull();
+});
+
+it('stamps the claimed handoff ticket as correlation_id on an inbound row (TH-4)', function () {
+    config()->set('telephony.outbound.caller_id', OUTBOUND_CALLER_ID);
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    [, , $dispositionId] = seedCallCampaign($tenant, 'INTERESTED', isContact: true, phone: '9995551111');
+
+    // The listener left a handoff note for this agent at ring-time (what beginCall does).
+    $ticket = TenantContext::run($tenant->id, fn (): string => CallHandoff::factory()->forAgent($agent)->create()->ticket);
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($dispositionId): void {
+        $page = new AgentConsole;
+        $page->claimHandoffTicket();       // the ring-time claim reads the note
+        $page->lookupLead('9995551111');   // the lead lookup must NOT clobber it (Option A)
+        $page->saveWrapUp($dispositionId);
+    });
+
+    $call = TenantContext::run($tenant->id, fn (): ?Call => Call::query()->latest('id')->first());
+
+    expect($call->direction)->toBe(CallDirection::Inbound)
+        ->and($call->correlation_id)->toBe($ticket);   // the inbound row now carries the ticket
 });
 
 it('writes no calls row when a dial is blocked by the do-not-call list', function () {

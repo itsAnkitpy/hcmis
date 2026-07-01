@@ -74,20 +74,22 @@ it('on B answering: adds B, removes + hangs up A, and the recording rides throug
     $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', []));
+    $ticket = $flow->ticketNumber();                         // capture before teardown's reset() clears it
     $flow->handle(stasisStart('agent-leg', ['agent']));
     $flow->beginTransfer(3);
     $flow->handle(stasisStart('transfer-leg', ['agent']));   // B answers -> completeTransfer
     $flow->handle(channelDestroyed('caller-leg'));            // the customer hangs up later
 
     // startRecording fired exactly once -> the recording was never restarted across the
-    // transfer (the snoop stays on the caller leg). The merge keyed by the caller leg id
-    // (inbound) confirms the single continuous file spans A then B.
+    // transfer (the snoop stays on the caller leg). The merge keyed by the call's TICKET
+    // (TH-4 — the inbound recording id is now the ticket) confirms the single continuous
+    // file spans A then B.
     $switchboard->handle(recordingFinished('call-1-said'));
     $switchboard->handle(recordingFinished('call-1-heard'));
 
     Queue::assertPushed(
         MergeCallRecordingJob::class,
-        fn (MergeCallRecordingJob $job): bool => $job->callId === 'caller-leg' && $job->recordingName === 'call-1',
+        fn (MergeCallRecordingJob $job): bool => $job->callId === $ticket && $job->recordingName === 'call-1',
     );
 });
 

@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace App\Telephony\Flows;
 
+use App\Models\CallHandoff;
 use App\Telephony\AgentDirectory;
 use App\Telephony\AgentRouter;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
+use App\Tenancy\TenantContext;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
@@ -77,21 +79,23 @@ class CallToAgentFlow
 
     /**
      * The call's tracking number (B3 D3): the UUID the web console minted at dial
-     * and rode in as the agent leg's third arg. Used as the recording's callId so
-     * RecordingReady carries our UUID (= the calls row's correlation_id), letting
-     * the queued listener attach the recording by UUID. Null on inbound (no UUID
-     * injected v1, O1) — the recording then falls back to the customer leg id,
-     * harmless since inbound recording-attach is trunk-era.
+     * and rode in as the agent leg's third arg. On OUTBOUND it is the recording's
+     * callId so RecordingReady carries our UUID (= the calls row's correlation_id),
+     * letting the queued listener attach the recording by UUID. Stays null on inbound
+     * (the web injects no UUID — the customer originates). Inbound now attaches via
+     * the TICKET instead (B2.4b TH-4): connectAgent names the recording ticket-first,
+     * so an inbound recording carries the same ticket the screen stamped on the row.
      */
     private ?string $correlationId = null;
 
     /**
      * The call's ticket number (the per-call id, FD-3): a unique id stamped on every
-     * call so many interleaved calls are followable in the log, and — later — the
-     * handle the durable waiting-line points at (FD-7). Outbound REUSES the web's
-     * tracking number (the UUID above); inbound MINTS a fresh one. Kept SEPARATE from
-     * the recording's callId on purpose: inbound recording-attach still skips on a
-     * non-UUID leg id (it is trunk-era), so the ticket must not leak into that path.
+     * call so many interleaved calls are followable in the log, and the handle the
+     * listener->browser handoff points at (B2.4b TH-2). Outbound REUSES the web's
+     * tracking number (the UUID above); inbound MINTS a fresh one. It IS the
+     * recording's callId now (TH-4): connectAgent names the recording ticket-first
+     * and beginCall hands this same ticket to the agent's screen (via call_handoffs),
+     * so an inbound recording attaches by matching ids exactly as outbound does.
      */
     private ?string $ticketNumber = null;
 
@@ -251,6 +255,37 @@ class CallToAgentFlow
             return;
         }
 
+        // TH-5/TH-6: hand the call's ticket to the reserved agent's screen via the
+        // drop-off table (the listener->browser handoff), BEFORE the phone rings — the
+        // screen reads it at ring-time and stamps it on the calls row so the inbound
+        // recording attaches by matching ids. The listener runs with no logged-in user,
+        // so a context-less write is RLS default-denied; it writes scoped to the call's
+        // own company (it already holds $tenantId from the label — the AttachRecording-
+        // ToCall run() precedent, minus the discovery). Prune-then-insert wipes this
+        // agent's prior note first, capping the drawer at one note per agent (prune-on-
+        // write), so the screen's "most recent" read stays unambiguous with no scheduler.
+        //
+        // Best-effort by design (TH-2 graceful miss): a note-write failure must NEVER
+        // drop a live call. If the write throws (a DB hiccup), the call still connects;
+        // the recording just won't attach (the row's correlation_id stays null, the
+        // audio persists on disk) — exactly today's inbound fallback. We log and ring on.
+        rescue(
+            fn () => TenantContext::run($tenantId, function () use ($reservedAgentId): void {
+                CallHandoff::query()->where('agent_user_id', $reservedAgentId)->delete();
+                CallHandoff::query()->create([
+                    'agent_user_id' => $reservedAgentId,
+                    'ticket' => $this->ticketNumber,
+                ]);
+            }),
+            function (\Throwable $exception) use ($reservedAgentId): void {
+                Log::warning('Ticket handoff write failed — inbound recording will not attach (the call is unaffected).', [
+                    'ticket' => $this->ticketNumber,
+                    'agentUser' => $reservedAgentId,
+                    'error' => $exception->getMessage(),
+                ]);
+            },
+        );
+
         $this->telephony->answer($callerLegId);
         $agentLegId = $this->telephony->placeCall(
             $this->directory->endpointFor($reservedAgentId),
@@ -368,9 +403,12 @@ class CallToAgentFlow
         // recorded (caller) leg drops, Asterisk destroys its taps and emits "recording
         // finished" immediately, BEFORE our teardown runs; if the switchboard's notebook does
         // not already hold this call, those events land on an empty desk and the merge is lost
-        // (the CP-B2.1 inbound race). The call-id is our UUID when the web injected one
-        // (outbound, CP-B3-2), else the caller leg id (inbound — harmless, its attach is trunk-era).
-        $callId = $this->correlationId ?? (string) $this->callerLegId;
+        // (the CP-B2.1 inbound race). The call-id is the TICKET now (TH-4): outbound's
+        // ticket already equals its web UUID (value unchanged), and inbound carries the
+        // ticket too — the SAME id the screen stamped on the row via the handoff — so
+        // both directions attach by matching ids. The raw caller leg id stays only as a
+        // last-ditch fallback if a ticket was somehow never minted.
+        $callId = $this->ticketNumber ?? (string) $this->callerLegId;
         $this->registry->depositMerge($callId, $this->recording);
 
         Log::info('Call connected and recording.', [

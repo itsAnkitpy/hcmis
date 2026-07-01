@@ -6,6 +6,7 @@ use App\Telephony\Flows\Switchboard;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 
 /**
  * The B2.1 foundation: the switchboard holds MANY calls at once and keeps them apart.
@@ -159,7 +160,9 @@ it('still merges a recording that finishes after its call handler is disposed (F
 
     Queue::assertPushed(
         MergeCallRecordingJob::class,
-        fn (MergeCallRecordingJob $job): bool => $job->callId === 'caller-A' && $job->recordingName === 'call-A',
+        // TH-4: the inbound recording's id is now the call's ticket (a UUID minted in
+        // beginCall), not the raw caller-leg id — so the stapler's UUID guard passes it.
+        fn (MergeCallRecordingJob $job): bool => Str::isUuid($job->callId) && $job->recordingName === 'call-A',
     );
 });
 
@@ -190,7 +193,8 @@ it('merges an inbound recording even when the finished events arrive BEFORE tear
 
     Queue::assertPushed(                                          // merge still fires despite the early events
         MergeCallRecordingJob::class,
-        fn (MergeCallRecordingJob $job): bool => $job->callId === 'caller-A' && $job->recordingName === 'call-A',
+        // TH-4: the inbound recording's id is now the call's ticket (a UUID), not the leg id.
+        fn (MergeCallRecordingJob $job): bool => Str::isUuid($job->callId) && $job->recordingName === 'call-A',
     );
 
     $switchboard->handle(channelDestroyed('caller-A'));          // teardown lands after — clean

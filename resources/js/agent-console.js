@@ -117,6 +117,16 @@ const agentConsole = (config) => ({
             this.callerNumber = number;
             this.state = 'ringing';
 
+            // B2.4b TH-2/TH-3: claim the call's ticket the listener left for this agent
+            // (the handoff), so the wrap-up stamps it on the calls row and the inbound
+            // recording attaches. Runs on EVERY inbound ring — including the anonymous
+            // branch below — independent of the lead lookup, so an anonymous caller still
+            // attaches (Finding A). Fire-and-forget + best-effort: it completes long before
+            // wrap-up (5-30s away) and must not block showing the lead; a failure just
+            // means no recording attach (graceful, TH-2). Option A makes the order versus
+            // lookupLead irrelevant (the claim owns callCorrelationId).
+            this.$wire.claimHandoffTicket().catch(() => {});
+
             // Anonymous caller (no number) — nothing to match; show the bare
             // "no matching lead" state once, no server round-trip.
             if (! number) {

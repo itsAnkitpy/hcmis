@@ -54,6 +54,7 @@ it('connects an answering agent and merges the call once both recordings finish'
     $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', []));        // caller dials in
+    $ticket = $flow->ticketNumber();                      // capture before teardown's reset() clears it
     $flow->handle(stasisStart('agent-leg', ['agent']));   // agent picks up
     $flow->handle(channelDestroyed('caller-leg'));        // caller hangs up
 
@@ -66,7 +67,9 @@ it('connects an answering agent and merges the call once both recordings finish'
 
     Queue::assertPushed(
         MergeCallRecordingJob::class,
-        fn (MergeCallRecordingJob $job): bool => $job->callId === 'caller-leg' && $job->recordingName === 'call-1',
+        // TH-4: the inbound recording now carries the call's TICKET (the same UUID the
+        // screen stamps on the row), not the raw caller-leg id — so it attaches by match.
+        fn (MergeCallRecordingJob $job): bool => $job->callId === $ticket && $job->recordingName === 'call-1',
     );
 });
 
@@ -190,6 +193,7 @@ it('dials the customer when the agent leg arrives carrying the number, then join
     $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('agent-leg', ['agent', '1002']));   // agent leg up, carrying the customer number
+    $ticket = $flow->ticketNumber();                              // capture before teardown's reset() clears it
     $flow->handle(stasisStart('customer-leg', ['outbound']));     // customer picks up
     $flow->handle(channelDestroyed('customer-leg'));              // customer hangs up
 
@@ -200,7 +204,9 @@ it('dials the customer when the agent leg arrives carrying the number, then join
 
     Queue::assertPushed(
         MergeCallRecordingJob::class,
-        fn (MergeCallRecordingJob $job): bool => $job->callId === 'customer-leg' && $job->recordingName === 'call-1',
+        // TH-4: with no web UUID injected (the legacy 2-arg agent leg), the recording falls
+        // back to the freshly-minted ticket (a UUID) rather than the raw customer-leg id.
+        fn (MergeCallRecordingJob $job): bool => $job->callId === $ticket && $job->recordingName === 'call-1',
     );
 });
 

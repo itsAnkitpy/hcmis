@@ -16,6 +16,7 @@ use App\Filament\Resources\Leads\Schemas\LeadForm;
 use App\Models\AgentPresence;
 use App\Models\Call;
 use App\Models\Callback;
+use App\Models\CallHandoff;
 use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\DncEntry;
@@ -220,6 +221,37 @@ class AgentConsole extends Page
         $this->matchedCampaignId = $lead->campaign_id;
 
         return $this->presentLead($lead);
+    }
+
+    /**
+     * Claim the call's ticket at ring-time (B2.4b TH-2/TH-3): read the most-recent
+     * handoff note the listener left for THIS agent (on the call_handoffs drawer) and
+     * hold its ticket as the call's correlation id, so the wrap-up stamps it on the
+     * `calls` row and the inbound recording attaches by matching ids (closing the
+     * inbound recording-attach gap). The browser calls this over $wire on EVERY inbound
+     * ring — including the anonymous early-return branch — decoupled from lookupLead so
+     * an anonymous caller still attaches (Finding A).
+     *
+     * Keyed by the logged-in agent in the request's own tenant context, so it only ever
+     * reads its own client's notes (RLS + BelongsToTenant wall it, like lookupLead). The
+     * most-recent note (by id) is unambiguous because the listener prunes the agent's
+     * prior note on each new ring (TH-6); the read is plain (non-consuming) and the note
+     * lingers harmlessly until the next call sweeps it.
+     *
+     * Option A — the claim OWNS callCorrelationId: a single assignment resets-and-sets it
+     * (the ticket, or null on a miss), so a miss degrades gracefully (the row is written
+     * null, the recording stays orphaned on disk, never the WRONG recording attached) and
+     * the lead lookup can never clobber a just-claimed ticket (callCorrelationId was pulled
+     * out of resetMatch). Renderless: it fires mid-ring and writes only server state, so it
+     * must not morph the live console.
+     */
+    #[Renderless]
+    public function claimHandoffTicket(): void
+    {
+        $this->callCorrelationId = CallHandoff::query()
+            ->where('agent_user_id', auth()->id())
+            ->latest('id')
+            ->value('ticket');
     }
 
     /**
@@ -905,6 +937,10 @@ class AgentConsole extends Page
         $this->matchedCampaignId = null;
         $this->callDirection = CallDirection::Inbound;
         $this->callPartyNumber = null;
-        $this->callCorrelationId = null;
+        // callCorrelationId is deliberately NOT reset here (B2.4b Option A): the inbound
+        // ring-time claim (claimHandoffTicket) and the outbound dial (originateAgentLeg)
+        // each establish it fresh per call, so resetMatch clearing it would let the lead
+        // lookup wipe a just-claimed inbound ticket (resetMatch runs at the top of
+        // lookupLead). The claim's single reset-and-set assignment covers the inbound miss.
     }
 }
