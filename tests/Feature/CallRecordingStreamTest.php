@@ -94,6 +94,51 @@ it('forbids an agent of the owning client (no auditor role)', function () {
         ->assertForbidden();
 });
 
+// --- MD-1 / MD-4: the own-call exception — an agent plays (never downloads) their own calls ---
+
+it('streams an agent\'s own call to them and audits the listen (MD-1)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::factory()->withRecording()->forAgent($agent)->create());
+    putRecordingFor($call);
+
+    $this->actingAs($agent)
+        ->get(route('calls.recording', $call))
+        ->assertOk()
+        ->assertHeader('content-type', 'audio/mpeg');
+
+    expect(recordingAccessCount($call, $tenant))->toBe(1);
+});
+
+it('forbids an agent from a colleague\'s call in the same client (MD-1)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $colleague = clientUserWithRole($tenant, RoleName::Agent->value);
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::factory()->withRecording()->forAgent($colleague)->create());
+    putRecordingFor($call);
+
+    $this->actingAs($agent)
+        ->get(route('calls.recording', $call))
+        ->assertForbidden();
+});
+
+it('forbids an agent from downloading even their own call (MD-4 — play only)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::factory()->withRecording()->forAgent($agent)->create());
+    putRecordingFor($call);
+
+    $this->actingAs($agent)
+        ->get(route('calls.recording', ['record' => $call, 'download' => 1]))
+        ->assertForbidden();
+
+    // Denied before the audit write — a refused download leaves no access entry.
+    expect(recordingAccessCount($call, $tenant))->toBe(0);
+});
+
 it('404s when the call has no recording', function () {
     $tenant = Tenant::factory()->create();
     $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);

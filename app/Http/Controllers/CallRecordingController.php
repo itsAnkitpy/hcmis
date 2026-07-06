@@ -24,7 +24,10 @@ use Symfony\Component\HttpFoundation\Response;
  *     call, audited like everything else they do). The lookup is done HERE, in the
  *     controller, not via route-model binding, so it is guaranteed to run AFTER the
  *     tenant GUC is set (no middleware-ordering dependence on SubstituteBindings).
- *  2. the `view` ability (CallPolicy) — only the call auditors (global + TL/QC).
+ *  2. the `view` ability (CallPolicy) — the call auditors (global + TL/QC), plus
+ *     the agent who handled this very call (My Day MD-1, every listen audited).
+ *     A download additionally needs the `download` ability — auditors only (MD-4),
+ *     so an agent's own-call access is strictly in-page play.
  *  3. the recording must actually exist on disk (else 404 — inbound v1 has no
  *     recording, and retention may have pruned an old file).
  *
@@ -54,6 +57,8 @@ class CallRecordingController extends Controller
         $filename = "call-{$call->id}.mp3";
 
         if ($request->boolean('download')) {
+            Gate::authorize('download', $call);
+
             Audit::recordingAccessed($call, 'download');
 
             return $disk->download($call->recording_path, $filename);

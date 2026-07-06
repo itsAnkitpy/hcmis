@@ -64,6 +64,49 @@ it('denies call-review read to agent, trainer and client user', function (string
     RoleName::ClientUser->value,
 ]);
 
+// --- MD-1 / MD-4: the own-row exception — row `view` for the agent on the call, nothing more ---
+
+it('lets an agent view only their own call rows, and never download (MD-1 / MD-4)', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $colleague = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent, $colleague) {
+        $ownCall = Call::factory()->forAgent($agent)->create();
+        $colleagueCall = Call::factory()->forAgent($colleague)->create();
+
+        $agent = $agent->fresh();
+
+        expect($agent->can('view', $ownCall))->toBeTrue()
+            ->and($agent->can('view', $colleagueCall))->toBeFalse()
+            ->and($agent->can('download', $ownCall))->toBeFalse();
+    });
+});
+
+it('keeps download with the auditors (team leader downloads any client call)', function () {
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+
+    TenantContext::run($tenant->id, function () use ($tl) {
+        $call = Call::factory()->create();
+
+        expect($tl->fresh()->can('download', $call))->toBeTrue();
+    });
+});
+
+it('keeps the Call Review view page closed to an agent, even for their own call (MD-1)', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $call = TenantContext::run(
+        $tenant->id,
+        fn (): Call => Call::factory()->withRecording()->forAgent($agent)->create(),
+    );
+
+    $this->actingAs($agent)
+        ->get("/admin/calls/{$call->getRouteKey()}")
+        ->assertForbidden();
+});
+
 // --- CR-1: immutable — write/delete denied even to a permitted reader ---
 
 it('denies create, update and delete to a permitted reader', function () {
