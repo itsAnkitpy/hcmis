@@ -2,6 +2,7 @@
 
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Pages\ListLeads;
+use App\Models\BreakCategory;
 use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\DncEntry;
@@ -30,6 +31,7 @@ dataset('operationalModels', [
     'disposition' => [Disposition::class],
     'dnc entry' => [DncEntry::class],
     'script' => [Script::class],
+    'break category' => [BreakCategory::class],
 ]);
 
 /** A client-side user holding a per-client role scoped to $tenant's team. */

@@ -66,4 +66,26 @@ return [
         ],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Break category defaults
+    |--------------------------------------------------------------------------
+    |
+    | Starter break types seeded for every tenant on creation (BK-1). The six
+    | come from Dialshree via BPO operations (2026-07-07). Deliberately no
+    | time_limit_minutes here — real per-type times are an open ops question;
+    | admins type them into the Break Categories screen when they arrive.
+    | Editing this list never retro-changes existing tenants (seed-once).
+    |
+    */
+
+    'break_category_defaults' => [
+        ['code' => 'BIO_BREAK', 'label' => 'Bio Break'],
+        ['code' => 'PAUSE', 'label' => 'Pause'],
+        ['code' => 'TRAINING', 'label' => 'Training'],
+        ['code' => 'BRIEFING', 'label' => 'Briefing'],
+        ['code' => 'LUNCH_BREAK', 'label' => 'Lunch Break'],
+        ['code' => 'TEA_BREAK', 'label' => 'Tea Break'],
+    ],
+
 ];
