@@ -69,7 +69,25 @@ class DemoDataSeeder extends Seeder
             ],
         );
 
-        $this->command?->info('Demo data seeded. Logins (password "'.self::DEMO_PASSWORD.'"): tl.acme@demo.test, qc.acme@demo.test, tl.edtech@demo.test, qc.edtech@demo.test');
+        $this->seedLabAgents();
+
+        $this->command?->info('Demo data seeded. Logins (password "'.self::DEMO_PASSWORD.'"): tl.acme@demo.test, qc.acme@demo.test, tl.edtech@demo.test, qc.edtech@demo.test, abc@gmail.com, def@gmail.com');
+    }
+
+    /**
+     * The two lab softphone agents from the telephony phone directory
+     * (config/telephony.php → agent.directory), which is keyed by USER ID:
+     * 6 → extension 1003, 7 → extension 1004. Seeded after every other demo
+     * login so a fresh rebuild (AdminUserSeeder = id 1, demo TL/QC = ids 2–5)
+     * lands them on exactly ids 6 and 7. The original lab emails are kept on
+     * purpose — the lab runbook and existing muscle memory reference them.
+     */
+    private function seedLabAgents(): void
+    {
+        $tenant = Tenant::query()->where('slug', 'demo-acme-outbound')->firstOrFail();
+
+        $this->seedDemoUser($tenant, 'Abhikesh', 'abc@gmail.com', RoleName::Agent);
+        $this->seedDemoUser($tenant, 'Demo Agent Two', 'def@gmail.com', RoleName::Agent);
     }
 
     /**
