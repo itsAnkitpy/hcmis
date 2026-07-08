@@ -10,6 +10,7 @@ use App\Filament\Widgets\CallStatsOverview;
 use App\Filament\Widgets\DirectionSplitChart;
 use App\Filament\Widgets\DispositionMixChart;
 use App\Filament\Widgets\LiveAvailabilitySnapshot;
+use App\Filament\Widgets\OnBreakAgents;
 use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\Tenant;
@@ -92,6 +93,7 @@ class Dashboard extends BaseDashboard
             CallsByAgentChart::class,
             DirectionSplitChart::class,
             LiveAvailabilitySnapshot::class,
+            OnBreakAgents::class,
         ];
     }
 
