@@ -10,8 +10,12 @@
          break / I'm back). On break the clock counts down the picked type's
          limit; past it the strip flips red and shouts — visual only, nobody is
          ever auto-returned (BK-4). Break types come server-rendered from
-         breakCategoryOptions() (active, in order, own client). --}}
-    <div x-data="agentConsole(@js($this->getPhoneConfig()), @js($this->breakCategoryOptions()))" class="mx-auto w-full max-w-2xl">
+         breakCategoryOptions() (active, in order, own client).
+
+         BK-7: resumableBreak() rides in the same way — a still-fresh on-break
+         board row means this load RESUMES the break (same type, countdown on
+         the original start) instead of auto-pushing Ready. --}}
+    <div x-data="agentConsole(@js($this->getPhoneConfig()), @js($this->breakCategoryOptions()), @js($this->resumableBreak()))" class="mx-auto w-full max-w-2xl">
         <div
             class="rounded-xl border p-5 shadow-sm"
             :class="{

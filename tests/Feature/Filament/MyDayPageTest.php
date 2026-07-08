@@ -1,8 +1,13 @@
 <?php
 
+use App\Actions\RecordStatusStint;
 use App\Enums\CallbackStatus;
+use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
+use App\Enums\StintEndedVia;
 use App\Filament\Pages\MyDay;
+use App\Models\AgentPresence;
+use App\Models\AgentStatusHistory;
 use App\Models\Call;
 use App\Models\Callback;
 use App\Models\Disposition;
@@ -129,6 +134,181 @@ it('counts pending callbacks due by end of today — overdue in; done, future an
     TenantContext::run($tenant->id, function (): void {
         expect((new MyDay)->callbacksDue())->toBe(2);
     });
+});
+
+// --- MD-3 reopened (BK slice 5): the break-time tile ---
+// These freeze the clock mid-day (travelTo) so "today" arithmetic can't wobble
+// when the suite happens to run near midnight.
+
+it('sums my closed break stints today — a colleague\'s and another client\'s never count', function () {
+    $this->travelTo(now()->startOfDay()->addHours(14));
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $colleague = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent, $colleague): void {
+        // Mine, today: 10 + 20 minutes.
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->subMinutes(60),
+            'ended_at' => now()->subMinutes(50),
+            'ended_via' => StintEndedVia::Changed,
+        ]);
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->subMinutes(40),
+            'ended_at' => now()->subMinutes(20),
+            'ended_via' => StintEndedVia::Changed,
+        ]);
+
+        // Excluded: my colleague's break today, and my own READY stint.
+        AgentStatusHistory::factory()->forUser($colleague)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->subMinutes(30),
+            'ended_at' => now()->subMinutes(10),
+            'ended_via' => StintEndedVia::Changed,
+        ]);
+        AgentStatusHistory::factory()->forUser($agent)->ended()->create([
+            'started_at' => now()->subMinutes(90),
+            'ended_at' => now()->subMinutes(61),
+        ]);
+    });
+
+    // Excluded by the tenant wall: another client's break row carrying MY user id.
+    $otherTenant = Tenant::factory()->create();
+    TenantContext::run($otherTenant->id, fn () => AgentStatusHistory::factory()->forUser($agent)
+        ->status(PresenceStatus::OnBreak)
+        ->create(['started_at' => now()->subMinutes(30), 'ended_at' => now(), 'ended_via' => StintEndedVia::Changed]));
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function (): void {
+        expect((new MyDay)->breakMinutes())->toBe(30);
+    });
+});
+
+it('counts my open break up to now while the heartbeat is fresh', function () {
+    $this->travelTo(now()->startOfDay()->addHours(14));
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->subMinutes(15),
+        ]);
+    });
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function (): void {
+        expect((new MyDay)->breakMinutes())->toBe(15);
+    });
+});
+
+it('caps a dead session\'s open break at the stale cutoff — the BK-6 read rule', function () {
+    $this->travelTo(now()->startOfDay()->addHours(14));
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent): void {
+        // Break started 30 min ago, heartbeat died 20 min ago: with the 60s stale
+        // window the session effectively ended 19 min ago -> 11 countable minutes,
+        // NOT 30 — a crashed tab must not keep "earning" break time.
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)
+            ->create(['last_seen_at' => now()->subMinutes(20)]);
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->subMinutes(30),
+        ]);
+    });
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function (): void {
+        expect((new MyDay)->breakMinutes())->toBe(11);
+    });
+});
+
+it('shows the same minutes before and after the lazy close makes the cutoff physical', function () {
+    $this->travelTo(now()->startOfDay()->addHours(14));
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    $stale = TenantContext::run($tenant->id, function () use ($agent): AgentPresence {
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->subMinutes(30),
+        ]);
+
+        return AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)
+            ->create(['last_seen_at' => now()->subMinutes(20)]);
+    });
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($agent, $stale): void {
+        $before = (new MyDay)->breakMinutes();
+
+        // The next status write closes the dangling stint AT the same cutoff the
+        // read just applied virtually (BK-6's write-side half, shared arithmetic).
+        RecordStatusStint::run($agent->id, PresenceStatus::Ready, null, $stale);
+
+        $closed = AgentStatusHistory::query()->where('user_id', $agent->id)
+            ->where('status', PresenceStatus::OnBreak)->sole();
+
+        expect($closed->ended_via)->toBe(StintEndedVia::Stale)
+            ->and((new MyDay)->breakMinutes())->toBe($before); // the number never moved
+    });
+});
+
+it('clips a break spanning midnight to today\'s part and ignores yesterday\'s breaks', function () {
+    $this->travelTo(now()->startOfDay()->addHours(14));
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent): void {
+        // Straddles midnight: 23:50 -> 00:10 — only the 10 minutes today count.
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->startOfDay()->subMinutes(10),
+            'ended_at' => now()->startOfDay()->addMinutes(10),
+            'ended_via' => StintEndedVia::Changed,
+        ]);
+
+        // Entirely yesterday: never counts.
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
+            'started_at' => now()->subDay()->subMinutes(30),
+            'ended_at' => now()->subDay(),
+            'ended_via' => StintEndedVia::Changed,
+        ]);
+    });
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function (): void {
+        expect((new MyDay)->breakMinutes())->toBe(10);
+    });
+});
+
+it('renders the break-time tile, hour-formatted past an hour', function () {
+    $this->travelTo(now()->startOfDay()->addHours(14));
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, fn () => AgentStatusHistory::factory()->forUser($agent)
+        ->status(PresenceStatus::OnBreak)
+        ->create([
+            'started_at' => now()->subMinutes(100),
+            'ended_at' => now()->subMinutes(25),
+            'ended_via' => StintEndedVia::Changed,
+        ]));
+
+    $this->actingAs($agent)
+        ->get('/admin/my-day')
+        ->assertSuccessful()
+        ->assertSee('Break time')
+        ->assertSee('1h 15m'); // the 75-minute break, hour-formatted
 });
 
 // --- MD-4: the player renders only where a recording exists, and never a download ---

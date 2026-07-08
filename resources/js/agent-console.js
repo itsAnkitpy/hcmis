@@ -29,7 +29,7 @@ import { AgentPhone } from './telephony/agent-phone';
  * mount it with x-data="agentConsole(config)". Alpine ships with Filament — we
  * never import our own copy.
  */
-const agentConsole = (config, breakCategories = []) => ({
+const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     state: 'offline',
     error: null,
     callerNumber: null,
@@ -110,8 +110,28 @@ const agentConsole = (config, breakCategories = []) => ({
     init() {
         this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
 
+        // BK-7 resume-on-return (the industry pattern: the screen asks the server
+        // "what am I?" on load — it never assumes Ready). A still-fresh on-break
+        // board row resumes on screen exactly where it left off: same type, the
+        // countdown anchored on the ORIGINAL start (server-supplied), the phone
+        // busy so rings decline like any break. presence is pre-seeded so the
+        // $watch pushes NO write — the board already says on_break; a write would
+        // be a pointless self-echo. A dead session never reaches here: the server
+        // returns null for a stale row (BK-6 — a new login is a new stay).
+        if (resumeBreak) {
+            this.state = 'onBreak';
+            this.presence = 'on_break';
+            this.activeBreak = resumeBreak.category;
+            this.statusSince = resumeBreak.startedAtMs;
+            this.phone.busy = true;
+        }
+
         this.phone.on('registered', () => {
-            this.state = 'ready';
+            // Only lift the boot state — never stomp a resumed break (BK-7), a live
+            // call, or wherever a mid-session re-registration might land.
+            if (this.state === 'offline') {
+                this.state = 'ready';
+            }
             this.error = null;
         });
         this.phone.on('unregistered', () => {

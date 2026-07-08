@@ -2,11 +2,13 @@
     @php
         $tiles = $this->tiles();
         $callbacksDue = $this->callbacksDue();
+        $breakMinutes = $this->breakMinutes();
     @endphp
 
-    {{-- MD-3: the five honest tiles — one agentProductivity() row for me + today.
+    {{-- MD-3: the six honest tiles — one agentProductivity() row for me + today,
+         plus break time from my status history (BK slice 5, the reopened tile).
          No-answer carries the same "provisional" tag the manager reports use. --}}
-    <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+    <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
             <div class="text-sm text-gray-500 dark:text-gray-400">Calls today</div>
             <div class="mt-1 text-3xl font-semibold text-gray-950 dark:text-white">{{ $tiles['total'] }}</div>
@@ -29,6 +31,12 @@
                 <span class="block text-xs text-gray-400">provisional</span>
             </div>
             <div class="mt-1 text-3xl font-semibold text-gray-950 dark:text-white">{{ $tiles['no_answer'] }}</div>
+        </div>
+        <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+            <div class="text-sm text-gray-500 dark:text-gray-400">Break time</div>
+            <div class="mt-1 text-3xl font-semibold text-gray-950 dark:text-white">
+                {{ $breakMinutes >= 60 ? intdiv($breakMinutes, 60) . 'h ' . str_pad((string) ($breakMinutes % 60), 2, '0', STR_PAD_LEFT) . 'm' : $breakMinutes . ' min' }}
+            </div>
         </div>
     </div>
 

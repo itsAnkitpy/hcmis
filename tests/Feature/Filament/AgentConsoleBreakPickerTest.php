@@ -1,6 +1,10 @@
 <?php
 
+use App\Enums\PresenceStatus;
+use App\Enums\RoleName;
 use App\Filament\Pages\AgentConsole;
+use App\Models\AgentPresence;
+use App\Models\AgentStatusHistory;
 use App\Models\BreakCategory;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
@@ -68,4 +72,93 @@ it('never lists another client\'s break types (the tenant wall)', function () {
     );
 
     expect(breakPickerOptions($clientA))->toBe([]);
+});
+
+// --- BK-7: resume-on-return — the loading console asks the server before assuming Ready ---
+
+it('offers a still-fresh break back to a reloading console, anchored on the original start', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    [$stint, $lunch] = TenantContext::run($tenant->id, function () use ($agent): array {
+        $lunch = BreakCategory::factory()->withLimit(30)->create(['code' => 'LUNCH_TEST', 'label' => 'Lunch']);
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
+
+        // ->fresh(): compare against the STORED start (seconds precision), the
+        // same value resumableBreak() reads back.
+        $stint = AgentStatusHistory::factory()->forUser($agent)->onBreak($lunch)
+            ->create(['started_at' => now()->subMinutes(10)])->fresh();
+
+        return [$stint, $lunch];
+    });
+
+    $this->actingAs($agent);
+
+    $resume = TenantContext::run($tenant->id, fn (): ?array => (new AgentConsole)->resumableBreak());
+
+    expect($resume)->toBe([
+        'startedAtMs' => $stint->started_at->getTimestampMs(),
+        'category' => ['id' => $lunch->id, 'label' => 'Lunch', 'limitMinutes' => 30],
+    ]);
+});
+
+it('resumes an untyped break with no category attached', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)
+            ->create(['started_at' => now()->subMinutes(5)]);
+    });
+
+    $this->actingAs($agent);
+
+    $resume = TenantContext::run($tenant->id, fn (): ?array => (new AgentConsole)->resumableBreak());
+
+    expect($resume)->not->toBeNull()
+        ->and($resume['category'])->toBeNull();
+});
+
+it('offers nothing when the session went stale — a dead break stays dead (BK-6)', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->stale()->create();
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)
+            ->create(['started_at' => now()->subMinutes(20)]);
+    });
+
+    $this->actingAs($agent);
+
+    expect(TenantContext::run($tenant->id, fn (): ?array => (new AgentConsole)->resumableBreak()))->toBeNull();
+});
+
+it('offers nothing when the agent is not on break', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::Ready)->create();
+    });
+
+    $this->actingAs($agent);
+
+    expect(TenantContext::run($tenant->id, fn (): ?array => (new AgentConsole)->resumableBreak()))->toBeNull();
+});
+
+it('offers nothing when the board says on break but no open stint anchors it', function () {
+    // Both halves must agree (the slice-4 coherence rule): a fresh on-break row
+    // with no open stint has no clock to resume — fall through to the normal boot.
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
+    });
+
+    $this->actingAs($agent);
+
+    expect(TenantContext::run($tenant->id, fn (): ?array => (new AgentConsole)->resumableBreak()))->toBeNull();
 });

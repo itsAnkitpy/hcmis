@@ -7,7 +7,6 @@ use App\Enums\StintEndedVia;
 use App\Models\AgentPresence;
 use App\Models\AgentStatusHistory;
 use App\Models\BreakCategory;
-use Illuminate\Support\Carbon;
 
 /**
  * The history half of the single door (BK-2): called by AgentConsole::setPresence()
@@ -56,7 +55,9 @@ class RecordStatusStint
             }
 
             $open->update([
-                'ended_at' => $sessionWentStale ? self::staleCutoff($open, $previous) : now(),
+                // BK-6's shared arithmetic lives on the model (staleEndCutoff), so
+                // this physical close and every reader's virtual close agree.
+                'ended_at' => $sessionWentStale ? $open->staleEndCutoff($previous) : now(),
                 'ended_via' => $sessionWentStale ? StintEndedVia::Stale : StintEndedVia::Changed,
             ]);
         }
@@ -72,24 +73,5 @@ class RecordStatusStint
             'limit_minutes' => $status === PresenceStatus::OnBreak ? $category?->time_limit_minutes : null,
             'started_at' => now(),
         ]);
-    }
-
-    /**
-     * When a dead session's stint effectively ended (BK-6): the last heartbeat
-     * plus the stale window — the same arithmetic every reader applies, so the
-     * physical close never changes a number a reader already showed. Floored at
-     * the stint's own start so the close can never predate the open.
-     */
-    private static function staleCutoff(AgentStatusHistory $open, ?AgentPresence $previous): Carbon
-    {
-        $staleAfter = (int) config('telephony.presence.stale_after_seconds');
-
-        $cutoff = $previous?->last_seen_at?->copy()->addSeconds($staleAfter);
-
-        if ($cutoff === null || $cutoff->lt($open->started_at)) {
-            return $open->started_at->copy();
-        }
-
-        return $cutoff;
     }
 }

@@ -15,6 +15,7 @@ use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
 use App\Models\AgentPresence;
+use App\Models\AgentStatusHistory;
 use App\Models\BreakCategory;
 use App\Models\Call;
 use App\Models\Callback;
@@ -202,6 +203,49 @@ class AgentConsole extends Page
                 'limitMinutes' => $category->time_limit_minutes,
             ])
             ->all();
+    }
+
+    /**
+     * BK-7 resume-on-return: the break to pick back up when the console loads, or
+     * null. The industry pattern (Amazon Connect / Genesys): the screen asks the
+     * server "what am I?" on load — it never assumes Ready. Resumable means BOTH
+     * halves agree the break is still live: the agent's own board row reads OnBreak
+     * through effectiveStatus() (fresh heartbeat — a stale row stays dead, the BK-6
+     * doctrine: a new login after a dead session is a new stay), AND their open
+     * break stint exists to anchor the clock. The stint supplies the ORIGINAL start
+     * and the limit SNAPSHOT (BK-2 — the rule as it stood when the break began),
+     * so the countdown resumes exactly where it left off. Untyped breaks resume
+     * with a null category. Self-scoped by auth; tenant wall as everywhere.
+     *
+     * @return array{startedAtMs: int, category: array{id: int, label: string, limitMinutes: int|null}|null}|null
+     */
+    public function resumableBreak(): ?array
+    {
+        $presence = AgentPresence::query()->where('user_id', auth()->id())->first();
+
+        if ($presence?->effectiveStatus() !== PresenceStatus::OnBreak) {
+            return null;
+        }
+
+        $stint = AgentStatusHistory::query()
+            ->open()
+            ->where('user_id', auth()->id())
+            ->where('status', PresenceStatus::OnBreak)
+            ->latest('started_at')
+            ->first();
+
+        if ($stint === null) {
+            return null;
+        }
+
+        return [
+            'startedAtMs' => $stint->started_at->getTimestampMs(),
+            'category' => $stint->break_category_id === null ? null : [
+                'id' => $stint->break_category_id,
+                'label' => $stint->breakCategory?->label ?? 'Break',
+                'limitMinutes' => $stint->limit_minutes,
+            ],
+        ];
     }
 
     /**

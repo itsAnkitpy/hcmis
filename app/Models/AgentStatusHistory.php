@@ -101,4 +101,48 @@ class AgentStatusHistory extends Model
     {
         return $query->whereNull('ended_at');
     }
+
+    /**
+     * BK-6's ONE shared arithmetic: when a dead session's stint effectively
+     * ended — the last heartbeat plus the stale window. The write-side lazy close
+     * (RecordStatusStint) stamps this moment into the row; every duration reader
+     * applies the SAME method virtually first (effectiveEndedAt below) — so the
+     * physical close can never change a number a reader already showed. Floored
+     * at the stint's own start so the close can never predate the open
+     * (pathological-clock guard).
+     */
+    public function staleEndCutoff(?AgentPresence $presence): Carbon
+    {
+        $staleAfter = (int) config('telephony.presence.stale_after_seconds');
+
+        $cutoff = $presence?->last_seen_at?->copy()->addSeconds($staleAfter);
+
+        if ($cutoff === null || $cutoff->lt($this->started_at)) {
+            return $this->started_at->copy();
+        }
+
+        return $cutoff;
+    }
+
+    /**
+     * BK-6 read-side: when this stint effectively ended, given the agent's board
+     * row. A closed row answers with its real end. An open row backed by a FRESH
+     * heartbeat is genuinely still running — null, the caller counts up to now.
+     * An open row whose session died (no board row, or heartbeat gone quiet past
+     * the stale window) reads as ended at the stale cutoff — the exact moment the
+     * write-side lazy close will eventually stamp, so duration math is identical
+     * before and after the physical close.
+     */
+    public function effectiveEndedAt(?AgentPresence $presence): ?Carbon
+    {
+        if ($this->ended_at !== null) {
+            return $this->ended_at;
+        }
+
+        if ($presence !== null && ! $presence->isStale()) {
+            return null;
+        }
+
+        return $this->staleEndCutoff($presence);
+    }
 }

@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace App\Filament\Pages;
 
 use App\Enums\CallbackStatus;
+use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
+use App\Models\AgentPresence;
+use App\Models\AgentStatusHistory;
 use App\Models\Call;
 use App\Models\Callback;
 use App\Models\User;
@@ -91,6 +94,39 @@ class MyDay extends Page
     public function outcomes(): array
     {
         return app(CallReportService::class)->dispositionBreakdown($this->todayFilters());
+    }
+
+    /**
+     * "Break time" (MD-3's reopened tile — break-tracking slice 5): minutes I've
+     * spent OnBreak today. Closed stints count their real span; my open break
+     * counts up to now; and BK-6's read rule applies — an open stint whose
+     * session died counts only up to the stale cutoff (the same arithmetic the
+     * lazy close stamps, AgentStatusHistory::effectiveEndedAt), so a dangling
+     * row from a crashed tab never inflates today. Stints clip to the day
+     * window: a break spanning midnight counts only today's part. Own rows only
+     * by user id; the tenant wall is inherited like everything on this page.
+     */
+    public function breakMinutes(): int
+    {
+        $dayStart = now()->startOfDay();
+
+        $presence = AgentPresence::query()->where('user_id', Auth::id())->first();
+
+        $seconds = AgentStatusHistory::query()
+            ->where('user_id', Auth::id())
+            ->where('status', PresenceStatus::OnBreak)
+            ->where(function ($query) use ($dayStart): void {
+                $query->whereNull('ended_at')->orWhere('ended_at', '>=', $dayStart);
+            })
+            ->get()
+            ->sum(function (AgentStatusHistory $stint) use ($presence, $dayStart): float {
+                $end = $stint->effectiveEndedAt($presence) ?? now();
+                $start = $stint->started_at->greaterThan($dayStart) ? $stint->started_at : $dayStart;
+
+                return $start->lt($end) ? $start->diffInSeconds($end) : 0;
+            });
+
+        return (int) round($seconds / 60);
     }
 
     /**
