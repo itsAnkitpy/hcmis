@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Filament\Pages;
 
 use App\Actions\AdvanceLeadStatus;
+use App\Actions\RecordStatusStint;
 use App\Audit\Audit;
 use App\Enums\CallbackStatus;
 use App\Enums\CallDirection;
@@ -14,6 +15,7 @@ use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
 use App\Models\AgentPresence;
+use App\Models\BreakCategory;
 use App\Models\Call;
 use App\Models\Callback;
 use App\Models\CallHandoff;
@@ -145,18 +147,79 @@ class AgentConsole extends Page
      * (BelongsToTenant stamps tenant_id on create; the unique (tenant_id, user_id) backs
      * the upsert). The browser calls this over $wire on each state transition. Renderless:
      * it fires mid-call (entering on-call / wrap-up), so it must not morph the live console.
+     *
+     * BK-2: this is also the single door to the status HISTORY — the board upsert and
+     * the stint close/open share one transaction (RecordStatusStint), so the board and
+     * its memory can never disagree. The board row is read BEFORE the upsert because
+     * the lazy stale-close (BK-6) judges the dying session by its pre-write heartbeat.
+     *
+     * $breakCategoryId is the picker's break type (BK-3, browser-supplied): resolved
+     * server-side to an ACTIVE category in the agent's own client — RLS walls foreign
+     * ids, the is_active check drops deactivated ones — and anything unresolvable
+     * degrades to an untyped break (null), never an error (BK-3's fallback).
      */
     #[Renderless]
-    public function setPresence(string $status): void
+    public function setPresence(string $status, ?int $breakCategoryId = null): void
     {
         $presence = PresenceStatus::tryFrom($status);
 
         abort_if($presence === null, 422, 'Unknown presence status.');
 
-        AgentPresence::query()->updateOrCreate(
-            ['user_id' => auth()->id()],
-            ['status' => $presence, 'last_seen_at' => now()],
-        );
+        $category = $this->resolveBreakCategory($presence, $breakCategoryId);
+
+        DB::transaction(function () use ($presence, $category): void {
+            $previous = AgentPresence::query()->where('user_id', auth()->id())->first();
+
+            AgentPresence::query()->updateOrCreate(
+                ['user_id' => auth()->id()],
+                ['status' => $presence, 'last_seen_at' => now()],
+            );
+
+            RecordStatusStint::run((int) auth()->id(), $presence, $category, $previous);
+        });
+    }
+
+    /**
+     * The break types the agent can pick from (BK-3's picker): the client's ACTIVE
+     * categories in display order, each carrying its limit so the browser can run
+     * the countdown client-side (from the break's start + this limit — no polling).
+     * RLS + BelongsToTenant wall the list to the agent's own client. An empty list
+     * means the client deactivated every type — the browser then skips the picker
+     * and takes a plain untyped break (BK-3's fallback).
+     *
+     * @return array<int, array{id: int, label: string, limitMinutes: int|null}>
+     */
+    public function breakCategoryOptions(): array
+    {
+        return BreakCategory::query()
+            ->where('is_active', true)
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->get()
+            ->map(fn (BreakCategory $category): array => [
+                'id' => $category->id,
+                'label' => $category->label,
+                'limitMinutes' => $category->time_limit_minutes,
+            ])
+            ->all();
+    }
+
+    /**
+     * Resolve the browser's break-type id to a real, ACTIVE category in the agent's
+     * own client (BK-3). Only consulted for a break; a cross-client, deactivated or
+     * nonsense id resolves to null — an untyped break, never a 4xx (the fallback BK-3
+     * chose over trapping the agent).
+     */
+    private function resolveBreakCategory(PresenceStatus $status, ?int $breakCategoryId): ?BreakCategory
+    {
+        if ($status !== PresenceStatus::OnBreak || $breakCategoryId === null) {
+            return null;
+        }
+
+        return BreakCategory::query()
+            ->whereKey($breakCategoryId)
+            ->where('is_active', true)
+            ->first();
     }
 
     /**

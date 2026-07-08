@@ -1,54 +1,156 @@
 <x-filament-panels::page>
     @vite('resources/js/agent-console.js')
 
-    {{-- B4 CP1: the page registers as a browser phone; the status pill flips
-         offline -> ready on its own off the phone's events (D3). The work
-         screen (lead card, call controls) builds into this shell in CP2+. --}}
-    <div x-data="agentConsole(@js($this->getPhoneConfig()))" class="mx-auto w-full max-w-2xl">
-        <div class="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900">
-            <div class="flex items-center justify-between gap-4">
-                <div>
-                    <h2 class="text-base font-semibold text-gray-950 dark:text-white">
-                        Browser phone
-                    </h2>
-                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                        Extension {{ $this->getPhoneConfig()['extension'] ?? '—' }}
-                    </p>
+    {{-- B4 CP1: the page registers as a browser phone; the strip flips
+         offline -> ready on its own off the phone's events (D3).
+
+         BK-3/BK-4 (+ the S72 status-strip fold-in): the small pill grew into the
+         STATUS STRIP — one full-width colored bar carrying the agent's status,
+         the time in it, and the one action that makes sense right now (Take a
+         break / I'm back). On break the clock counts down the picked type's
+         limit; past it the strip flips red and shouts — visual only, nobody is
+         ever auto-returned (BK-4). Break types come server-rendered from
+         breakCategoryOptions() (active, in order, own client). --}}
+    <div x-data="agentConsole(@js($this->getPhoneConfig()), @js($this->breakCategoryOptions()))" class="mx-auto w-full max-w-2xl">
+        <div
+            class="rounded-xl border p-5 shadow-sm"
+            :class="{
+                'border-red-300 bg-red-50 dark:border-red-500/30 dark:bg-red-500/10': error || isBreakOverdue(),
+                'border-gray-200 bg-white dark:border-white/10 dark:bg-gray-900': ! error && state === 'offline',
+                'border-green-200 bg-green-50 dark:border-green-500/20 dark:bg-green-500/10': ! error && state === 'ready',
+                'border-blue-200 bg-blue-50 dark:border-blue-500/20 dark:bg-blue-500/10': ! error && (state === 'ringing' || state === 'calling' || state === 'onCall'),
+                'border-amber-200 bg-amber-50 dark:border-amber-500/20 dark:bg-amber-500/10': ! error && state === 'wrapUp',
+                'border-orange-200 bg-orange-50 dark:border-orange-500/20 dark:bg-orange-500/10': ! error && state === 'onBreak' && ! isBreakOverdue(),
+            }"
+        >
+            <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+                <div class="flex items-center gap-3">
+                    <span class="relative flex h-3 w-3">
+                        {{-- The overstay ping: a slow red pulse you can't miss (BK-4's shout). --}}
+                        <span
+                            x-show="isBreakOverdue()"
+                            x-cloak
+                            class="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75"
+                        ></span>
+                        <span
+                            class="relative inline-flex h-3 w-3 rounded-full"
+                            :class="{
+                                'bg-red-500': error || isBreakOverdue(),
+                                'bg-gray-400': ! error && state === 'offline',
+                                'bg-green-500': ! error && state === 'ready',
+                                'bg-blue-500': ! error && (state === 'ringing' || state === 'calling' || state === 'onCall'),
+                                'bg-amber-500': ! error && state === 'wrapUp',
+                                'bg-orange-500': ! error && state === 'onBreak' && ! isBreakOverdue(),
+                            }"
+                        ></span>
+                    </span>
+
+                    <div>
+                        <p
+                            class="text-xl font-bold"
+                            :class="{
+                                'text-red-800 dark:text-red-300': error || isBreakOverdue(),
+                                'text-gray-500 dark:text-gray-400': ! error && state === 'offline',
+                                'text-green-800 dark:text-green-300': ! error && state === 'ready',
+                                'text-blue-800 dark:text-blue-300': ! error && (state === 'ringing' || state === 'calling' || state === 'onCall'),
+                                'text-amber-800 dark:text-amber-300': ! error && state === 'wrapUp',
+                                'text-orange-800 dark:text-orange-300': ! error && state === 'onBreak' && ! isBreakOverdue(),
+                            }"
+                            x-text="error ? 'Registration failed' : stripTitle()"
+                        ></p>
+                        <p x-show="state !== 'onBreak'" class="text-sm text-gray-500 dark:text-gray-400">
+                            Extension {{ $this->getPhoneConfig()['extension'] ?? '—' }}
+                        </p>
+                        <p x-show="state === 'onBreak'" x-cloak class="text-sm text-gray-500 dark:text-gray-400">
+                            You won't be rung while you're on break.
+                        </p>
+                    </div>
                 </div>
 
-                {{-- B2.2a: the who's-free board indicator (PD-2). The pill reads the
-                     agent's live status off the screen state — Ready / On a call /
-                     Wrapping up / On break / Offline — the same value the screen
-                     writes to the agent_presence board over $wire. --}}
-                <span
-                    class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium"
-                    :class="{
-                        'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400': error,
-                        'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300': ! error && state === 'offline',
-                        'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400': ! error && state === 'ready',
-                        'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400': ! error && (state === 'ringing' || state === 'calling' || state === 'onCall'),
-                        'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400': ! error && state === 'wrapUp',
-                        'bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-400': ! error && state === 'onBreak',
-                    }"
-                >
-                    <span
-                        class="h-2 w-2 rounded-full"
-                        :class="{
-                            'bg-red-500': error,
-                            'bg-gray-400': ! error && state === 'offline',
-                            'bg-green-500': ! error && state === 'ready',
-                            'bg-blue-500': ! error && (state === 'ringing' || state === 'calling' || state === 'onCall'),
-                            'bg-amber-500': ! error && state === 'wrapUp',
-                            'bg-orange-500': ! error && state === 'onBreak',
-                        }"
-                    ></span>
-                    <span x-text="error ? 'registration failed' : presenceLabel()"></span>
-                </span>
+                <div class="flex items-center gap-4">
+                    {{-- The strip's clock: time in this status; on break, the countdown
+                         (down to the limit, then the overrun back up — BK-3). --}}
+                    <div x-show="state !== 'offline'" class="text-right">
+                        <p
+                            class="text-2xl font-bold tabular-nums text-gray-950 dark:text-white"
+                            x-text="state === 'onBreak' ? breakClock() : formatClock(statusSeconds())"
+                        ></p>
+                        <p
+                            class="text-xs text-gray-500 dark:text-gray-400"
+                            x-text="state === 'onBreak' ? breakCaption() : 'in this status'"
+                        ></p>
+                    </div>
+
+                    {{-- B2.2a PD-2: the one manual board control, now living in the strip.
+                         Take a break opens the picker when break types exist (BK-3 —
+                         required), or goes straight to a plain break when none do. --}}
+                    <button
+                        type="button"
+                        x-show="state === 'ready' && ! breakPickerOpen"
+                        x-on:click="startBreak()"
+                        class="inline-flex items-center rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-gray-700 ring-1 ring-gray-300 hover:bg-gray-50 dark:bg-white/10 dark:text-gray-200 dark:ring-white/10 dark:hover:bg-white/20"
+                    >
+                        Take a break
+                    </button>
+                    <button
+                        type="button"
+                        x-show="state === 'onBreak'"
+                        x-cloak
+                        x-on:click="endBreak()"
+                        class="inline-flex items-center rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500"
+                    >
+                        I'm back
+                    </button>
+                </div>
             </div>
 
             <p x-show="error" x-cloak class="mt-3 text-sm text-red-600 dark:text-red-400">
                 <span x-text="error"></span>
             </p>
+
+            {{-- BK-3 break picker: which kind? Active types in display order, each
+                 with its limit. Picking one starts the break; Cancel backs out. --}}
+            <div
+                x-show="breakPickerOpen && state === 'ready'"
+                x-cloak
+                class="mt-4 border-t border-green-200 pt-4 dark:border-green-500/20"
+            >
+                <p class="text-sm font-medium text-gray-700 dark:text-gray-300">What kind of break?</p>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                    <template x-for="category in breakCategories" :key="category.id">
+                        <button
+                            type="button"
+                            x-on:click="chooseBreak(category)"
+                            class="inline-flex items-baseline gap-1.5 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-gray-700 ring-1 ring-gray-300 hover:bg-orange-50 hover:ring-orange-300 dark:bg-white/10 dark:text-gray-200 dark:ring-white/10 dark:hover:bg-white/20"
+                        >
+                            <span x-text="category.label"></span>
+                            <span
+                                class="text-xs font-normal text-gray-400 dark:text-gray-500"
+                                x-text="category.limitMinutes ? category.limitMinutes + ' min' : 'no limit'"
+                            ></span>
+                        </button>
+                    </template>
+                    <button
+                        type="button"
+                        x-on:click="breakPickerOpen = false"
+                        class="px-2 py-1.5 text-sm font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            </div>
+
+            {{-- BK-4: the overstay shout — loud, visual, and nothing more. The system
+                 never flips anyone back to Ready; a human ends the break. --}}
+            <div
+                x-show="isBreakOverdue()"
+                x-cloak
+                class="mt-4 rounded-lg bg-red-600 px-4 py-3"
+            >
+                <p class="text-sm font-bold text-white">
+                    Break time is up — press “I'm back” when you return.
+                </p>
+            </div>
         </div>
 
         {{-- B-outbound CP-O1: the preview dialer. In 'ready' the agent picks a
@@ -61,20 +163,6 @@
             x-cloak
             class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
         >
-            {{-- B2.2a (PD-2): the one manual board control — step away to "On break"
-                 so the system stops ringing this agent. Returns via the On break
-                 panel's "I'm back". Only offered between calls (the ready block). --}}
-            <div class="mb-4 flex items-center justify-between gap-3">
-                <p class="text-sm text-gray-500 dark:text-gray-400">You're ready for calls.</p>
-                <button
-                    type="button"
-                    x-on:click="startBreak()"
-                    class="inline-flex items-center rounded-lg bg-gray-200 px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-gray-300 dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/20"
-                >
-                    Take a break
-                </button>
-            </div>
-
             {{-- CP-O3 O1: a dial that never rang (blocked by Do-Not-Call, or an
                  unusable number) drops back here with a short notice. --}}
             <div
@@ -261,29 +349,6 @@
                     <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">One-off call to a typed number. Do-Not-Call still applies.</p>
                 </div>
             @endif
-        </div>
-
-        {{-- B2.2a (PD-2/PD-3): on break. An away state the system won't ring — a
-             call that arrives while here is auto-declined at the phone (busy flag),
-             never shown. "I'm back" returns to ready and the board flips back. --}}
-        <div
-            x-show="state === 'onBreak'"
-            x-cloak
-            class="mt-4 rounded-xl border border-orange-200 bg-orange-50 p-6 shadow-sm dark:border-orange-500/20 dark:bg-orange-500/10"
-        >
-            <div class="flex items-center justify-between gap-4">
-                <div>
-                    <p class="text-base font-semibold text-orange-800 dark:text-orange-300">On break</p>
-                    <p class="mt-1 text-sm text-orange-700/80 dark:text-orange-300/70">You won't be rung while you're on break.</p>
-                </div>
-                <button
-                    type="button"
-                    x-on:click="endBreak()"
-                    class="inline-flex items-center rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500"
-                >
-                    I'm back
-                </button>
-            </div>
         </div>
 
         {{-- B4 CP2a/CP2b + B-outbound CP-O1: the call panel. Inbound: the app

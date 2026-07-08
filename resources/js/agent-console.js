@@ -29,7 +29,7 @@ import { AgentPhone } from './telephony/agent-phone';
  * mount it with x-data="agentConsole(config)". Alpine ships with Filament — we
  * never import our own copy.
  */
-const agentConsole = (config) => ({
+const agentConsole = (config, breakCategories = []) => ({
     state: 'offline',
     error: null,
     callerNumber: null,
@@ -47,6 +47,24 @@ const agentConsole = (config) => ({
     // and the handle for the ~15s heartbeat timer (PD-4), cleared on unmount.
     presence: null,
     heartbeatTimer: null,
+
+    // BK-3 break picker: the client's active break types (server-rendered at page
+    // load), whether the picker is open, and the chosen type while on break —
+    // {id, label, limitMinutes} — null for an untyped break. The id rides the
+    // presence write to setPresence; statusSince + limitMinutes drive the
+    // client-side countdown (BK-4: overstay is computed here, never enforced).
+    breakCategories,
+    breakPickerOpen: false,
+    activeBreak: null,
+
+    // The status strip's clocks: when the current BOARD status began (statusSince,
+    // reset when pushPresence actually writes — rapid screen hops like ringing ->
+    // onCall share one board status, so the clock doesn't reset mid-call), and a
+    // 1s display tick (`now`) that drives time-in-status + the break countdown.
+    // Display only — no server traffic rides this tick (the heartbeat stays 15s).
+    statusSince: Date.now(),
+    now: Date.now(),
+    clockTimer: null,
 
     // M4 callback capture: the disposition ids that mean "schedule a callback"
     // (server-derived), and the schedule fields revealed when one is picked.
@@ -198,6 +216,10 @@ const agentConsole = (config) => ({
         // is renderless server-side, so this never disturbs a live call.
         this.heartbeatTimer = setInterval(() => this.$wire.heartbeat(), 15000);
 
+        // The strip's display tick (BK-3): browser-only, updates the reactive clock
+        // the time-in-status and break countdown read. Never touches the server.
+        this.clockTimer = setInterval(() => (this.now = Date.now()), 1000);
+
         // B2.2a PD-3 — one place maps every screen transition to a board write (+
         // the busy flag that declines rings during wrap-up / break). Catches every
         // state change, so no transition can silently skip the board.
@@ -240,10 +262,13 @@ const agentConsole = (config) => ({
         }
 
         this.presence = status;
-        this.$wire.setPresence(status);
+        this.statusSince = Date.now();
+        // BK-3: a break carries its picked type's id (untyped break -> null). The
+        // server re-validates it (active + own client) — this is a hint, not a wall.
+        this.$wire.setPresence(status, status === 'on_break' ? (this.activeBreak?.id ?? null) : null);
     },
 
-    /** A human label for the agent's current board status (drives the status pill). */
+    /** A human label for the agent's current board status (drives the status strip). */
     presenceLabel() {
         return {
             offline: 'Offline',
@@ -256,12 +281,110 @@ const agentConsole = (config) => ({
         }[this.state] ?? '—';
     },
 
-    /** B2.2a — go on break (PD-2): only from ready. An away state that declines rings. */
+    /** Seconds in the current board status (the strip's small clock). */
+    statusSeconds() {
+        return Math.max(0, Math.floor((this.now - this.statusSince) / 1000));
+    },
+
+    /** Seconds as a clock — "4:07", or "1:02:07" past the hour. */
+    formatClock(totalSeconds) {
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        const pad = (n) => String(n).padStart(2, '0');
+
+        return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+    },
+
+    /** The picked break's limit in seconds — null for untyped / no-limit breaks. */
+    breakLimitSeconds() {
+        return this.activeBreak?.limitMinutes ? this.activeBreak.limitMinutes * 60 : null;
+    },
+
+    /**
+     * BK-4: overstay is COMPUTED (now past start + limit), never stored and never
+     * enforced — the strip turns red and shouts, and that is all. Breaks without
+     * a limit can't overstay (they count up instead, BK-3).
+     */
+    isBreakOverdue() {
+        const limit = this.breakLimitSeconds();
+
+        return this.state === 'onBreak' && limit !== null && this.statusSeconds() > limit;
+    },
+
+    /**
+     * The strip's break clock: counts DOWN to the limit, then counts the overrun
+     * back UP; a break with no limit just counts up (BK-3 elapsed-only). The
+     * caption below the number says which of the three it is.
+     */
+    breakClock() {
+        const limit = this.breakLimitSeconds();
+        const elapsed = this.statusSeconds();
+
+        if (limit === null) {
+            return this.formatClock(elapsed);
+        }
+
+        return this.isBreakOverdue() ? this.formatClock(elapsed - limit) : this.formatClock(limit - elapsed);
+    },
+
+    /** What the break clock is counting — reads with the number ("4:07 left of your 30 min"). */
+    breakCaption() {
+        const limit = this.activeBreak?.limitMinutes;
+
+        if (! limit) {
+            return 'on break so far';
+        }
+
+        return this.isBreakOverdue() ? `past your ${limit} min` : `left of your ${limit} min`;
+    },
+
+    /** The strip's headline: the status, plus the break type when one was picked. */
+    stripTitle() {
+        if (this.state === 'onBreak' && this.activeBreak) {
+            return `On break — ${this.activeBreak.label}`;
+        }
+
+        return this.presenceLabel();
+    },
+
+    /**
+     * B2.2a — go on break (PD-2): only from ready. An away state that declines rings.
+     * BK-3: when the client has active break types the picker opens first (required
+     * — untyped breaks are the Dialshree gap this replaces); with none configured
+     * it falls straight to a plain untyped break rather than trapping the agent.
+     */
     startBreak() {
         if (this.state !== 'ready') {
             return;
         }
 
+        if (this.breakCategories.length > 0) {
+            this.breakPickerOpen = true;
+            return;
+        }
+
+        this.beginBreak(null);
+    },
+
+    /** BK-3 — the picker's choice: start the break under this type. */
+    chooseBreak(category) {
+        if (this.state !== 'ready') {
+            return;
+        }
+
+        this.beginBreak(category);
+    },
+
+    /**
+     * Flip to on-break under a type (or untyped = null). The countdown anchors on
+     * statusSince — the board write resets it as the break starts, and nothing
+     * touches it again until the agent returns (one clock, no second anchor); the
+     * $watch pushes the board write with the type's id.
+     */
+    beginBreak(category) {
+        this.breakPickerOpen = false;
+        this.activeBreak = category;
         this.state = 'onBreak';
     },
 
@@ -271,6 +394,7 @@ const agentConsole = (config) => ({
             return;
         }
 
+        this.activeBreak = null;
         this.state = 'ready';
     },
 
@@ -566,6 +690,9 @@ const agentConsole = (config) => ({
 
     /** Clear all per-call state (caller, lead, mute, wrap-up, outbound dial). */
     resetCall() {
+        // A ring can land with the break picker open (picking is a 'ready' act) —
+        // close it so it doesn't reappear stale after the call.
+        this.breakPickerOpen = false;
         this.callerNumber = null;
         this.lead = null;
         this.leadResolved = false;
@@ -589,6 +716,7 @@ const agentConsole = (config) => ({
 
     destroy() {
         clearInterval(this.heartbeatTimer);
+        clearInterval(this.clockTimer);
         clearTimeout(this.transferTimer);
         clearTimeout(this.conferenceTimer);
         this.phone?.stop();
