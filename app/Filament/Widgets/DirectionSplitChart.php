@@ -7,6 +7,7 @@ namespace App\Filament\Widgets;
 use App\Models\Call;
 use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
+use App\Reporting\ChartPalette;
 use Filament\Widgets\ChartWidget;
 use Filament\Widgets\Concerns\InteractsWithPageFilters;
 use Illuminate\Support\Facades\Gate;
@@ -45,6 +46,8 @@ class DirectionSplitChart extends ChartWidget
             'datasets' => [
                 [
                     'label' => 'Calls',
+                    // Two distinct slices need two distinct hues (the legend names each).
+                    'backgroundColor' => ChartPalette::categorical(2),
                     'data' => [$totals['inbound'], $totals['outbound']],
                 ],
             ],

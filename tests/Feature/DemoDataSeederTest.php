@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
@@ -41,4 +42,26 @@ it('seeds a coherent demo world in local and is safe to re-run', function () {
             }
         });
     }
+});
+
+it('seeds a multi-agent lab with coarse-shaped call history (Live Agent Board, Slice 1)', function () {
+    $this->app['env'] = 'local';
+
+    $this->seed(DemoDataSeeder::class);
+
+    $tenant = Tenant::where('slug', 'demo-acme-outbound')->firstOrFail();
+    $firstCount = TenantContext::run($tenant->id, fn (): int => Call::count());
+
+    $this->seed(DemoDataSeeder::class); // re-run must not duplicate the history
+
+    [$secondCount, $agentSpread, $withDurations] = TenantContext::run($tenant->id, fn (): array => [
+        Call::count(),
+        (int) Call::distinct()->count('agent_id'),
+        Call::whereNotNull('duration_seconds')->count(),
+    ]);
+
+    expect($firstCount)->toBeGreaterThan(0)          // history was seeded
+        ->and($secondCount)->toBe($firstCount)        // seed-once: re-run adds nothing
+        ->and($agentSpread)->toBeGreaterThan(2)       // a real floor of agents, not just the two softphone ones
+        ->and($withDurations)->toBe(0);               // coarse v1 shape: no made-up call durations
 });

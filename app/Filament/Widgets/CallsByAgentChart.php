@@ -7,6 +7,7 @@ namespace App\Filament\Widgets;
 use App\Models\Call;
 use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
+use App\Reporting\ChartPalette;
 use Filament\Widgets\ChartWidget;
 use Filament\Widgets\Concerns\InteractsWithPageFilters;
 use Illuminate\Support\Facades\Gate;
@@ -45,6 +46,9 @@ class CallsByAgentChart extends ChartWidget
             'datasets' => [
                 [
                     'label' => 'Calls',
+                    // One colour for the whole series (LB Slice 2): each bar is already
+                    // named on the axis, so a colour per agent would add noise, not meaning.
+                    'backgroundColor' => ChartPalette::PRIMARY,
                     'data' => array_column($rows, 'total'),
                 ],
             ],

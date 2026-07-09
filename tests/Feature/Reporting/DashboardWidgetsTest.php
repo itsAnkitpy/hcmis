@@ -13,8 +13,12 @@ use App\Filament\Widgets\OnBreakAgents;
 use App\Models\AgentPresence;
 use App\Models\AgentStatusHistory;
 use App\Models\BreakCategory;
+use App\Models\Call;
+use App\Models\Campaign;
+use App\Models\Disposition;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Reporting\ChartPalette;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Livewire\Livewire;
@@ -162,6 +166,48 @@ it('builds the direction split chart from the period totals', function () {
 
     expect($data['labels'])->toBe(['Inbound', 'Outbound'])
         ->and($data['datasets'][0]['data'])->toBe([2, 3]);
+});
+
+// --- LB Slice 2: the shared chart palette ---
+
+it('colours the donut charts from the shared palette, one hue per slice', function () {
+    $tenant = Tenant::factory()->create();
+    seedCallReportFixture($tenant);
+
+    [$disposition, $direction] = TenantContext::run($tenant->id, fn (): array => [
+        readWidget(widgetWith(DispositionMixChart::class), 'getData'),
+        readWidget(widgetWith(DirectionSplitChart::class), 'getData'),
+    ]);
+
+    // Colours come from the shared palette, in fixed order, one per slice — never cycled.
+    expect($disposition['datasets'][0]['backgroundColor'])->toBe(ChartPalette::categorical(count($disposition['labels'])))
+        ->and($direction['datasets'][0]['backgroundColor'])->toBe(ChartPalette::categorical(2));
+});
+
+it('folds dispositions beyond the palette into a single "Other" slice', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function () {
+        $campaign = Campaign::factory()->create();
+        $agent = User::factory()->create();
+
+        // Ten dispositions with descending call volume, so the ordering is deterministic.
+        foreach (range(1, 10) as $rank) {
+            $disposition = Disposition::factory()->forCampaign($campaign)->create(['label' => "D{$rank}"]);
+            Call::factory()->count(11 - $rank)->forAgent($agent)->create([
+                'campaign_id' => $campaign->id,
+                'disposition_id' => $disposition->id,
+                'created_at' => now(),
+            ]);
+        }
+    });
+
+    $data = TenantContext::run($tenant->id, fn (): array => readWidget(widgetWith(DispositionMixChart::class), 'getData'));
+
+    expect($data['labels'])->toHaveCount(8)                          // 7 real + "Other", never 10
+        ->and($data['labels'][7])->toBe('Other')                     // the long thin tail, folded
+        ->and($data['datasets'][0]['backgroundColor'])->toHaveCount(8) // one hue per slice, no cycling
+        ->and(array_sum($data['datasets'][0]['data']))->toBe(55);    // 10+9+…+1 — no call lost in the fold
 });
 
 // --- The shared page filter flows through the guard-parse into the widgets ---
