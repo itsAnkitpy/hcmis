@@ -2,6 +2,7 @@
 
 namespace App\Providers\Filament;
 
+use App\Filament\Auth\Login;
 use App\Filament\Pages\Dashboard;
 use App\Http\Middleware\SetCurrentTenant;
 use App\Models\User;
@@ -36,7 +37,7 @@ class AdminPanelProvider extends PanelProvider
             ->path('admin')
             ->viteTheme('resources/css/filament/admin/theme.css')
             ->brandName('HighlandConnect')
-            ->login()
+            ->login(Login::class)
             ->profile()
             ->sidebarCollapsibleOnDesktop()
             // M5 — the queued lead import notifies the uploader on completion via
