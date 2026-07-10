@@ -12,11 +12,33 @@ like the welcome page, so no asset rebuild is needed.
 
 <div class="hcl-shell">
     {{-- The panel remembers a per-user dark theme in localStorage; the login
-    shell is designed light-only (matching the public welcome page), so
-    drop the dark class the base layout's head script may have applied.
-    The stored preference is left alone and re-applies after sign-in. --}}
+    shell is designed light-only (matching the public welcome page). A one-shot
+    class removal is not enough: Filament's bundled JS re-applies the stored
+    theme once Alpine boots (an Alpine.effect on the theme store), which is why
+    dark mode leaked back in after page load. Keep stripping the class while
+    this page is open; the stored preference is untouched and re-applies on
+    the full-page redirect after sign-in. --}}
     <script>
-        document.documentElement.classList.remove('dark');
+        (() => {
+            const html = document.documentElement;
+
+            // Guard with contains(): classList.remove() rewrites the class
+            // attribute even when the token is absent, which re-triggers the
+            // observer and starves the page in an infinite loop. Only a real
+            // removal may run, so the observer settles after one pass.
+            const forceLight = () => {
+                if (html.classList.contains('dark')) {
+                    html.classList.remove('dark');
+                }
+            };
+
+            forceLight();
+
+            new MutationObserver(forceLight).observe(html, {
+                attributes: true,
+                attributeFilter: ['class'],
+            });
+        })();
     </script>
 
     <style>
@@ -37,6 +59,9 @@ like the welcome page, so no asset rebuild is needed.
             min-height: 100dvh;
             background: var(--hcl-cream);
             color: var(--hcl-ink);
+            /* Native controls (inputs, checkbox, autofill) must render light
+               even while the user's saved panel theme is dark. */
+            color-scheme: light;
         }
 
         .hcl-shell .hcl-font-heading {
