@@ -72,7 +72,7 @@ class LiveAgents extends Page
      * and today's per-agent call count from the counting layer. All tenant-walled by
      * the request context.
      *
-     * @return array<int, array{name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int}>
+     * @return array<int, array{id: int|null, name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int}>
      */
     public function roster(): array
     {
@@ -102,6 +102,7 @@ class LiveAgents extends Page
             $limit = $onBreak ? $stint?->limit_minutes : null;
 
             return [
+                'id' => $presence->user_id,
                 'name' => $presence->user?->name ?? '—',
                 'status' => $status,
                 'statusLabel' => $status->label(),

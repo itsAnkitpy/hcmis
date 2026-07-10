@@ -3,6 +3,8 @@
 namespace App\Filament\Resources\Users\Tables;
 
 use App\Enums\RoleName;
+use App\Filament\Pages\AgentDetail;
+use App\Models\Call;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Tenancy\Actions\SendUserInvite;
@@ -18,6 +20,7 @@ use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 
 class UsersTable
 {
@@ -97,6 +100,12 @@ class UsersTable
                         })),
             ])
             ->recordActions([
+                Action::make('agent_detail')
+                    ->label('Agent detail')
+                    ->icon(Heroicon::OutlinedClock)
+                    ->color('gray')
+                    ->visible(fn (): bool => Gate::allows('viewAny', Call::class))
+                    ->url(fn (User $record): string => AgentDetail::getUrl(['record' => $record->getKey()])),
                 Action::make('resend_invite')
                     ->label('Resend invite')
                     ->icon(Heroicon::OutlinedEnvelope)

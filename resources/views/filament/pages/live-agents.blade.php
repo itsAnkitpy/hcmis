@@ -38,7 +38,19 @@
                     <tbody>
                         @forelse ($rows as $row)
                             <tr class="border-b border-gray-100 dark:border-white/5">
-                                <td class="px-3 py-2 font-medium" style="text-align:left">{{ $row['name'] }}</td>
+                                <td class="px-3 py-2 font-medium" style="text-align:left">
+                                    @if ($row['id'] !== null)
+                                        {{-- AD-1 entry point: click an agent → their Agent Detail day view. The
+                                             board's own gate (Call viewAny) already matches Agent Detail's, so
+                                             every name here is a link the viewer is allowed to open. --}}
+                                        <a
+                                            href="{{ \App\Filament\Pages\AgentDetail::getUrl(['record' => $row['id']]) }}"
+                                            class="text-primary-600 hover:underline dark:text-primary-400"
+                                        >{{ $row['name'] }}</a>
+                                    @else
+                                        {{ $row['name'] }}
+                                    @endif
+                                </td>
                                 <td class="px-3 py-2" style="text-align:left">
                                     <x-filament::badge :color="$row['statusColor']">{{ $row['statusLabel'] }}</x-filament::badge>
                                 </td>
