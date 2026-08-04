@@ -25,3 +25,13 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Asterisk lab — the config is committed, the rest of the sandbox is not.
+/lab/asterisk/.claude/
+/lab/asterisk/recordings/
+/lab/asterisk/recordings-ari/
+/lab/asterisk/baresip-1001/
+/lab/asterisk/baresip-1002/
+/lab/asterisk/webrtc/
+/lab/asterisk/*.php
+/lab/asterisk/speaker.wav

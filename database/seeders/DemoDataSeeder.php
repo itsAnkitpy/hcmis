@@ -44,8 +44,8 @@ class DemoDataSeeder extends Seeder
 
     public function run(): void
     {
-        if (! app()->environment('local')) {
-            $this->command?->warn('DemoDataSeeder runs only in the local environment — skipping.');
+        if (! app()->environment('local', 'staging')) {
+            $this->command?->warn('DemoDataSeeder runs only in the local and staging environments — skipping.');
 
             return;
         }

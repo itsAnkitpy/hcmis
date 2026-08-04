@@ -1,0 +1,36 @@
+# HCIMS Phase-2 lab — Asterisk 20 practice switchboard (sandbox, NOT the Laravel app).
+#   Start:  docker compose up        (foreground — watch the boot logs)
+#   Stop:   Ctrl-C, then  docker compose down
+services:
+  asterisk:
+    image: andrius/asterisk:20            # Asterisk 20.19.0, native arm64 (your M1)
+    container_name: hcmis-lab-asterisk
+    # B4 CP2a: must START WITH A LETTER. Default hostname is the container ID
+    # (digit-first, e.g. 8d4db7b9a67f), which Asterisk stamps into the Contact of
+    # calls it PLACES to the browser; JsSIP's strict RFC-3261 parser rejects a
+    # digit-first host, drops the whole INVITE, and the agent's tab never rings.
+    hostname: hcmis-asterisk
+    environment:
+      PUID: "1000"                        # entrypoint maps the in-container asterisk user
+      PGID: "1000"
+    ports:
+      - "5060:5060/udp"                   # SIP — the call "setup talk"
+      - "10000-10019:10000-10019/udp"     # RTP — the voice; narrow range = cheap to map on Mac
+      - "8088:8088/tcp"                   # A3: ARI — the app-drives-calls API (http.conf + ari.conf)
+    volumes:
+      # Mount the WHOLE config dir, NOT individual files. On Docker Desktop Mac a
+      # single-file bind mount binds the file's inode, so an editor save (atomic
+      # rename = new inode) leaves the container reading stale config. A directory
+      # mount reflects edits live, so `asterisk -rx reload` picks up changes with no
+      # restart. We carry the image's base files (asterisk.conf / modules.conf /
+      # logger.conf) in this dir too, so the mount still boots cleanly.
+      - ./etc-asterisk:/etc/asterisk
+      # A2: the image ships NO sound files — our own prompts (made with macOS `say`)
+      # mount in as the English prompt set. New files need no restart (dir mount).
+      - ./sounds:/var/lib/asterisk/sounds/en
+      # A2: recordings Asterisk writes (MixMonitor's default folder) land on the Mac here
+      - ./recordings:/var/spool/asterisk/monitor
+      # A3: ARI-made recordings use a DIFFERENT folder — and the lean image ships
+      # without it entirely (record requests then fail with a bare HTTP 500, found
+      # 2026-06-12). Mounting it both creates it and lands the files on the Mac.
+      - ./recordings-ari:/var/spool/asterisk/recording
