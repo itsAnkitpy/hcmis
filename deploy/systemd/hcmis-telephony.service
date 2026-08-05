@@ -1,0 +1,19 @@
+# HCIMS — the call-event listener.
+# This is the open line that tells the switchboard our app is listening.
+# Without it, incoming calls simply die on arrival.
+[Unit]
+Description=HCIMS call-event listener (incoming calls)
+After=network.target asterisk.service
+Requires=asterisk.service
+
+[Service]
+Type=simple
+User=hcmis
+Group=hcmis
+WorkingDirectory=/home/hcmis/public_html
+ExecStart=/usr/bin/php artisan telephony:listen
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
