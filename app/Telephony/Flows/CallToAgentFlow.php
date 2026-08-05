@@ -357,7 +357,7 @@ class CallToAgentFlow
         $this->agents[$agentLegId] = new AgentLeg($agentLegId, userId: $servingAgentId, connected: true);
 
         $this->callerLegId = $this->telephony->placeCall(
-            config('telephony.outbound.dial_prefix').$customerNumber,
+            config('telephony.outbound.dial_prefix').$customerNumber.config('telephony.outbound.dial_suffix'),
             'outbound',
             config('telephony.outbound.caller_id'),
         );

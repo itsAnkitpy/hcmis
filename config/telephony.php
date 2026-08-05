@@ -103,11 +103,18 @@ return [
     | the engine-specific "how to reach it" lives here, not in the flow). Lab dials
     | softphones over PJSIP; the trunk era overrides this via env.
     |
+    | 'dial_suffix' is the other half of the same seam. A lab softphone IS an
+    | endpoint ('PJSIP/1003'), but a real number is not — it has to be dialled
+    | THROUGH one ('PJSIP/+919xxxxxxxxx@twilio'), and the trunk name lands after
+    | the number. Empty by default, so the lab is unchanged; the server sets
+    | TELEPHONY_OUTBOUND_DIAL_SUFFIX=@twilio.
+    |
     */
 
     'outbound' => [
         'caller_id' => env('TELEPHONY_OUTBOUND_CALLER_ID'),
         'dial_prefix' => env('TELEPHONY_OUTBOUND_DIAL_PREFIX', 'PJSIP/'),
+        'dial_suffix' => env('TELEPHONY_OUTBOUND_DIAL_SUFFIX', ''),
     ],
 
     /*
