@@ -570,7 +570,8 @@
                 </div>
             </template>
 
-            {{-- No matching lead: nothing is recorded; just close the call out. --}}
+            {{-- No matching lead: Done still writes a lead-less calls row (B3 D5) —
+                 it is what the recording attaches to, so it MUST be clicked. --}}
             <template x-if="! lead">
                 <div class="mt-1">
                     <p
