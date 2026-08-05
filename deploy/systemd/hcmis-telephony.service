@@ -11,7 +11,7 @@ Type=simple
 User=hcmis
 Group=hcmis
 WorkingDirectory=/home/hcmis/public_html
-ExecStart=/usr/bin/php artisan telephony:listen
+ExecStart=/usr/bin/php8.4 artisan telephony:listen
 Restart=always
 RestartSec=5
 

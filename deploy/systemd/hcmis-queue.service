@@ -12,7 +12,7 @@ Group=hcmis
 WorkingDirectory=/home/hcmis/public_html
 # --max-time makes the worker retire itself hourly; systemd starts a fresh one.
 # Keeps memory flat and means a deploy is picked up without anyone remembering to restart it.
-ExecStart=/usr/bin/php artisan queue:work --sleep=3 --tries=3 --max-time=3600
+ExecStart=/usr/bin/php8.4 artisan queue:work --sleep=3 --tries=3 --max-time=3600
 Restart=always
 RestartSec=5
 
