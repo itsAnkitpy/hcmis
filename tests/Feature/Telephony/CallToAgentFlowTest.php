@@ -33,6 +33,7 @@ beforeEach(function () {
     // tests stub the router to always hand back one agent (so the resolver's fallback
     // rings 'PJSIP/1003'); the real board read + reserve/release live in AgentRouterTest.
     fakeAgentRouter();
+    fakeNumberDirectory();
     Queue::fake();
 });
 

@@ -114,12 +114,6 @@ class Switchboard implements HandlerRegistry
         $args = $event['args'] ?? null;
         $legId = $event['channel']['id'] ?? '';
 
-        // ND-3 CHECK — TEMPORARY, DELETE once the dialled number is proven to arrive.
-        Log::info('ND-3 check: notes that arrived with the call.', [
-            'channelvars' => $event['channel']['channelvars'] ?? null,
-            'extension' => $event['channel']['dialplan']['exten'] ?? null,
-        ]);
-
         if ($args === ['snoop']) {
             return;
         }

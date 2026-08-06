@@ -7,6 +7,7 @@ use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\DncEntry;
 use App\Models\Lead;
+use App\Models\PhoneNumber;
 use App\Models\Script;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
@@ -32,6 +33,7 @@ dataset('tenantModels', [
     'disposition' => [Disposition::class],
     'dnc entry' => [DncEntry::class],
     'lead' => [Lead::class],
+    'phone number' => [PhoneNumber::class],
     'script' => [Script::class],
 ]);
 

@@ -8,6 +8,7 @@ use App\Models\CallHandoff;
 use App\Telephony\AgentDirectory;
 use App\Telephony\AgentRouter;
 use App\Telephony\AriConnectionLost;
+use App\Telephony\NumberDirectory;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
@@ -105,14 +106,18 @@ class CallToAgentFlow
 
     private readonly AgentDirectory $directory;
 
+    private readonly NumberDirectory $numbers;
+
     public function __construct(
         private readonly TelephonyProvider $telephony,
         private readonly HandlerRegistry $registry,
         ?AgentRouter $router = null,
         ?AgentDirectory $directory = null,
+        ?NumberDirectory $numbers = null,
     ) {
         $this->router = $router ?? app(AgentRouter::class);
         $this->directory = $directory ?? app(AgentDirectory::class);
+        $this->numbers = $numbers ?? app(NumberDirectory::class);
     }
 
     /** This call's ticket number (FD-3): the log tag, and later the durable waiting-line handle. */
@@ -227,10 +232,15 @@ class CallToAgentFlow
      * (RD-2 resolver) — carrying the caller's own number as the agent leg's caller-ID so
      * the browser reads it off the ringing call to look up the lead (B4 D4).
      *
-     * No free agent (or an unlabelled call) -> clean end + log "all busy" (RD-5): hang
-     * the caller up without a blind ring. (Today's code blindly rang one fixed extension
-     * and waited for a no-answer; now the system KNOWS nobody's free and stops cleanly —
-     * the exact spot B2.3 later turns into "join the queue".)
+     * No free agent (or an unroutable number) -> clean end + log (RD-5): hang the caller
+     * up without a blind ring. (Today's code blindly rang one fixed extension and waited
+     * for a no-answer; now the system KNOWS nobody's free and stops cleanly — the exact
+     * spot B2.3b later turns into "join the queue".)
+     *
+     * The two clean-end causes log SEPARATELY (ND-4). They shared one "all busy" line
+     * until S85, and it cost real time: the S84 tenant-stamp failure read as a staffing
+     * problem for an hour, because a call with no company never reaches the agent board
+     * at all. Same behaviour, two honest messages.
      *
      * @param  array<string, mixed>  $event
      */
@@ -240,9 +250,24 @@ class CallToAgentFlow
         $this->ticketNumber = (string) Str::uuid();   // inbound mints a fresh ticket (FD-3)
 
         $tenantId = $this->companyLabel($event);
-        $reservedAgentId = $tenantId === null ? null : $this->router->reserveFreeAgent($tenantId);
 
-        // RD-5: nobody free (or no company label) -> clean end + log, no blind ring.
+        // ND-4: the number is not in the list, or is switched off. Nothing to route to —
+        // the agent board is never read, so this must not say "all busy".
+        if ($tenantId === null) {
+            rescue(fn () => $this->telephony->hangup($callerLegId), report: false);
+            Log::info('Inbound call: the dialled number belongs to no active client — ending the call (unknown number).', [
+                'ticket' => $this->ticketNumber,
+                'caller' => $callerLegId,
+                'dialled' => $this->dialledNumber($event),
+            ]);
+            $this->dispose();
+
+            return;
+        }
+
+        $reservedAgentId = $this->router->reserveFreeAgent($tenantId);
+
+        // RD-5: the client is known, nobody is free -> clean end + log, no blind ring.
         if ($reservedAgentId === null) {
             rescue(fn () => $this->telephony->hangup($callerLegId), report: false);
             Log::info('Inbound call: no free agent available — ending the call (all busy).', [
@@ -315,25 +340,42 @@ class CallToAgentFlow
     }
 
     /**
-     * Read the company label (Asterisk's native Tenant ID) off the call's arrival
-     * event (RD-1) so the company-blind listener knows which company's board to read.
+     * Which company is this call for? (B2.3a ND-1.)
      *
-     * Fold C (S49): the EXACT ARI field is verified live against the running container's
-     * own api-docs before this is trusted — `tenantid` is stamped in the front-door
-     * dialplan (Set(CHANNEL(tenantid)=...)) and rides the channel. We read the two most
-     * likely event shapes (a first-class `tenantid` on the channel snapshot, or a
-     * configured `channelvars` entry); if neither carries it on the event, the named
-     * fallback is one ARI channel-variable GET (CHANNEL(tenantid)) — a localized change
-     * here. Returns null when unlabelled (no company -> RD-5 clean end).
+     * The SOURCE changed, not the meaning: the dialplan used to stamp a hardcoded
+     * company on every inbound call (RD-1, `Set(tenantid=1)`) — which is exactly why
+     * a second client could never have a phone number. Now the dialplan only notes
+     * WHICH NUMBER WAS DIALLED and the lookup happens here, against the phone_numbers
+     * list. Every caller of this method, its return type and every downstream step are
+     * untouched (the RD-1 promise).
+     *
+     * The note is read from the arrival event's channelvars (ND-3, verified live S85:
+     * `dialednumber` arrives intact, NOT the "800" the call's extension reads as after
+     * the dialplan's Goto). It rides as a channel variable rather than a Stasis
+     * argument because Switchboard::onArrival classifies a new inbound call as
+     * STRICTLY empty args — one extra argument and the call is silently dropped.
+     *
+     * Returns null for an unknown or switched-off number (ND-4 clean end).
      *
      * @param  array<string, mixed>  $event
      */
     private function companyLabel(array $event): ?int
     {
-        $channel = $event['channel'] ?? [];
-        $label = $channel['tenantid'] ?? ($channel['channelvars']['tenantid'] ?? null);
+        return $this->numbers->resolve($this->dialledNumber($event))?->tenant_id;
+    }
 
-        return ($label === null || $label === '') ? null : (int) $label;
+    /**
+     * The number the caller actually dialled, as the dialplan wrote it down before
+     * jumping to the front door (ND-3). Null when the note is missing — an inbound
+     * call that never passed through the pattern rule.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function dialledNumber(array $event): ?string
+    {
+        $number = $event['channel']['channelvars']['dialednumber'] ?? null;
+
+        return ($number === null || $number === '') ? null : (string) $number;
     }
 
     /**

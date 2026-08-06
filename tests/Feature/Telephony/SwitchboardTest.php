@@ -25,6 +25,7 @@ beforeEach(function () {
     // tests prove the multiplexing/isolation, not the routing DB, so the router is stubbed
     // to hand back one agent (the real reserve/release is proven in AgentRouterTest).
     fakeAgentRouter();
+    fakeNumberDirectory();
     Queue::fake();
 });
 
@@ -294,6 +295,7 @@ it('routes a transfer user-event to the handler serving that agent user id, leav
 
 it('ignores a transfer user-event for an agent who has no live call', function () {
     fakeAgentRouter();
+    fakeNumberDirectory();
     $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
 
     $telephony = Mockery::mock(TelephonyProvider::class);
@@ -367,6 +369,7 @@ it('routes a conference user-event to the handler serving that agent, adding B W
 
 it('ignores a conference user-event for an agent who has no live call', function () {
     fakeAgentRouter();
+    fakeNumberDirectory();
     $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
 
     $telephony = Mockery::mock(TelephonyProvider::class);

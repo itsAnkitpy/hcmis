@@ -5,14 +5,19 @@ use App\Enums\CallOutcome;
 use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\Disposition;
+use App\Models\PhoneNumber;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Telephony\AgentRouter;
+use App\Telephony\NumberDirectory;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
+
+/** Prefix of the synthetic dialled numbers the telephony tests route with. */
+const TEST_DIALLED_PREFIX = '+1555000';
 
 /*
 |--------------------------------------------------------------------------
@@ -179,15 +184,66 @@ function stasisStart(string $legId, array $args, ?string $callerNumber = null, ?
         $channel['caller'] = ['number' => $callerNumber];
     }
 
-    // B2.2b RD-1: the front-door dialplan stamps a company label (Asterisk's native
-    // Tenant ID) on every inbound call, so the company-blind listener reads it off the
-    // arrival event. Defaulted because real inbound calls always carry one; pass
-    // tenantId: null to model an unlabelled call (the RD-5 no-company branch).
+    // B2.3a ND-3: the front-door dialplan notes WHICH NUMBER WAS DIALLED on every
+    // inbound call and the app looks up its owner (it used to stamp one hardcoded
+    // company — RD-1 — which is why a second client could never have a number).
+    // The parameter still means "which company is this call for"; it now travels as
+    // a number this call arrived on. Pass tenantId: null to model a call on a number
+    // we do not know or that is switched off (the ND-4 clean-end branch).
     if ($tenantId !== null) {
-        $channel['tenantid'] = $tenantId;
+        $channel['channelvars'] = ['dialednumber' => dialledNumberForTenant($tenantId)];
     }
 
     return ['type' => 'StasisStart', 'args' => $args, 'channel' => $channel];
+}
+
+/** The synthetic dialled number the fake NumberDirectory maps back to a company. */
+function dialledNumberForTenant(string|int $tenantId): string
+{
+    return TEST_DIALLED_PREFIX.$tenantId;
+}
+
+/**
+ * An inbound call arriving on a REAL number (B2.3a): same shape as stasisStart's
+ * inbound case, but carrying a number the real NumberDirectory can look up in the
+ * phone_numbers table rather than a synthetic one the stub decodes.
+ *
+ * @return array<string, mixed>
+ */
+function inboundOn(string $legId, string $dialledNumber, ?string $callerNumber = null): array
+{
+    $event = stasisStart($legId, [], $callerNumber);
+    $event['channel']['channelvars']['dialednumber'] = $dialledNumber;
+
+    return $event;
+}
+
+/**
+ * Bind a stub NumberDirectory (B2.3a) that resolves the synthetic numbers
+ * stasisStart() stamps, without touching the database. Same reasoning as
+ * fakeAgentRouter: these tests prove call MECHANICS, and the real number -> client
+ * lookup (RLS, switched-off rows, cross-client isolation) is proven against the DB
+ * in NumberDirectoryTest.
+ */
+function fakeNumberDirectory(): NumberDirectory
+{
+    $directory = new class extends NumberDirectory
+    {
+        public function resolve(?string $dialledNumber): ?PhoneNumber
+        {
+            if ($dialledNumber === null || ! str_starts_with($dialledNumber, TEST_DIALLED_PREFIX)) {
+                return null;
+            }
+
+            return (new PhoneNumber)->forceFill([
+                'tenant_id' => (int) substr($dialledNumber, strlen(TEST_DIALLED_PREFIX)),
+            ]);
+        }
+    };
+
+    app()->instance(NumberDirectory::class, $directory);
+
+    return $directory;
 }
 
 /**

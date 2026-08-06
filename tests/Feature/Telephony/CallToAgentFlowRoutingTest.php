@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\Queue;
 beforeEach(function () {
     config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     config()->set('telephony.agent.directory', []);
+    fakeNumberDirectory();   // resolves the call's dialled number to its company (B2.3a)
     Queue::fake();
 });
 
@@ -49,7 +50,7 @@ it('ends cleanly and never rings when no agent is free (RD-5 all busy)', functio
     Queue::assertNothingPushed();
 });
 
-it('ends cleanly when the call carries no company label — the router is never asked (RD-1)', function () {
+it('ends cleanly when the dialled number belongs to no client — the router is never asked (ND-4)', function () {
     $router = fakeAgentRouter(6);
 
     $telephony = Mockery::mock(TelephonyProvider::class);
@@ -58,10 +59,10 @@ it('ends cleanly when the call carries no company label — the router is never 
     $telephony->shouldNotReceive('placeCall');
 
     $switchboard = new Switchboard($telephony);
-    // tenantId: null → an unlabelled inbound call (no front-door company sticker).
+    // tenantId: null → a call on a number we do not know, or one switched off.
     (new CallToAgentFlow($telephony, $switchboard))->handle(stasisStart('caller-leg', [], null, null));
 
-    expect($router->reserved)->toBe([]);   // unlabelled → never read any company's board
+    expect($router->reserved)->toBe([]);   // no owner → never read any company's board
 });
 
 it('releases the reservation when the agent rings out (Fold B — agent no-answer)', function () {
