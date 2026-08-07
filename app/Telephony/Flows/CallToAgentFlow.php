@@ -184,6 +184,28 @@ class CallToAgentFlow
      * listener keeps running. A lost pipe (AriConnectionLost) is the listener's
      * problem and is re-thrown untouched.
      *
+     * 🔴 A LEG ENDING ARRIVES UNDER TWO NAMES, and for a long time we only listened for
+     * one (found live on staging, S87). "The call was destroyed" (ChannelDestroyed) is
+     * what the engine sends while the leg is still ours; "the call left us" (StasisEnd)
+     * is what it sends when the leg goes away on its own — which is what happens every
+     * time an outside caller hangs up. **Only the second one arrives in that case**, and
+     * with just the first handled the app never learned the caller was gone: it held them
+     * in the waiting room until the maximum-hold timer fired and then recorded them as
+     * "we stopped waiting" instead of "they gave up".
+     *
+     * It went unnoticed until the waiting room existed because until then the app was
+     * always the one hanging up, and a leg we hang up IS destroyed while still ours.
+     *
+     * Treating the two as the same thing is safe HERE, and the reason is worth writing
+     * down: a leg would also leave us without ending if we sent it back out to the
+     * dialplan (the provider's `transfer` verb), and **nothing in this app calls it** —
+     * cold transfer does its work with bridge surgery and a hang-up instead. So a leg
+     * leaving always means it is genuinely gone. Should `transfer` ever be used, this is
+     * the line that has to learn the difference.
+     *
+     * Handling both is harmless when both arrive: whichever lands first tears its call
+     * down, and the second finds no handler (or no such leg) and falls through.
+     *
      * @param  array<string, mixed>  $event
      */
     public function handle(array $event): void
@@ -191,7 +213,7 @@ class CallToAgentFlow
         try {
             match ($event['type'] ?? '') {
                 'StasisStart' => $this->onArrival($event),
-                'ChannelDestroyed' => $this->onLegEnded($event),
+                'ChannelDestroyed', 'StasisEnd' => $this->onLegEnded($event),
                 default => null,
             };
         } catch (AriConnectionLost $exception) {

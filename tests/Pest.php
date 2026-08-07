@@ -307,6 +307,18 @@ function channelDestroyed(string $legId): array
 }
 
 /**
+ * The OTHER way a leg ending arrives — "this leg has left the app" (S87, found live).
+ * It is the one an outside caller's own hang-up produces, and for a long time nothing
+ * listened for it. Same meaning as channelDestroyed(); different word from the engine.
+ *
+ * @return array<string, mixed>
+ */
+function stasisEnd(string $legId): array
+{
+    return ['type' => 'StasisEnd', 'channel' => ['id' => $legId]];
+}
+
+/**
  * One recording file finished writing.
  *
  * @return array<string, mixed>

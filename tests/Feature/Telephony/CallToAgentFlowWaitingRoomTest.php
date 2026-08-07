@@ -2,6 +2,7 @@
 
 use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\Flows\Switchboard;
+use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
 
@@ -131,4 +132,84 @@ it('is a no-op on a call that is not waiting — every other call on the switch'
 
     $flow->tryAgain();
     $flow->tryAgain();
+});
+
+/*
+| S87, found live on staging — a leg ending arrives under TWO names, and the one an
+| outside caller's own hang-up produces is "this leg has left the app" (StasisEnd), not
+| "this call was destroyed" (ChannelDestroyed). Only the second was ever handled, so a
+| caller who hung up while holding was never noticed: they kept their place in the
+| waiting room until the maximum-hold timer fired and were then recorded as "we stopped
+| waiting" rather than "they gave up". Every case below feeds the leaving name only.
+*/
+
+it('notices a waiting caller who hangs up, when the engine reports it as the leg LEAVING', function () {
+    fakeAgentRouter(null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('startHoldMusic')->once();
+    $telephony->shouldNotReceive('hangup');   // they are already gone; nothing left to hang up
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-leg', []));
+    $switchboard->handle(stasisEnd('caller-leg'));
+
+    // The call is let go THERE AND THEN. Before the fix it stayed live, holding a caller
+    // who had already hung up, until the maximum-hold timer ended it minutes later.
+    expect($switchboard->activeCallCount())->toBe(0);
+});
+
+it('notices an agent whose ringing leg leaves, and sends the caller to the waiting room', function () {
+    fakeAgentRouter(6);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldNotReceive('hangup');
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+    $flow->handle(stasisStart('caller-leg', []));
+    $flow->handle(stasisEnd('agent-leg'));
+
+    // Still held, and that agent is on the skip list — same as the destroyed-name path.
+    $flow->tryAgain();
+});
+
+it('ends a connected call when the caller\'s leg leaves', function () {
+    fakeAgentRouter(6);
+    $session = new RecordingSession('caller-leg', 'call-1', 'said', 'heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
+    $telephony->shouldReceive('join')->once()->andReturn('conv-1');
+    $telephony->shouldReceive('startRecording')->once()->andReturn($session);
+    $telephony->shouldReceive('stopRecording')->once();
+    $telephony->shouldReceive('hangup')->once()->with('agent-leg');   // the survivor is dropped
+    $telephony->shouldReceive('endConversation')->once();
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-leg', []));
+    $switchboard->handle(stasisStart('agent-leg', ['agent']));
+    $switchboard->handle(stasisEnd('caller-leg'));
+
+    expect($switchboard->activeCallCount())->toBe(0);
+});
+
+it('handles both names for the same leg without acting twice', function () {
+    fakeAgentRouter(null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('startHoldMusic')->once();
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-leg', []));
+    $switchboard->handle(stasisEnd('caller-leg'));
+    $switchboard->handle(channelDestroyed('caller-leg'));   // the engine sends both on some paths
+
+    expect($switchboard->activeCallCount())->toBe(0);
 });
