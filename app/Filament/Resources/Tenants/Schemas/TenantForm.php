@@ -64,6 +64,28 @@ class TenantForm
                     ->columns(2)
                     ->hiddenOn('create'),
 
+                // B2.3b-i QD-7 — real columns, not settings JSON: these are operational
+                // knobs worth having in the audit trail, which `settings` is excluded
+                // from. Blank means "use the system default" (config/telephony.php).
+                Section::make('Waiting room')
+                    ->description('What happens to a caller when nobody is free. Leave blank to use the system defaults.')
+                    ->schema([
+                        TextInput::make('ring_seconds')
+                            ->label('Ring one agent for (seconds)')
+                            ->numeric()
+                            ->minValue(5)
+                            ->maxValue(120)
+                            ->helperText('How long one agent\'s phone rings before the caller goes back to waiting and someone else is tried. Default 20.'),
+                        TextInput::make('max_hold_seconds')
+                            ->label('Maximum hold (seconds)')
+                            ->numeric()
+                            ->minValue(30)
+                            ->maxValue(3600)
+                            ->helperText('How long a caller may wait before we end the call and add them to the missed-call list. Default 180 (three minutes).'),
+                    ])
+                    ->columns(2)
+                    ->hiddenOn('create'),
+
                 Section::make('Business hours')
                     ->description('Per-day operating hours. Toggle a day off to mark it closed.')
                     ->schema(BusinessHoursForm::fields())

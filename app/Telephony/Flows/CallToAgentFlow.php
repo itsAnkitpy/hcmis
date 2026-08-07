@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace App\Telephony\Flows;
 
+use App\Enums\CallDirection;
+use App\Enums\CallOutcome;
+use App\Models\Call;
 use App\Models\CallHandoff;
+use App\Models\Tenant;
 use App\Telephony\AgentDirectory;
 use App\Telephony\AgentRouter;
 use App\Telephony\AriConnectionLost;
@@ -13,8 +17,10 @@ use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Throwable;
 
 /**
  * The one call-to-agent flow B4 v1 draws properly, generalised to both
@@ -49,6 +55,14 @@ use Illuminate\Support\Str;
  * legs (AgentLeg, each ringing or connected) sharing one voice mixer — generalised
  * from B2.4a's fixed "one caller + one agent (+ a transient transfer leg)" so cold
  * transfer, 3-way conference, and later supervisor-barge all just add or drop a member.
+ *
+ * Nobody is hung up on for our staffing (B2.3b-i): an inbound caller used to be cut
+ * off on TWO paths — nobody free when they arrived, and the agent we rang letting
+ * their phone ring out. Both now put the caller in the waiting room instead (state
+ * Waiting, hold music on their own line), where the listener's five-second heartbeat
+ * retries them (tryAgain) until a desk frees up, they give up, or the client's maximum
+ * hold time runs out. A caller who never reaches an agent leaves a `calls` row written
+ * from here — the missed-call list — because no agent's screen exists to write one.
  */
 class CallToAgentFlow
 {
@@ -101,6 +115,44 @@ class CallToAgentFlow
     private ?string $ticketNumber = null;
 
     private ?RecordingSession $recording = null;
+
+    /**
+     * The inbound call's own details, kept for as long as the call lives (B2.3b-i).
+     * beginCall() used to read all of these, use them once and drop them; a caller who
+     * ends up in the waiting room needs them much later — to ring the NEXT agent with
+     * the caller's number on it, and to write the missed-call record for a caller no
+     * agent ever reached. All stay null on an outbound call, which is what makes
+     * recordMissedCall() a no-op there: the agent's screen owns that row.
+     */
+    private ?int $tenantId = null;
+
+    private ?string $callerNumber = null;
+
+    private ?string $dialledNumber = null;
+
+    /** When the caller arrived — the missed-call record's start, and the hold clock's zero. */
+    private ?Carbon $startedAt = null;
+
+    /**
+     * This client's own waiting-room settings, read once when the call arrives (QD-7):
+     * how long ONE agent's phone rings, and how long this caller may hold in total
+     * before we stop waiting. Null when the client has set neither (or, in the flow
+     * tests, when no client row exists) — the config fallback applies at each use.
+     */
+    private ?int $ringSeconds = null;
+
+    private ?int $maxHoldSeconds = null;
+
+    /**
+     * The agents already rung for THIS caller (QD-4's per-call skip list). Without it a
+     * waiting caller cycles between hold music and the same silent desk forever: the
+     * agent's phone rings out, the board still says Ready, and the next sweep picks
+     * them again. Deliberately per-call — taking a non-answering agent off the board
+     * for everyone needs a sixth presence state and a screen to clear it (B2.3b-ii).
+     *
+     * @var array<int, int>
+     */
+    private array $rungAgentIds = [];
 
     private readonly AgentRouter $router;
 
@@ -232,15 +284,14 @@ class CallToAgentFlow
      * (RD-2 resolver) — carrying the caller's own number as the agent leg's caller-ID so
      * the browser reads it off the ringing call to look up the lead (B4 D4).
      *
-     * No free agent (or an unroutable number) -> clean end + log (RD-5): hang the caller
-     * up without a blind ring. (Today's code blindly rang one fixed extension and waited
-     * for a no-answer; now the system KNOWS nobody's free and stops cleanly — the exact
-     * spot B2.3b later turns into "join the queue".)
+     * An unroutable number is still a clean end (ND-4): there is no client, so there is
+     * no board to read and nobody to wait for — the caller is hung up, not routed to a
+     * guess. But "nobody is free" is no longer an end at all (B2.3b-i QD-4, the first of
+     * the two doors): the caller is answered and put in the WAITING ROOM with music on,
+     * and the listener's heartbeat keeps trying (tryAgain) until a desk frees up.
      *
-     * The two clean-end causes log SEPARATELY (ND-4). They shared one "all busy" line
-     * until S85, and it cost real time: the S84 tenant-stamp failure read as a staffing
-     * problem for an hour, because a call with no company never reaches the agent board
-     * at all. Same behaviour, two honest messages.
+     * That is why the caller is answered BEFORE we know whether anyone is free — an
+     * unanswered leg is not a call yet, and there is nothing to play music into.
      *
      * @param  array<string, mixed>  $event
      */
@@ -248,61 +299,105 @@ class CallToAgentFlow
     {
         $this->callerLegId = $callerLegId;
         $this->ticketNumber = (string) Str::uuid();   // inbound mints a fresh ticket (FD-3)
+        $this->callerNumber = $callerNumber;
+        $this->dialledNumber = $this->dialledNumber($event);
+        $this->startedAt = now();
 
         $tenantId = $this->companyLabel($event);
 
         // ND-4: the number is not in the list, or is switched off. Nothing to route to —
-        // the agent board is never read, so this must not say "all busy".
+        // the agent board is never read, so this must not say "all busy". No missed-call
+        // record either: a row has to belong to a client, and this call has none.
         if ($tenantId === null) {
             rescue(fn () => $this->telephony->hangup($callerLegId), report: false);
             Log::info('Inbound call: the dialled number belongs to no active client — ending the call (unknown number).', [
                 'ticket' => $this->ticketNumber,
                 'caller' => $callerLegId,
-                'dialled' => $this->dialledNumber($event),
+                'dialled' => $this->dialledNumber,
             ]);
             $this->dispose();
 
             return;
         }
 
-        $reservedAgentId = $this->router->reserveFreeAgent($tenantId);
+        $this->tenantId = $tenantId;
+        $this->loadQueueSettings($tenantId);
 
-        // RD-5: the client is known, nobody is free -> clean end + log, no blind ring.
+        $this->telephony->answer($callerLegId);
+
+        $reservedAgentId = $this->reserveNextAgent();
+
+        // QD-4 door one: the client is known and nobody is free. The caller waits.
         if ($reservedAgentId === null) {
-            rescue(fn () => $this->telephony->hangup($callerLegId), report: false);
-            Log::info('Inbound call: no free agent available — ending the call (all busy).', [
-                'ticket' => $this->ticketNumber,
-                'caller' => $callerLegId,
-                'tenant' => $tenantId,
-            ]);
-            $this->dispose();
+            $this->enterWaitingRoom('nobody was free when the call arrived');
 
             return;
         }
 
-        // TH-5/TH-6: hand the call's ticket to the reserved agent's screen via the
-        // drop-off table (the listener->browser handoff), BEFORE the phone rings — the
-        // screen reads it at ring-time and stamps it on the calls row so the inbound
-        // recording attaches by matching ids. The listener runs with no logged-in user,
-        // so a context-less write is RLS default-denied; it writes scoped to the call's
-        // own company (it already holds $tenantId from the label — the AttachRecording-
-        // ToCall run() precedent, minus the discovery). Prune-then-insert wipes this
-        // agent's prior note first, capping the drawer at one note per agent (prune-on-
-        // write), so the screen's "most recent" read stays unambiguous with no scheduler.
-        //
-        // Best-effort by design (TH-2 graceful miss): a note-write failure must NEVER
-        // drop a live call. If the write throws (a DB hiccup), the call still connects;
-        // the recording just won't attach (the row's correlation_id stays null, the
-        // audio persists on disk) — exactly today's inbound fallback. We log and ring on.
+        $this->ringAgent($reservedAgentId);
+    }
+
+    /**
+     * This client's own ring / maximum-hold settings (QD-7), read once per call. Falls
+     * back to the config defaults when the client has set none — and when there is no
+     * client row at all, which is the flow tests' posture (they prove call mechanics
+     * against a stub number-directory, with no `tenants` row behind the label).
+     */
+    private function loadQueueSettings(int $tenantId): void
+    {
+        $tenant = Tenant::query()->find($tenantId);
+
+        $this->ringSeconds = $tenant?->ringSeconds();
+        $this->maxHoldSeconds = $tenant?->maxHoldSeconds();
+    }
+
+    /**
+     * Reserve the next agent to try for this caller (RD-3/RD-4), skipping everyone this
+     * caller has already been rung out on (QD-4). Null means nobody is free right now —
+     * which starts the wait on a new call, and simply continues it on a sweep.
+     */
+    private function reserveNextAgent(): ?int
+    {
+        $reservedAgentId = $this->router->reserveFreeAgent((int) $this->tenantId, $this->rungAgentIds);
+
+        if ($reservedAgentId !== null) {
+            $this->rungAgentIds[] = $reservedAgentId;
+        }
+
+        return $reservedAgentId;
+    }
+
+    /**
+     * Ring one reserved agent for this caller: hand their screen the call's ticket, then
+     * place the leg with the caller's own number on it as caller-ID (B4 D4) and the
+     * client's ring duration as the timeout (QD-7) — the setting that has existed on
+     * placeCall() since B1 and that nothing could reach until now.
+     *
+     * TH-5/TH-6 (the handoff): the ticket goes to the reserved agent's screen via the
+     * drop-off table BEFORE the phone rings — the screen reads it at ring-time and stamps
+     * it on the calls row so the inbound recording attaches by matching ids. The listener
+     * runs with no logged-in user, so a context-less write is RLS default-denied; it
+     * writes scoped to the call's own company (the AttachRecordingToCall run() precedent,
+     * minus the discovery). Prune-then-insert wipes this agent's prior note first, capping
+     * the drawer at one note per agent, so the screen's "most recent" read stays
+     * unambiguous with no scheduler.
+     *
+     * Best-effort by design (TH-2 graceful miss): a note-write failure must NEVER drop a
+     * live call. If the write throws (a DB hiccup), the call still connects; the recording
+     * just won't attach (the row's correlation_id stays null, the audio persists on disk)
+     * — exactly today's inbound fallback. We log and ring on.
+     */
+    private function ringAgent(int $reservedAgentId): void
+    {
         rescue(
-            fn () => TenantContext::run($tenantId, function () use ($reservedAgentId): void {
+            fn () => TenantContext::run((int) $this->tenantId, function () use ($reservedAgentId): void {
                 CallHandoff::query()->where('agent_user_id', $reservedAgentId)->delete();
                 CallHandoff::query()->create([
                     'agent_user_id' => $reservedAgentId,
                     'ticket' => $this->ticketNumber,
                 ]);
             }),
-            function (\Throwable $exception) use ($reservedAgentId): void {
+            function (Throwable $exception) use ($reservedAgentId): void {
                 Log::warning('Ticket handoff write failed — inbound recording will not attach (the call is unaffected).', [
                     'ticket' => $this->ticketNumber,
                     'agentUser' => $reservedAgentId,
@@ -311,11 +406,11 @@ class CallToAgentFlow
             },
         );
 
-        $this->telephony->answer($callerLegId);
         $agentLegId = $this->telephony->placeCall(
             $this->directory->endpointFor($reservedAgentId),
             'agent',
-            $callerNumber,
+            $this->callerNumber,
+            $this->ringSeconds ?? (int) config('telephony.queue.ring_seconds'),
         );
         // The first agent enters the set RINGING, carrying the reservation so a no-answer
         // can release it (Fold B); it flips to connected when they pick up (connectAgent).
@@ -323,7 +418,7 @@ class CallToAgentFlow
             $agentLegId,
             userId: $reservedAgentId,
             connected: false,
-            reservedTenantId: $tenantId,
+            reservedTenantId: $this->tenantId,
             reservedAgentId: $reservedAgentId,
         );
         $this->registry->registerLeg($agentLegId, $this);   // the leg we placed is ours (FD-2)
@@ -331,12 +426,172 @@ class CallToAgentFlow
 
         Log::info('Inbound call: reserved a free agent, caller answered, ringing them.', [
             'ticket' => $this->ticketNumber,
-            'caller' => $callerLegId,
-            'callerNumber' => $callerNumber,
-            'tenant' => $tenantId,
+            'caller' => $this->callerLegId,
+            'callerNumber' => $this->callerNumber,
+            'tenant' => $this->tenantId,
             'agentUser' => $reservedAgentId,
             'agent' => $agentLegId,
+            'ringSeconds' => $this->ringSeconds ?? (int) config('telephony.queue.ring_seconds'),
         ]);
+    }
+
+    /**
+     * Put the caller in the waiting room (QD-1/QD-2): music starts on the line they are
+     * already on, and the call is simply labelled Waiting. There is no queue object and
+     * no holding bridge — the switchboard's own list of live calls, in arrival order, IS
+     * the waiting line, so first-in-first-out comes free.
+     *
+     * Reached from both doors: nobody free when the call arrived, and an agent letting
+     * their phone ring out. Each hands its own reason to the log, because they mean
+     * different things to whoever reads it (understaffed vs one desk not answering).
+     */
+    private function enterWaitingRoom(string $why): void
+    {
+        $this->telephony->startHoldMusic((string) $this->callerLegId);
+        $this->state = CallFlowState::Waiting;
+
+        Log::info('Inbound call: the caller is holding with music on, waiting for a desk to free up.', [
+            'ticket' => $this->ticketNumber,
+            'caller' => $this->callerLegId,
+            'tenant' => $this->tenantId,
+            'why' => $why,
+            'alreadyRung' => $this->rungAgentIds,
+        ]);
+    }
+
+    /**
+     * The waiting room's one move, driven by the listener's existing five-second
+     * heartbeat (QD-3 — no scheduler, no queue worker, nothing new running). Either the
+     * caller has now waited longer than this client allows and we stop waiting, or we
+     * try the next free agent — and only when one is actually reserved does the music
+     * stop, so a caller waiting behind a full floor never hears it stutter.
+     *
+     * A no-op on any call that is not waiting, which is every other call on the switch.
+     *
+     * Errors are handled exactly as they are for an incoming event (handle): a refused
+     * verb tears down this one call, a lost pipe is everyone's problem and goes up. The
+     * sweep is a second way IN to the same machine, so it must not be a second way to
+     * fail. *Named ceiling:* a caller who hangs up in the instant between the sweep
+     * reserving an agent and the music being stopped is torn down by that path instead
+     * of by their own hang-up, and so leaves no missed-call record — a one-tick race,
+     * accepted rather than guarded, and the reason the record is written on the ordinary
+     * endings rather than on teardown in general.
+     */
+    public function tryAgain(): void
+    {
+        try {
+            $this->sweepThisCall();
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException $exception) {
+            $this->abort($exception);
+        }
+    }
+
+    private function sweepThisCall(): void
+    {
+        if ($this->state !== CallFlowState::Waiting) {
+            return;
+        }
+
+        if ($this->heldTooLong()) {
+            $this->giveUpOnWaitingCaller();
+
+            return;
+        }
+
+        $reservedAgentId = $this->reserveNextAgent();
+
+        if ($reservedAgentId === null) {
+            return;   // still nobody free — keep holding
+        }
+
+        $this->telephony->stopHoldMusic((string) $this->callerLegId);
+        $this->ringAgent($reservedAgentId);
+    }
+
+    /**
+     * Has this caller been on the line longer than this client allows without ever
+     * reaching an agent (QD-7)? Measured from ARRIVAL, not from the moment the wait
+     * started: a caller who spent forty seconds listening to one agent's phone ring and
+     * then went back to the waiting room has been waiting the whole time, from their
+     * side. It is the same clock the missed-call record's duration reports.
+     */
+    private function heldTooLong(): bool
+    {
+        $maxHoldSeconds = $this->maxHoldSeconds ?? (int) config('telephony.queue.max_hold_seconds');
+
+        return $this->startedAt !== null
+            && $this->startedAt->copy()->addSeconds($maxHoldSeconds)->isPast();
+    }
+
+    /**
+     * We stopped waiting on the caller's behalf (QD-6 `no_answer`): end the call and
+     * write the missed-call record. Disposing here is deliberate — the hang-up's own
+     * ChannelDestroyed then lands on a handler the switchboard has already forgotten,
+     * so it cannot write the record a second time.
+     */
+    private function giveUpOnWaitingCaller(): void
+    {
+        Log::info('Inbound call: the caller held longer than this client allows — ending the call as a missed one.', [
+            'ticket' => $this->ticketNumber,
+            'caller' => $this->callerLegId,
+            'tenant' => $this->tenantId,
+            'heldSeconds' => (int) $this->startedAt?->diffInSeconds(now()),
+        ]);
+
+        rescue(fn () => $this->telephony->hangup((string) $this->callerLegId), report: false);
+        $this->recordMissedCall(CallOutcome::NoAnswer);
+        $this->dispose();
+    }
+
+    /**
+     * Write the call record for a caller no agent ever reached (QD-5) — the missed-call
+     * list's row, and the ONE row the listener creates rather than enriches.
+     *
+     * This is not a break of the `calls` single-writer rule, it is that rule's own named
+     * seam arriving: D2 (b3-calls-table.md, locked 2026-06-17) says abandoned and
+     * unanswered inbound calls are listener-authored, trunk-era. The two writers cannot
+     * collide on these rows — a screen writes a record when an agent wraps up a call they
+     * handled, and this row exists precisely because no agent ever handled it.
+     *
+     * Without it these callers leave no trace at all, which is exactly the long-standing
+     * Asterisk default this slice exists to avoid: the very people the waiting room is
+     * built to save would be the ones invisible to every call report.
+     *
+     * Best-effort (rescue + tenant-scoped run, the ticket-handoff shape): a failed write
+     * logs a warning and must never affect a live call. A no-op on an outbound call and
+     * on an inbound one whose client was never known — both leave `tenantId` null.
+     */
+    private function recordMissedCall(CallOutcome $outcome): void
+    {
+        if ($this->tenantId === null || $this->startedAt === null) {
+            return;
+        }
+
+        $tenantId = $this->tenantId;
+        $startedAt = $this->startedAt;
+        $endedAt = now();
+
+        rescue(
+            fn () => TenantContext::run($tenantId, fn () => Call::query()->create([
+                'direction' => CallDirection::Inbound,
+                'from_number' => $this->callerNumber,
+                'to_number' => $this->dialledNumber,
+                'outcome' => $outcome,
+                'correlation_id' => $this->ticketNumber,
+                'started_at' => $startedAt,
+                'ended_at' => $endedAt,
+                'duration_seconds' => (int) $startedAt->diffInSeconds($endedAt),
+            ])),
+            function (Throwable $exception) use ($outcome): void {
+                Log::warning('Missed-call record write failed — the caller will not appear in the missed-call list.', [
+                    'ticket' => $this->ticketNumber,
+                    'outcome' => $outcome->value,
+                    'error' => $exception->getMessage(),
+                ]);
+            },
+        );
     }
 
     /**
@@ -637,12 +892,19 @@ class CallToAgentFlow
     /**
      * A leg ended. What it means depends on where we are and which leg it was.
      *
+     * Waiting (B2.3b-i): only the caller's own leg matters — they gave up while holding.
+     * Record it as a missed call and let go; nothing else is left to tear down.
+     *
      * Bootstrap ring (no conversation yet — establishing the FIRST connection): the
-     * shape is direction-asymmetric and unchanged from B2.4a. Inbound (RingingAgent):
-     * the agent leg ending is a no-answer, the caller leg ending is an abandoned caller —
-     * either drops the survivor and goes back to ready. Outbound (RingingCustomer): the
-     * agent leg is already up, so the CUSTOMER leg ending is the no-answer (drop the
-     * agent), the agent leg ending is the agent abandoning mid-ring (cancel the customer).
+     * shape is direction-asymmetric. Inbound (RingingAgent): the agent leg ending is a
+     * no-answer, which is QD-4's SECOND door — that caller used to be hung up on here
+     * and now goes back to the waiting room instead; the caller leg ending is a caller
+     * who gave up while the phone rang, which drops the ringing agent and is recorded
+     * as a missed call (they are just as lost as one who gave up on hold). Outbound
+     * (RingingCustomer): the agent leg is already up, so the CUSTOMER leg ending is the
+     * no-answer (drop the agent), the agent leg ending is the agent abandoning mid-ring
+     * (cancel the customer) — neither records anything, because the agent's own screen
+     * owns an outbound call's row.
      *
      * Live call (InCall / AddingAgent — the participant-set rule, CD-2): the caller
      * leaving ends the whole call; a *ringing* added agent ending is a no-answer (release
@@ -657,18 +919,45 @@ class CallToAgentFlow
     {
         $legId = $event['channel']['id'] ?? '';
 
+        if ($this->state === CallFlowState::Waiting) {
+            if ($legId === $this->callerLegId) {
+                Log::info('Inbound call: the waiting caller gave up — writing them to the missed-call list.', [
+                    'ticket' => $this->ticketNumber,
+                    'tenant' => $this->tenantId,
+                    'waitedSeconds' => (int) $this->startedAt?->diffInSeconds(now()),
+                ]);
+
+                $this->recordMissedCall(CallOutcome::Abandoned);
+                $this->dispose();
+            }
+
+            return;
+        }
+
         if ($this->state === CallFlowState::RingingAgent || $this->state === CallFlowState::RingingCustomer) {
             // Fold B: a reserved agent never connected — release on BOTH no-answer paths
             // (the agent rang out, or the caller abandoned mid-ring). A no-op for outbound.
             $this->releaseAllReservations();
 
             if (isset($this->agents[$legId])) {
+                unset($this->agents[$legId]);
+
+                // QD-4's second door: an inbound agent let their phone ring out. The
+                // caller goes back to the waiting room rather than being cut off, and
+                // the skip list keeps that same silent desk out of the next attempt.
+                if ($this->state === CallFlowState::RingingAgent && $this->callerLegId !== null) {
+                    $this->enterWaitingRoom('the agent we rang did not pick up');
+
+                    return;
+                }
+
                 $this->telephony->hangup((string) $this->callerLegId);
                 $this->dispose();
             } elseif ($legId === $this->callerLegId) {
                 foreach (array_keys($this->agents) as $agentLegId) {
                     $this->telephony->hangup($agentLegId);
                 }
+                $this->recordMissedCall(CallOutcome::Abandoned);
                 $this->dispose();
             }
 
@@ -868,5 +1157,12 @@ class CallToAgentFlow
         $this->correlationId = null;
         $this->ticketNumber = null;
         $this->recording = null;
+        $this->tenantId = null;
+        $this->callerNumber = null;
+        $this->dialledNumber = null;
+        $this->startedAt = null;
+        $this->ringSeconds = null;
+        $this->maxHoldSeconds = null;
+        $this->rungAgentIds = [];
     }
 }

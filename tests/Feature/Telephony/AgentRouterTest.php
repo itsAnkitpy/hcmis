@@ -141,3 +141,30 @@ it('walls the board per company — never reserves another company\'s free agent
 
     expect((new AgentRouter)->reserveFreeAgent($mine->id))->toBeNull();   // my board is empty
 });
+
+/*
+| B2.3b-i QD-4 — the per-call skip list. A waiting caller must not be handed back an
+| agent whose phone they have already heard ring out; without this they cycle between
+| hold music and one silent desk indefinitely. The skip is per CALL: the agent stays
+| Ready and free for everybody else, which is the deliberate difference from taking
+| them off the board entirely.
+*/
+
+it('skips an agent this caller has already been rung out on (QD-4)', function () {
+    $tenant = Tenant::factory()->create();
+    $first = seedPresenceRow($tenant, PresenceStatus::Ready);
+    $second = seedPresenceRow($tenant, PresenceStatus::Ready);
+
+    $reserved = (new AgentRouter)->reserveFreeAgent($tenant->id, [$first->id]);
+
+    expect($reserved)->toBe($second->id)
+        ->and(statusOf($tenant, $first))->toBe(PresenceStatus::Ready);   // untouched, still free for others
+});
+
+it('reports nobody free once this caller has been rung out on everyone (QD-4)', function () {
+    $tenant = Tenant::factory()->create();
+    $only = seedPresenceRow($tenant, PresenceStatus::Ready);
+
+    expect((new AgentRouter)->reserveFreeAgent($tenant->id, [$only->id]))->toBeNull()
+        ->and(statusOf($tenant, $only))->toBe(PresenceStatus::Ready);
+});

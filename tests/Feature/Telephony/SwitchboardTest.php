@@ -36,7 +36,7 @@ it('tracks two simultaneous calls independently, routing each interleaved event 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-A');
     $telephony->shouldReceive('answer')->once()->with('caller-B');
-    $telephony->shouldReceive('placeCall')->twice()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A', 'agent-B');
+    $telephony->shouldReceive('placeCall')->twice()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A', 'agent-B');
     // The pairings are the proof of routing: A's agent joins A's caller, never B's.
     $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
     $telephony->shouldReceive('join')->once()->with('caller-B', 'agent-B')->andReturn('conv-B');
@@ -71,7 +71,7 @@ it('drives a second caller arriving mid-call instead of losing it, and leaves th
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-A');
     $telephony->shouldReceive('answer')->once()->with('caller-B');   // the OLD one-handler code never answered B
-    $telephony->shouldReceive('placeCall')->twice()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A', 'agent-B');
+    $telephony->shouldReceive('placeCall')->twice()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A', 'agent-B');
     $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
     $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($sessionA);
     $telephony->shouldReceive('stopRecording')->once()->with($sessionA);
@@ -100,8 +100,8 @@ it('tears down only the failing call when one hits an unexpected error, keeping 
     // A places fine; B's place throws an UNEXPECTED error (not a TelephonyException), so it
     // escapes the handler's own catch and hits the switchboard backstop. The differing caller
     // number is only there to tell the two placeCall expectations apart.
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', '555')->andThrow(new RuntimeException('boom'));
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', '555', 20)->andThrow(new RuntimeException('boom'));
     $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
     $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($sessionA);
     $telephony->shouldReceive('hangup')->once()->with('caller-B');    // the backstop drops B's one held leg
@@ -139,7 +139,7 @@ it('still merges a recording that finishes after its call handler is disposed (F
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-A');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
     $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
     $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($session);
     $telephony->shouldReceive('stopRecording')->once()->with($session);
@@ -176,7 +176,7 @@ it('merges an inbound recording even when the finished events arrive BEFORE tear
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-A');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
     $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
     $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($session);
     $telephony->shouldReceive('stopRecording')->once()->with($session);
@@ -220,7 +220,7 @@ it('forgets a disposed call legs, so a later event for a dead leg matches nothin
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-A');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
     $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
     $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($session);
     $telephony->shouldReceive('stopRecording')->once()->with($session);
@@ -300,7 +300,7 @@ it('ignores a transfer user-event for an agent who has no live call', function (
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-A');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
     $telephony->shouldReceive('join')->once()->andReturn('conv-A');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
     // No transfer placeCall — agent 99 is on no call, so nothing is rung. Under strict
@@ -374,7 +374,7 @@ it('ignores a conference user-event for an agent who has no live call', function
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-A');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
     $telephony->shouldReceive('join')->once()->andReturn('conv-A');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
     // No conference placeCall — agent 99 is on no call, so nothing is rung.
@@ -386,4 +386,74 @@ it('ignores a conference user-event for an agent who has no live call', function
     $switchboard->handle(channelUserevent('conference', ['agentUserId' => '99', 'tenantId' => '3']));
 
     expect($switchboard->activeCallCount())->toBe(1);   // call A undisturbed
+});
+
+/*
+| B2.3b-i QD-3 — the waiting-room sweep. The listener calls sweepWaiting() on every
+| pass of its loop; the switchboard walks its live calls in arrival order and asks each
+| waiting one to try again. The per-call decision (retry / give up / stay) lives in
+| CallToAgentFlowWaitingRoomTest; here we prove the multiplexing: who gets asked, in
+| what order, and that a call nobody is waiting on is untouched.
+*/
+
+it('hands the freed desk to the caller who has waited longest (QD-3 arrival order)', function () {
+    $router = fakeAgentRouter(null);   // the floor is full, so both callers wait
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once()->with('caller-first');
+    $telephony->shouldReceive('answer')->once()->with('caller-second');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-first');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-second');
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-first', []));
+    $switchboard->handle(stasisStart('caller-second', []));
+
+    expect($switchboard->activeCallCount())->toBe(2);
+
+    // One desk frees up. Exactly one caller may have it, and it must be the first one in.
+    $router->agentId = 6;
+    $telephony->shouldReceive('stopHoldMusic')->once()->with('caller-first');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)
+        ->andReturnUsing(function () use ($router): string {
+            $router->agentId = null;   // that agent is now taken — the floor is full again
+
+            return 'agent-leg';
+        });
+
+    $switchboard->sweepWaiting();
+
+    expect($switchboard->activeCallCount())->toBe(2);   // the second caller is still holding, not dropped
+});
+
+it('leaves a call that is not waiting completely alone during a sweep', function () {
+    fakeAgentRouter(6);
+    $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once()->with('caller-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
+    $telephony->shouldReceive('join')->once()->andReturn('conv-A');
+    $telephony->shouldReceive('startRecording')->once()->andReturn($session);
+    $telephony->shouldNotReceive('startHoldMusic');
+    $telephony->shouldNotReceive('stopHoldMusic');
+    $telephony->shouldNotReceive('hangup');
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-A', []));
+    $switchboard->handle(stasisStart('agent-A', ['agent']));   // a live, connected call
+
+    $switchboard->sweepWaiting();
+    $switchboard->sweepWaiting();
+
+    expect($switchboard->activeCallCount())->toBe(1);
+});
+
+it('sweeps an empty switchboard without complaint', function () {
+    $telephony = Mockery::mock(TelephonyProvider::class);
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->sweepWaiting();
+
+    expect($switchboard->activeCallCount())->toBe(0);
 });

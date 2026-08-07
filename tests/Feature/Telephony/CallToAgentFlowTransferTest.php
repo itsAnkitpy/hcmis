@@ -32,7 +32,7 @@ it('rings a free agent (B) while keeping the caller with the current agent (A) w
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->with('caller-leg', Mockery::type('string'))->andReturn($session);
     // The transfer rings B (a second agent leg, no caller-ID — the customer number is
@@ -57,7 +57,7 @@ it('on B answering: adds B, removes + hangs up A, and the recording rides throug
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->with('caller-leg', Mockery::type('string'))->andReturn($session);
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('transfer-leg');
@@ -100,7 +100,7 @@ it('on B no-answer: releases B and leaves the caller with A (Fold B)', function 
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('transfer-leg');
@@ -136,7 +136,7 @@ it('when nobody is free at transfer time: touches nothing — the caller stays w
 
         private int $calls = 0;
 
-        public function reserveFreeAgent(int $tenantId): ?int
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
         {
             $this->reserved[] = $tenantId;
 
@@ -154,7 +154,7 @@ it('when nobody is free at transfer time: touches nothing — the caller stays w
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
     // No second placeCall — nobody to ring. The call ends normally with A.
@@ -180,7 +180,7 @@ it('when the caller hangs up mid-transfer-ring: ends the call cleanly and releas
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('transfer-leg');
@@ -208,7 +208,7 @@ it('when A hangs up mid-transfer-ring: ends the call cleanly rather than strandi
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->andReturn($session);
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')->andReturn('transfer-leg');
@@ -233,7 +233,7 @@ it('only reports serving the connected agent, and ignores a transfer before the 
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
 
     $switchboard = new Switchboard($telephony);
     $flow = new CallToAgentFlow($telephony, $switchboard);

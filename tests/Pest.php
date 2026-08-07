@@ -251,6 +251,11 @@ function fakeNumberDirectory(): NumberDirectory
  * for "all busy"), recording every reserve/release. Lets the flow + switchboard tests
  * stay focused on call MECHANICS — the real board read + atomic reserve/release are
  * proven against the DB in AgentRouterTest. Returns the stub for assertions.
+ *
+ * B2.3b-i QD-4: it honours the per-call skip list the same way the real board does —
+ * an agent this caller has already been rung out on is not handed back again — and
+ * records every skip list it was asked with, so a waiting-room test can prove the
+ * flow is actually passing one.
  */
 function fakeAgentRouter(?int $agentId = 6): AgentRouter
 {
@@ -259,14 +264,23 @@ function fakeAgentRouter(?int $agentId = 6): AgentRouter
         /** @var array<int, int> */
         public array $reserved = [];
 
+        /** @var array<int, array<int, int>> */
+        public array $skipped = [];
+
         /** @var array<int, array{int, int}> */
         public array $released = [];
 
-        public function __construct(private readonly ?int $agentId) {}
+        /** Public and mutable so a waiting-room test can free an agent up mid-test. */
+        public function __construct(public ?int $agentId) {}
 
-        public function reserveFreeAgent(int $tenantId): ?int
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
         {
             $this->reserved[] = $tenantId;
+            $this->skipped[] = $skipUserIds;
+
+            if ($this->agentId !== null && in_array($this->agentId, $skipUserIds, strict: true)) {
+                return null;   // this caller has already been rung out on our one agent
+            }
 
             return $this->agentId;
         }

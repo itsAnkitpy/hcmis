@@ -280,12 +280,51 @@ class Switchboard implements HandlerRegistry
     }
 
     /**
+     * Glance at the waiting room and pair whoever has waited longest with whichever desk
+     * has freed up (B2.3b-i QD-3). Called by the listener on every pass of its loop, so
+     * nothing new runs: no scheduler, no queue worker, no second process.
+     *
+     * The waiting LINE needs no data structure. Every live call already sits in the
+     * phone-book, and a new inbound call registers its CALLER leg first, so PHP's own
+     * insertion order IS arrival order — walking it hands the longest-waiting caller the
+     * first freed desk for free. Each handler decides for itself whether it is waiting;
+     * for every other call on the switch tryAgain() is a no-op.
+     *
+     * Behind the same per-call backstop as everything else (FD-6): a sweep that blows up
+     * on one waiting call must not stop the others being swept.
+     */
+    public function sweepWaiting(): void
+    {
+        foreach ($this->uniqueHandlers() as $handler) {
+            $this->guard($handler, fn () => $handler->tryAgain());
+        }
+    }
+
+    /**
      * How many live calls the switchboard is holding (distinct handlers, since a call
      * holds two legs). A monitoring hook for the FD-8 "stranded calls" scale-out signal,
      * and the proof a disposed handler is truly forgotten (its legs leave the phone-book).
      */
     public function activeCallCount(): int
     {
-        return count(array_unique(array_map('spl_object_id', $this->handlers), SORT_NUMERIC));
+        return count($this->uniqueHandlers());
+    }
+
+    /**
+     * The live calls, one entry each, in arrival order — the phone-book holds a handler
+     * once per leg it owns, so the same call appears two or three times. First-seen wins,
+     * which keeps the order the calls actually arrived in.
+     *
+     * @return array<int, CallToAgentFlow>
+     */
+    private function uniqueHandlers(): array
+    {
+        $unique = [];
+
+        foreach ($this->handlers as $handler) {
+            $unique[spl_object_id($handler)] ??= $handler;
+        }
+
+        return array_values($unique);
     }
 }

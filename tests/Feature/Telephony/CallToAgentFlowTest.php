@@ -42,7 +42,7 @@ it('connects an answering agent and merges the call once both recordings finish'
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()
         ->with('caller-leg', Mockery::on(fn (string $name): bool => str_starts_with($name, 'call-')))
@@ -77,7 +77,7 @@ it('connects an answering agent and merges the call once both recordings finish'
 it('hangs up the agent leg when the caller abandons before pickup', function () {
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
@@ -91,11 +91,16 @@ it('hangs up the agent leg when the caller abandons before pickup', function () 
     Queue::assertNothingPushed();
 });
 
-it('hangs up the caller when the agent never answers', function () {
+// B2.3b-i QD-4, the SECOND door: this used to hang the caller up. Nobody is cut off
+// for our staffing any more — a caller whose agent never picked up goes to the
+// waiting room, which is worse than the all-busy case from their side (they heard
+// ringing first) and used to be the less-documented of the two paths.
+it('puts the caller in the waiting room when the agent never answers — never hangs up on them', function () {
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null)->andReturn('agent-leg');
-    $telephony->shouldReceive('hangup')->once()->with('caller-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldNotReceive('hangup');
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');
 
@@ -103,7 +108,7 @@ it('hangs up the caller when the agent never answers', function () {
     $flow = new CallToAgentFlow($telephony, $switchboard);
 
     $flow->handle(stasisStart('caller-leg', []));
-    $flow->handle(channelDestroyed('agent-leg'));         // Asterisk's 30s originate timeout fired
+    $flow->handle(channelDestroyed('agent-leg'));         // Asterisk's originate timeout fired
 
     Queue::assertNothingPushed();
 });
@@ -112,7 +117,7 @@ it('passes the caller number to placeCall as the agent leg caller-ID (B4 D4)', f
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()
-        ->with('PJSIP/1003', 'agent', '9991234567')
+        ->with('PJSIP/1003', 'agent', '9991234567', 20)
         ->andReturn('agent-leg');
 
     $switchboard = new Switchboard($telephony);
@@ -127,7 +132,7 @@ it('presents no caller-ID when the caller is anonymous (empty number)', function
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()
-        ->with('PJSIP/1003', 'agent', null)
+        ->with('PJSIP/1003', 'agent', null, 20)
         ->andReturn('agent-leg');
 
     $switchboard = new Switchboard($telephony);

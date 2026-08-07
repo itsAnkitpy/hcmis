@@ -43,10 +43,19 @@ class AgentRouter
      *
      * The atomic tag re-checks Ready + freshness in its own WHERE, so it is correct
      * even if a candidate went stale or was grabbed between the read and the tag.
+     *
+     * $skipUserIds is B2.3b-i QD-4's per-call skip list: agents this ONE caller has
+     * already been rung out on. Without it a waiting caller cycles forever between
+     * music and the same silent desk — the agent's phone rings out, they are still
+     * "Ready" on the board, and the next sweep picks them again. The skip is per
+     * call and lives on the call's handler, deliberately NOT a board-wide "pause
+     * this agent" (that needs a sixth presence state and a screen to clear it).
+     *
+     * @param  array<int, int>  $skipUserIds
      */
-    public function reserveFreeAgent(int $tenantId): ?int
+    public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
     {
-        return TenantContext::run($tenantId, function (): ?int {
+        return TenantContext::run($tenantId, function () use ($skipUserIds): ?int {
             $freshThreshold = now()->subSeconds(
                 (int) config('telephony.presence.stale_after_seconds'),
             );
@@ -54,6 +63,7 @@ class AgentRouter
             $candidates = AgentPresence::query()
                 ->where('status', PresenceStatus::Ready->value)
                 ->where('last_seen_at', '>=', $freshThreshold)
+                ->when($skipUserIds !== [], fn ($query) => $query->whereNotIn('user_id', $skipUserIds))
                 ->orderBy('user_id')
                 ->pluck('user_id');
 

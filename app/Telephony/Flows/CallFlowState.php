@@ -43,4 +43,17 @@ enum CallFlowState
      * caller is never alone — the never-strand rule, shared with the cold transfer.
      */
     case AddingAgent;
+
+    /**
+     * The caller is answered and holding with music on, waiting for a desk to free
+     * up (B2.3b-i QD-2). Reached from BOTH ways a caller used to be hung up on:
+     * nobody was free when they arrived, and an agent let their phone ring out.
+     *
+     * The waiting LINE needs no data structure of its own: the switchboard already
+     * holds one handler per live call in arrival order, so "everyone waiting, oldest
+     * first" is simply its Waiting handlers in order (QD-3's sweep). Leaves for
+     * RingingAgent when the sweep pairs the caller with a freed agent, or ends when
+     * the caller gives up / the client's maximum hold time runs out.
+     */
+    case Waiting;
 }

@@ -87,6 +87,22 @@ class AsteriskAriProvider implements TelephonyProvider
         ]);
     }
 
+    /**
+     * ARI's music-on-hold pair (B2.3b-i QD-1). No 'mohClass' is sent, so Asterisk
+     * plays the channel's own configured class — the stock `default` class verified
+     * on the server (five instrumentals in /usr/share/asterisk/moh). Per-client
+     * classes are B2.3b-ii and land as a parameter here.
+     */
+    public function startHoldMusic(string $legId): void
+    {
+        $this->command('POST', "/channels/{$legId}/moh");
+    }
+
+    public function stopHoldMusic(string $legId): void
+    {
+        $this->command('DELETE', "/channels/{$legId}/moh");
+    }
+
     public function hangup(string $legId): void
     {
         $this->command('DELETE', "/channels/{$legId}");

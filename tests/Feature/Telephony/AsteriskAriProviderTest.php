@@ -265,3 +265,28 @@ it('wraps a refused command in a telephony exception with the engine detail', fu
     expect(fn () => $this->telephony->answer('leg-gone'))
         ->toThrow(TelephonyException::class, 'Channel not found');
 });
+
+/*
+| B2.3b-i QD-1 — the hold-music pair. A waiting caller holds on the line they are
+| already on, so there is no waiting-room object to create and destroy: music simply
+| starts and stops on their own channel. No music class is named, so Asterisk plays
+| the channel's own configured one (the stock `default` set verified on the server).
+*/
+
+it('starts hold music on the waiting caller\'s own leg (QD-1)', function () {
+    Http::fake(['*' => Http::response([])]);
+
+    $this->telephony->startHoldMusic('caller-leg');
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && $request->url() === 'http://voice.test:8088/ari/channels/caller-leg/moh');
+});
+
+it('stops the hold music before the caller\'s call connects (QD-1)', function () {
+    Http::fake(['*' => Http::response([])]);
+
+    $this->telephony->stopHoldMusic('caller-leg');
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
+        && $request->url() === 'http://voice.test:8088/ari/channels/caller-leg/moh');
+});

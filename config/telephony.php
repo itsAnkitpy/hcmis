@@ -150,4 +150,31 @@ return [
         'stale_after_seconds' => (int) env('TELEPHONY_PRESENCE_STALE_AFTER', 60),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | The waiting room (B2.3b-i QD-7)
+    |--------------------------------------------------------------------------
+    |
+    | 'ring_seconds' is how long ONE agent's phone rings before we give up on
+    | them and put the caller back in the waiting room; 'max_hold_seconds' is how
+    | long a caller may hold before we stop waiting, end the call, and write them
+    | to the missed-call list.
+    |
+    | These are the FALLBACKS. A client that sets its own (tenants.ring_seconds /
+    | tenants.max_hold_seconds) overrides them — per-client values must not live
+    | in this file, which sits on the server and would need a deploy per client
+    | (the ND-2 precedent).
+    |
+    | Both defaults are honest guesses, cheap to change: 20s is long enough to
+    | reach a desk and short enough that a waiting caller is not parked on one
+    | absent agent; 180s is three minutes, to be replaced with real numbers once
+    | the line carries real traffic.
+    |
+    */
+
+    'queue' => [
+        'ring_seconds' => (int) env('TELEPHONY_RING_SECONDS', 20),
+        'max_hold_seconds' => (int) env('TELEPHONY_MAX_HOLD_SECONDS', 180),
+    ],
+
 ];

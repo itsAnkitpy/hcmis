@@ -28,7 +28,7 @@ it('reserves a free agent and rings THAT agent\'s resolved endpoint (RD-2/RD-4)'
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1004', 'agent', null)->andReturn('agent-leg');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1004', 'agent', null, 20)->andReturn('agent-leg');
 
     $switchboard = new Switchboard($telephony);
     (new CallToAgentFlow($telephony, $switchboard))->handle(stasisStart('caller-leg', []));
@@ -36,17 +36,21 @@ it('reserves a free agent and rings THAT agent\'s resolved endpoint (RD-2/RD-4)'
     expect($router->reserved)->toBe([3]);   // reserved for the call's own company (label 3)
 });
 
-it('ends cleanly and never rings when no agent is free (RD-5 all busy)', function () {
+// B2.3b-i QD-4, the FIRST door: RD-5's clean end is no longer an end. The caller is
+// answered and held with music instead of being cut off — and still never blind-rung.
+it('answers the caller and starts hold music when no agent is free (QD-4 — was the all-busy hang-up)', function () {
     fakeAgentRouter(null);   // nobody free
 
     $telephony = Mockery::mock(TelephonyProvider::class);
-    $telephony->shouldReceive('hangup')->once()->with('caller-leg');   // clean end, no blind ring
-    $telephony->shouldNotReceive('answer');
-    $telephony->shouldNotReceive('placeCall');
+    $telephony->shouldReceive('answer')->once()->with('caller-leg');          // answered, or there is nothing to play into
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldNotReceive('hangup');
+    $telephony->shouldNotReceive('placeCall');                                // still no blind ring
 
     $switchboard = new Switchboard($telephony);
-    (new CallToAgentFlow($telephony, $switchboard))->handle(stasisStart('caller-leg', []));
+    $switchboard->handle(stasisStart('caller-leg', []));   // through the switchboard, so the call is booked in
 
+    expect($switchboard->activeCallCount())->toBe(1);   // the call is held, not disposed
     Queue::assertNothingPushed();
 });
 
@@ -71,7 +75,7 @@ it('releases the reservation when the agent rings out (Fold B — agent no-answe
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
-    $telephony->shouldReceive('hangup')->once()->with('caller-leg');   // no-answer tears the caller down
+    $telephony->shouldReceive('startHoldMusic')->once();   // the caller waits now (QD-4), never hung up on
 
     $switchboard = new Switchboard($telephony);
     $flow = new CallToAgentFlow($telephony, $switchboard);

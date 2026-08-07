@@ -82,6 +82,25 @@ interface TelephonyProvider
     /** Move a leg out of its conversation and send it to another destination (e.g. an extension). */
     public function transfer(string $legId, string $conversationId, string $destination): void;
 
+    /**
+     * Play hold music to a leg that is waiting for an agent (B2.3b-i QD-1). The
+     * caller holds on their OWN line — there is no waiting-room object to put them
+     * in and take them out of; music simply starts and stops on the leg they are
+     * already on. The leg must be answered first, or there is no call yet to play
+     * anything into.
+     *
+     * Which music plays is the engine's own configured set; per-client music is
+     * B2.3b-ii, and this signature is what it will grow a parameter on.
+     */
+    public function startHoldMusic(string $legId): void;
+
+    /**
+     * Stop the hold music on a leg (B2.3b-i QD-1) — called the moment we ring an
+     * agent for them, so the caller is not still hearing music when their call
+     * connects. Safe to call on a leg that is not playing any.
+     */
+    public function stopHoldMusic(string $legId): void;
+
     /** End a leg's call. Works on any leg we know the id of, even after it left us. */
     public function hangup(string $legId): void;
 

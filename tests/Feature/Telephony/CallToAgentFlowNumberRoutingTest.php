@@ -133,7 +133,10 @@ it('says "unknown number", not "all busy", when nobody owns the dialled number',
     Log::shouldNotHaveReceived('info', [Mockery::pattern('/all busy/'), Mockery::any()]);
 });
 
-it('still says "all busy" when the client is known but nobody is free (RD-5 unchanged)', function () {
+// ND-4's point survives B2.3b-i, with the second half rewritten: a KNOWN client with
+// nobody free no longer ends the call at all — the caller waits (QD-4). The two causes
+// still have to read differently in the log, which is the whole reason ND-4 split them.
+it('holds the caller with music when the client is known but nobody is free (RD-5, now the waiting room)', function () {
     Log::spy();
 
     $tenant = Tenant::factory()->create();
@@ -143,12 +146,14 @@ it('still says "all busy" when the client is known but nobody is free (RD-5 unch
     fakeAgentRouter(null);   // the number resolves; nobody is free
 
     $telephony = Mockery::mock(TelephonyProvider::class);
-    $telephony->shouldReceive('hangup')->once()->with('caller-leg');
+    $telephony->shouldReceive('answer')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldNotReceive('hangup');
 
     $switchboard = new Switchboard($telephony);
     (new CallToAgentFlow($telephony, $switchboard))->handle(inboundOn('caller-leg', '+919876543210'));
 
     Log::shouldHaveReceived('info')
-        ->withArgs(fn (string $message): bool => str_contains($message, 'all busy'))
+        ->withArgs(fn (string $message): bool => str_contains($message, 'holding with music'))
         ->once();
 });

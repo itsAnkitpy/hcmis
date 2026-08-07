@@ -29,6 +29,8 @@ use Spatie\Permission\Models\Role;
  * @property Carbon|null $suspended_at
  * @property Carbon|null $archived_at
  * @property string|null $status_reason
+ * @property int|null $ring_seconds
+ * @property int|null $max_hold_seconds
  * @property TenantSettings $settings
  */
 #[ObservedBy([TenantObserver::class])]
@@ -44,6 +46,8 @@ class Tenant extends Model
         'suspended_at',
         'archived_at',
         'status_reason',
+        'ring_seconds',
+        'max_hold_seconds',
         'settings',
     ];
 
@@ -56,8 +60,30 @@ class Tenant extends Model
             'status' => TenantStatus::class,
             'suspended_at' => 'datetime',
             'archived_at' => 'datetime',
+            'ring_seconds' => 'integer',
+            'max_hold_seconds' => 'integer',
             'settings' => TenantSettingsCast::class,
         ];
+    }
+
+    /**
+     * How long ONE agent's phone rings for this client before we give up on them
+     * and hand the caller back to the waiting room (B2.3b-i QD-7). Falls back to
+     * the config default when the client has set nothing.
+     */
+    public function ringSeconds(): int
+    {
+        return $this->ring_seconds ?? (int) config('telephony.queue.ring_seconds');
+    }
+
+    /**
+     * How long a caller may hold for this client before we stop waiting, end the
+     * call, and write them to the missed-call list (B2.3b-i QD-7). Falls back to
+     * the config default when the client has set nothing.
+     */
+    public function maxHoldSeconds(): int
+    {
+        return $this->max_hold_seconds ?? (int) config('telephony.queue.max_hold_seconds');
     }
 
     /**
@@ -130,7 +156,7 @@ class Tenant extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason'];
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds'];
     }
 
     protected function activityLogName(): string

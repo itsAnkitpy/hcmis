@@ -7,8 +7,15 @@ use Illuminate\Support\Facades\Schema;
 
 /**
  * The `calls` table — the first-class call record / CDR (B3). One row per call,
- * written by the web wrap-up (the single writer, D2); the always-on listener only
- * ENRICHES it later (recording in CP-B3-2; real timing + true outcome trunk-era).
+ * normally written by the web wrap-up (the single writer, D2), with the always-on
+ * listener ENRICHING it later (recording in CP-B3-2; real timing + true outcome
+ * trunk-era).
+ *
+ * D2's own named exception (used since B2.3b-i): a call that never reaches a wrap-up —
+ * an abandoned or unanswered inbound caller — is written BY the listener, because no
+ * agent ever saw it and no screen exists to write it. The two writers cannot collide
+ * there: a wrap-up row exists because an agent handled the call, and these rows exist
+ * because nobody did.
  *
  * Every column the listener owns is NULLABLE so the row is born complete-enough
  * from the web's half and gets enriched without a rewrite — that nullability IS

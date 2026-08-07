@@ -46,6 +46,18 @@ class TelephonyListen extends Command
     /** Read window per loop tick. */
     private const READ_TIMEOUT_SECONDS = 5.0;
 
+    /**
+     * How often the waiting room is glanced at (B2.3b-i QD-3). On a quiet line the read
+     * above already paces the loop at five seconds, which is what sets the real ceiling
+     * on how long a caller holds after a desk frees up; this only stops a BUSY line —
+     * where events arrive constantly — from asking the who's-free board the same
+     * question hundreds of times a second.
+     */
+    private const SWEEP_EVERY_SECONDS = 1.0;
+
+    /** When the waiting room was last swept (a monotonic-enough clock for a 1s gate). */
+    private float $lastSweptAt = 0.0;
+
     public function __construct(private readonly TelephonyProvider $telephony)
     {
         parent::__construct();
@@ -91,11 +103,18 @@ class TelephonyListen extends Command
      * The main loop — only leaves by throwing (connection loss). Each event is
      * both translated into app events and handed to the switchboard for call control;
      * the two are independent readers of the same event.
+     *
+     * The waiting-room sweep (B2.3b-i QD-3) rides this loop on EVERY pass, deliberately
+     * not off the "nothing arrived" branch below: that branch only fires when the line is
+     * idle, and a switch busy enough to leave callers waiting is exactly the one where it
+     * never runs.
      */
     private function listen(AriWebSocket $pipe, Switchboard $switchboard): void
     {
         while (true) {
             $event = $pipe->readEvent(self::READ_TIMEOUT_SECONDS);
+
+            $this->sweepWaitingCallers($switchboard);
 
             if ($event === null) {
                 $this->assertPipeAlive($pipe);
@@ -106,6 +125,19 @@ class TelephonyListen extends Command
             $this->translate($event);
             $switchboard->handle($event);
         }
+    }
+
+    /** Glance at the waiting room, at most once every SWEEP_EVERY_SECONDS (QD-3). */
+    private function sweepWaitingCallers(Switchboard $switchboard): void
+    {
+        $now = microtime(true);
+
+        if ($now - $this->lastSweptAt < self::SWEEP_EVERY_SECONDS) {
+            return;
+        }
+
+        $this->lastSweptAt = $now;
+        $switchboard->sweepWaiting();
     }
 
     private function assertPipeAlive(AriWebSocket $pipe): void

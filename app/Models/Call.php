@@ -13,10 +13,16 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Carbon;
 
 /**
- * A call record / CDR (B3). One row per call, written by the web wrap-up (the
- * single writer, D2): the lead update + the `call.wrapped_up` audit ride along as
- * side-effects of this row. The always-on listener never writes one — it only
- * ENRICHES (recording in CP-B3-2; real timing + true outcome trunk-era).
+ * A call record / CDR (B3). One row per call, normally written by the web wrap-up
+ * (the single writer, D2): the lead update + the `call.wrapped_up` audit ride along
+ * as side-effects of this row. The always-on listener mostly ENRICHES (recording in
+ * CP-B3-2; real timing + true outcome trunk-era).
+ *
+ * The one row the listener CREATES is D2's own named exception, in use since
+ * B2.3b-i: a caller who was never put through to anybody — they gave up while
+ * holding, or we stopped waiting on their behalf. Nobody wrapped that call up, so
+ * nothing else would ever record it; those rows carry no agent, lead, campaign or
+ * disposition and are what the missed-call list reads.
  *
  * Tenant-owned (BelongsToTenant + RLS). All four business FKs are nullable: an
  * ad-hoc typed-number call has no lead/campaign/disposition (D5).
