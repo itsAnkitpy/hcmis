@@ -44,7 +44,7 @@ it('routes an inbound call to the client that owns the dialled number (ND-1)', f
 
     $router = fakeAgentRouter($agent->id);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
 
@@ -65,7 +65,7 @@ it('sends two clients their own calls — the first time two numbers have existe
     TenantContext::run($examPur->id, fn () => PhoneNumber::factory()->create(['number' => '+912222222222']));
     TenantContext::forget();
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->twice();
     $telephony->shouldReceive('placeCall')->twice()->andReturn('agent-leg-1', 'agent-leg-2');
     $switchboard = new Switchboard($telephony);
@@ -89,7 +89,7 @@ it('ends a call on a switched-off number cleanly and never reads any board (ND-4
 
     $router = fakeAgentRouter(6);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');
     $telephony->shouldNotReceive('answer');
     $telephony->shouldNotReceive('placeCall');
@@ -103,7 +103,7 @@ it('ends a call on a switched-off number cleanly and never reads any board (ND-4
 it('ends a call on a number nobody owns cleanly (ND-4)', function () {
     $router = fakeAgentRouter(6);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');
     $telephony->shouldNotReceive('answer');
 
@@ -120,7 +120,7 @@ it('says "unknown number", not "all busy", when nobody owns the dialled number',
 
     fakeAgentRouter(6);   // an agent IS free, so "all busy" would be a lie
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');
 
     $switchboard = new Switchboard($telephony);

@@ -5,7 +5,7 @@ use App\Telephony\AgentRouter;
 use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\Flows\Switchboard;
 use App\Telephony\RecordingSession;
-use App\Telephony\TelephonyProvider;
+use App\Telephony\TelephonyException;
 use Illuminate\Support\Facades\Queue;
 
 /**
@@ -30,7 +30,7 @@ it('rings a free agent (B) while keeping the caller with the current agent (A) w
     $router = fakeAgentRouter(6);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
@@ -55,7 +55,7 @@ it('on B answering: adds B, removes + hangs up A, and the recording rides throug
     fakeAgentRouter(6);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
@@ -98,7 +98,7 @@ it('on B no-answer: releases B and leaves the caller with A (Fold B)', function 
     $router = fakeAgentRouter(6);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -122,6 +122,37 @@ it('on B no-answer: releases B and leaves the caller with A (Fold B)', function 
     // B's reservation was released (Fold B); A's connected tag was never released
     // (it was cleared, not released, at connect — the agent's own screen owns it).
     expect($router->released)->toBe([[3, 6]]);
+});
+
+it('releases the agent a transfer booked when placing their leg is refused (S88 review #1)', function () {
+    // An OUTBOUND call on purpose: it is the case that proves the company comes from the
+    // transfer signal and not from the call, because an outbound call carries none.
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+    $router = fakeAgentRouter(9);
+    $session = new RecordingSession('cust-leg', 'call-1', 'said', 'heard');
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/111', 'outbound', '1800555000')->andReturn('cust-leg');
+    $telephony->shouldReceive('join')->once()->with('cust-leg', 'agent-leg')->andReturn('conv-1');
+    $telephony->shouldReceive('startRecording')->once()->andReturn($session);
+    // The transfer books B on the board, and placing their leg is then refused. Nothing
+    // carries that booking yet — which is exactly how B used to end up tagged "On a call"
+    // for good, freeable only by editing the database.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent')
+        ->andThrow(new TelephonyException('Channel not found'));
+    $telephony->shouldReceive('hangup')->once()->with('agent-leg');
+    $telephony->shouldReceive('hangup')->once()->with('cust-leg');
+
+    // Driven through the switchboard because that is what catches this: the web's signal
+    // runs behind the per-call backstop, which discards this one call.
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('agent-leg', ['agent', '111', 'uuid-1', '6']));
+    $switchboard->handle(stasisStart('cust-leg', ['outbound']));
+    $switchboard->handle(channelUserevent('transfer', ['agentUserId' => '6', 'tenantId' => '3']));
+
+    expect($router->released)->toBe([[3, 9]])
+        ->and($switchboard->activeCallCount())->toBe(0);
 });
 
 it('when nobody is free at transfer time: touches nothing — the caller stays with A', function () {
@@ -152,7 +183,7 @@ it('when nobody is free at transfer time: touches nothing — the caller stays w
 
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -178,7 +209,7 @@ it('when the caller hangs up mid-transfer-ring: ends the call cleanly and releas
     $router = fakeAgentRouter(6);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -206,7 +237,7 @@ it('when A hangs up mid-transfer-ring: ends the call cleanly rather than strandi
     $router = fakeAgentRouter(6);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -231,7 +262,7 @@ it('when A hangs up mid-transfer-ring: ends the call cleanly rather than strandi
 it('only reports serving the connected agent, and ignores a transfer before the call connects', function () {
     fakeAgentRouter(6);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
 
@@ -257,7 +288,7 @@ it('retains the dialing agent on an outbound call (threaded tag) so it too can b
     config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
     config()->set('telephony.outbound.caller_id', '1800555000');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1002', 'outbound', '1800555000')->andReturn('customer-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
     $telephony->shouldReceive('startRecording')->once()->andReturn(new RecordingSession('customer-leg', 'call-1', 's', 'h'));

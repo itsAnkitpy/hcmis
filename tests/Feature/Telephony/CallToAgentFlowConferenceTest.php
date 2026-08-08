@@ -84,7 +84,7 @@ it('on B answering a conference: adds B and KEEPS A — the 3-way — recording 
     sequenceAgentRouter([6, 7]);   // A = 6, B = 7
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
@@ -111,7 +111,7 @@ it('when A leaves a 3-way conference: the caller and B keep talking, then end cl
     sequenceAgentRouter([6, 7]);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -139,7 +139,7 @@ it('when B leaves a 3-way conference: the caller and A keep talking, then end cl
     sequenceAgentRouter([6, 7]);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -165,7 +165,7 @@ it('when the caller hangs up a 3-way conference: both agents are dropped', funct
     sequenceAgentRouter([6, 7]);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -188,7 +188,7 @@ it('ends the call when the last agent leaves a conference one by one (only-one-l
     sequenceAgentRouter([6, 7]);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -212,7 +212,7 @@ it('on conference B no-answer: releases B and leaves the caller with A (Fold B)'
     $router = sequenceAgentRouter([6, 7]);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -238,7 +238,7 @@ it('when nobody is free at conference time: touches nothing — the caller stays
     $router = sequenceAgentRouter([6]);   // A = 6; the conference reserve finds nobody (no 2nd id)
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -260,7 +260,7 @@ it('when the caller hangs up mid-conference-ring: ends the call cleanly and rele
     $router = sequenceAgentRouter([6, 7]);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -284,7 +284,7 @@ it('when A hangs up mid-conference-ring: ends the call cleanly rather than stran
     $router = sequenceAgentRouter([6, 7]);
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -306,7 +306,7 @@ it('caps the conference at 3-way: a second conference on a 3-party call is a no-
     $router = sequenceAgentRouter([6, 7, 8]);   // A, B, then a would-be C
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');

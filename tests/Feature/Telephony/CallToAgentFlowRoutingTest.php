@@ -26,7 +26,7 @@ it('reserves a free agent and rings THAT agent\'s resolved endpoint (RD-2/RD-4)'
     ]);
     $router = fakeAgentRouter(7);   // the board hands back agent 7
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1004', 'agent', null, 20)->andReturn('agent-leg');
 
@@ -57,7 +57,7 @@ it('answers the caller and starts hold music when no agent is free (QD-4 — was
 it('ends cleanly when the dialled number belongs to no client — the router is never asked (ND-4)', function () {
     $router = fakeAgentRouter(6);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');
     $telephony->shouldNotReceive('answer');
     $telephony->shouldNotReceive('placeCall');
@@ -88,7 +88,7 @@ it('releases the reservation when the agent rings out (Fold B — agent no-answe
 it('releases the reservation when the caller abandons mid-ring (Fold B — the second no-answer path)', function () {
     $router = fakeAgentRouter(6);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');   // caller gone → cancel the agent ring
@@ -105,7 +105,7 @@ it('does NOT release once the agent answers — the screen takes over the status
     $router = fakeAgentRouter(6);
     $session = new RecordingSession('caller-leg', 'call-1', 'said', 'heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');

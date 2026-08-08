@@ -134,6 +134,20 @@ it('never shows another client\'s missed calls', function () {
     });
 });
 
+it('shows an hour-long wait as an hour, not as an instant hang-up (S88 review #6)', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $page = new MissedCalls;
+
+        // The hour used to be thrown away, so the person who held longest of all appeared
+        // on this screen as the one who hung up straight away.
+        expect($page->waitedFor(missedCall(['duration_seconds' => 3725])))->toBe('01:02:05')
+            ->and($page->waitedFor(missedCall(['duration_seconds' => 125])))->toBe('02:05')
+            ->and($page->waitedFor(missedCall(['duration_seconds' => null])))->toBe('—');
+    });
+});
+
 it('says how each caller was lost in plain words (QD-6)', function () {
     $tenant = Tenant::factory()->create();
 

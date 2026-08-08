@@ -144,15 +144,65 @@ class CallToAgentFlow
     private ?int $maxHoldSeconds = null;
 
     /**
-     * The agents already rung for THIS caller (QD-4's per-call skip list). Without it a
-     * waiting caller cycles between hold music and the same silent desk forever: the
-     * agent's phone rings out, the board still says Ready, and the next sweep picks
-     * them again. Deliberately per-call — taking a non-answering agent off the board
-     * for everyone needs a sixth presence state and a screen to clear it (B2.3b-ii).
+     * The agents who have let THIS caller's ring run out, and the moment each one's phone
+     * stopped ringing (QD-4's per-call skip list). Without it a waiting caller cycles
+     * between hold music and the same silent desk: the agent's phone rings out, the board
+     * still says Ready, and the next sweep picks them straight back up. Deliberately
+     * per-call — taking a non-answering agent off the board for EVERYONE needs a sixth
+     * presence state and a screen to clear it (B2.3b-ii).
      *
-     * @var array<int, int>
+     * 🔴 IT COOLS OFF, IT DOES NOT EXILE (S88). The list used to be permanent for the
+     * call, which quietly turned a small floor into a hard cap on how many rings a caller
+     * could ever get: two agents on a twenty-second ring were both used up inside forty
+     * seconds, and from then on the sweep could only ever come back with nobody — so the
+     * caller held out the remaining hundred and forty seconds of the cap with no
+     * possibility of connecting, and was then hung up on. The two people who could have
+     * taken the call had been sitting there Ready the whole time.
+     *
+     * Cooling-off is also what every real queue does: Asterisk's own has a `retry` gap of
+     * a few seconds before a member who did not answer is tried again, and only takes
+     * them off the board when `autopause` is switched on deliberately
+     * (https://github.com/asterisk/asterisk/blob/master/configs/samples/queues.conf.sample).
+     *
+     * Stamped when the ring ENDS rather than when it starts, so the cooling-off is a real
+     * gap and not one the ring has already spent. One ring's worth long, borrowed from
+     * this client's own ring setting rather than a new one to tune: an agent who missed
+     * the phone gets exactly as long to come back as they had to answer.
+     *
+     * @var array<int, Carbon>
      */
-    private array $rungAgentIds = [];
+    private array $rangOutAt = [];
+
+    /**
+     * An agent booked on the board but not yet carried by an AgentLeg (S88 review #1).
+     * Booking an agent and building the leg that knows how to release them are two steps,
+     * and anything throwing in between — most realistically the caller hanging up in that
+     * same second, so the verb comes back "channel not found" — used to leave that agent
+     * tagged On a call forever, because releaseAllReservations() iterates legs and there
+     * is no leg yet. Their own screen's heartbeat keeps the stale-tag net from ever
+     * clearing it, so nothing short of a database edit frees them.
+     *
+     * BOTH bookings pass through here, which is the whole point: the sweep's ring
+     * (reserveNextAgent) and the second agent a transfer or conference rings in
+     * (beginAddedAgent). The company is held alongside the agent because the pair is what
+     * a release needs, and a transfer can happen on an OUTBOUND call, where the call's own
+     * tenantId is null — the same pair every AgentLeg carries, for the same reason.
+     */
+    private ?int $pendingReservedTenantId = null;
+
+    private ?int $pendingReservedAgentId = null;
+
+    /**
+     * Is hold music playing on the caller's line right now (S88 review #3)? The music
+     * used to stop the moment the sweep reserved an agent, but the caller is NOT joined
+     * to that agent until they pick up — so they heard silence for the whole ring, once
+     * per desk tried. Twenty seconds of dead air reads as a dropped call, and the caller
+     * hangs up; we then record that as "they gave up", which points the BPO at the hold
+     * length when the real cause was that we played them nothing. Tracked so the music
+     * runs unbroken from the first wait until the agent is actually on the line, and so
+     * neither door starts a second copy of it.
+     */
+    private bool $holdMusicOn = false;
 
     private readonly AgentRouter $router;
 
@@ -374,19 +424,45 @@ class CallToAgentFlow
     }
 
     /**
-     * Reserve the next agent to try for this caller (RD-3/RD-4), skipping everyone this
-     * caller has already been rung out on (QD-4). Null means nobody is free right now —
-     * which starts the wait on a new call, and simply continues it on a sweep.
+     * Reserve the next agent to try for this caller (RD-3/RD-4), skipping anyone whose
+     * phone this caller has rung out in the last little while (QD-4). Null means nobody
+     * is free right now — which starts the wait on a new call, and simply continues it on
+     * a sweep.
      */
     private function reserveNextAgent(): ?int
     {
-        $reservedAgentId = $this->router->reserveFreeAgent((int) $this->tenantId, $this->rungAgentIds);
+        $reservedAgentId = $this->router->reserveFreeAgent((int) $this->tenantId, $this->coolingOffAgentIds());
 
         if ($reservedAgentId !== null) {
-            $this->rungAgentIds[] = $reservedAgentId;
+            $this->pendingReservedTenantId = $this->tenantId;
+            $this->pendingReservedAgentId = $reservedAgentId;
         }
 
         return $reservedAgentId;
+    }
+
+    /**
+     * The agents to leave out of the next attempt: everyone whose ring for this caller
+     * ran out less than one ring ago (S88). Once that has passed they are ordinary
+     * candidates again — which is the whole difference between a desk we are giving a
+     * moment's peace and a desk we have written off for the rest of the call.
+     *
+     * @return array<int, int>
+     */
+    private function coolingOffAgentIds(): array
+    {
+        $cooledOffBefore = now()->subSeconds($this->ringSecondsOrDefault());
+
+        return array_keys(array_filter(
+            $this->rangOutAt,
+            fn (Carbon $rangOutAt): bool => $rangOutAt->isAfter($cooledOffBefore),
+        ));
+    }
+
+    /** How long ONE agent's phone rings for this client, or the config default (QD-7). */
+    private function ringSecondsOrDefault(): int
+    {
+        return $this->ringSeconds ?? (int) config('telephony.queue.ring_seconds');
     }
 
     /**
@@ -411,6 +487,15 @@ class CallToAgentFlow
      */
     private function ringAgent(int $reservedAgentId): void
     {
+        // Music from the moment we answer, including the very first ring (S88). The caller
+        // is never joined to a ringing agent, so without this they get silence for the
+        // whole ring window. Industry-checked: Asterisk's own queue plays music while it
+        // rings agents by default and offers a ringing tone as the opt-out — silence is
+        // not an option anyone ships, because it reads as a dropped call. Music over a
+        // ringing tone because a ringing tone promises an answer in seven or eight rings,
+        // and this caller may be handed past several desks.
+        $this->startHoldMusicIfSilent();
+
         rescue(
             fn () => TenantContext::run((int) $this->tenantId, function () use ($reservedAgentId): void {
                 CallHandoff::query()->where('agent_user_id', $reservedAgentId)->delete();
@@ -432,7 +517,7 @@ class CallToAgentFlow
             $this->directory->endpointFor($reservedAgentId),
             'agent',
             $this->callerNumber,
-            $this->ringSeconds ?? (int) config('telephony.queue.ring_seconds'),
+            $this->ringSecondsOrDefault(),
         );
         // The first agent enters the set RINGING, carrying the reservation so a no-answer
         // can release it (Fold B); it flips to connected when they pick up (connectAgent).
@@ -444,6 +529,8 @@ class CallToAgentFlow
             reservedAgentId: $reservedAgentId,
         );
         $this->registry->registerLeg($agentLegId, $this);   // the leg we placed is ours (FD-2)
+        $this->pendingReservedTenantId = null;              // the leg carries the reservation now
+        $this->pendingReservedAgentId = null;
         $this->state = CallFlowState::RingingAgent;
 
         Log::info('Inbound call: reserved a free agent, caller answered, ringing them.', [
@@ -453,7 +540,7 @@ class CallToAgentFlow
             'tenant' => $this->tenantId,
             'agentUser' => $reservedAgentId,
             'agent' => $agentLegId,
-            'ringSeconds' => $this->ringSeconds ?? (int) config('telephony.queue.ring_seconds'),
+            'ringSeconds' => $this->ringSecondsOrDefault(),
         ]);
     }
 
@@ -469,7 +556,7 @@ class CallToAgentFlow
      */
     private function enterWaitingRoom(string $why): void
     {
-        $this->telephony->startHoldMusic((string) $this->callerLegId);
+        $this->startHoldMusicIfSilent();
         $this->state = CallFlowState::Waiting;
 
         Log::info('Inbound call: the caller is holding with music on, waiting for a desk to free up.', [
@@ -477,7 +564,8 @@ class CallToAgentFlow
             'caller' => $this->callerLegId,
             'tenant' => $this->tenantId,
             'why' => $why,
-            'alreadyRung' => $this->rungAgentIds,
+            'rangOut' => array_keys($this->rangOutAt),          // everyone who has missed this caller
+            'coolingOff' => $this->coolingOffAgentIds(),        // …and who is out of the next attempt
         ]);
     }
 
@@ -512,6 +600,20 @@ class CallToAgentFlow
 
     private function sweepThisCall(): void
     {
+        // The client's maximum hold is read while a desk is RINGING too (S88 review #4).
+        // It used to be read only while the caller was waiting, so a ring already running
+        // when the cap passed always ran to its own end first — the configured maximum
+        // overshot by a whole ring duration, every single time. A ring is still STARTED
+        // right up to the cap, because an agent picking up in its first seconds still
+        // saves that call; only a ring that has already run past the cap is cut.
+        if ($this->state === CallFlowState::RingingAgent) {
+            if ($this->heldTooLong()) {
+                $this->giveUpOnWaitingCaller();
+            }
+
+            return;
+        }
+
         if ($this->state !== CallFlowState::Waiting) {
             return;
         }
@@ -528,8 +630,37 @@ class CallToAgentFlow
             return;   // still nobody free — keep holding
         }
 
-        $this->telephony->stopHoldMusic((string) $this->callerLegId);
+        // The music deliberately keeps playing through the ring (S88 review #3). The
+        // caller is not joined to this agent until they pick up, so stopping it here
+        // bought the caller silence for the whole ring window, once per desk tried.
+        // connectAgent() stops it at the moment the two are actually on one line.
         $this->ringAgent($reservedAgentId);
+    }
+
+    /**
+     * Start the hold music unless it is already playing (S88). Both the waiting-room doors
+     * and the ring reach this, and every one of them can be entered with the music already
+     * running — a second copy is never what we mean.
+     */
+    private function startHoldMusicIfSilent(): void
+    {
+        if ($this->holdMusicOn) {
+            return;
+        }
+
+        $this->telephony->startHoldMusic((string) $this->callerLegId);
+        $this->holdMusicOn = true;
+    }
+
+    /** Stop the hold music if we started it; a no-op on every call that never waited. */
+    private function stopHoldMusicIfPlaying(): void
+    {
+        if (! $this->holdMusicOn) {
+            return;
+        }
+
+        $this->telephony->stopHoldMusic((string) $this->callerLegId);
+        $this->holdMusicOn = false;
     }
 
     /**
@@ -552,6 +683,11 @@ class CallToAgentFlow
      * write the missed-call record. Disposing here is deliberate — the hang-up's own
      * ChannelDestroyed then lands on a handler the switchboard has already forgotten,
      * so it cannot write the record a second time.
+     *
+     * Reached with a desk mid-ring now, not only from the wait (S88 review #4), so it
+     * drops every leg we hold rather than the caller's alone — otherwise that agent's
+     * phone would go on ringing for a caller who is no longer there — and hands their
+     * board tag back first, so the cap firing cannot leave them tagged "On a call".
      */
     private function giveUpOnWaitingCaller(): void
     {
@@ -560,9 +696,11 @@ class CallToAgentFlow
             'caller' => $this->callerLegId,
             'tenant' => $this->tenantId,
             'heldSeconds' => (int) $this->startedAt?->diffInSeconds(now()),
+            'aDeskWasRinging' => $this->state === CallFlowState::RingingAgent,
         ]);
 
-        rescue(fn () => $this->telephony->hangup((string) $this->callerLegId), report: false);
+        rescue(fn () => $this->releaseAllReservations(), report: false);
+        $this->hangupHeldLegs();
         $this->recordMissedCall(CallOutcome::NoAnswer);
         $this->dispose();
     }
@@ -706,12 +844,26 @@ class CallToAgentFlow
             return;
         }
 
+        // The agent has PICKED UP — that is what this event means, and the call stops being
+        // an unanswered one from this line onwards, before any verb that could be refused
+        // (S88 review #5). Marked here rather than after the recording starts because the
+        // missed-call safety net reads this: with the flip left until the end, a refused
+        // join between the two wrote a "nobody answered" row for a call the agent had
+        // physically answered — and their console, which claimed this call's ticket the
+        // moment their phone rang, would stamp the same ticket on its own row at wrap-up.
+        // Two rows, one call. Nothing between here and the old position reads the state.
+        $this->state = CallFlowState::InCall;
+
+        // The caller and the agent are about to be on one line, so the hold music stops
+        // HERE rather than when the agent's phone started ringing (S88 review #3) — that
+        // is what keeps the wait sounding like a wait instead of a dropped call.
+        $this->stopHoldMusicIfPlaying();
+
         $this->conversationId = $this->telephony->join((string) $this->callerLegId, $agent->legId);
         $this->recording = $this->telephony->startRecording(
             (string) $this->callerLegId,
             'call-'.now()->format('Ymd-His'),
         );
-        $this->state = CallFlowState::InCall;
 
         // Flip ringing -> connected and clear (not release) the reservation. The serving
         // agent's user id already rode in with the AgentLeg, so there is nothing to copy
@@ -815,6 +967,14 @@ class CallToAgentFlow
             return;
         }
 
+        // B is booked on the board but nothing carries that booking until their leg record
+        // exists a few lines down, so hold it here first (S88 review #1, the second half —
+        // the inbound ring had this gap closed and this path did not). A refused placeCall
+        // in between would otherwise leave B tagged On a call for good, with no leg for the
+        // release to iterate — the identical bug, reached by clicking Transfer instead.
+        $this->pendingReservedTenantId = $tenantId;
+        $this->pendingReservedAgentId = $reservedAgentId;
+
         // B's leg carries no caller-ID in this slice (the customer number isn't retained
         // past the first ring; a nicety parked for later). It enters the set RINGING with
         // a FRESH reservation, so releaseReservation guards B's tag, never a connected
@@ -831,6 +991,8 @@ class CallToAgentFlow
             reservedAgentId: $reservedAgentId,
         );
         $this->registry->registerLeg($legId, $this);   // B's leg is ours (FD-2)
+        $this->pendingReservedTenantId = null;         // B's leg carries the reservation now
+        $this->pendingReservedAgentId = null;
         $this->addedAgentIntent = $intent;
         $this->state = CallFlowState::AddingAgent;
 
@@ -962,12 +1124,18 @@ class CallToAgentFlow
             $this->releaseAllReservations();
 
             if (isset($this->agents[$legId])) {
+                $rungOutAgentId = $this->agents[$legId]->userId;
                 unset($this->agents[$legId]);
 
                 // QD-4's second door: an inbound agent let their phone ring out. The
                 // caller goes back to the waiting room rather than being cut off, and
-                // the skip list keeps that same silent desk out of the next attempt.
+                // that desk is noted as of NOW, which keeps it out of the next attempt
+                // for one ring and then lets it back in (S88 — the list cools off).
                 if ($this->state === CallFlowState::RingingAgent && $this->callerLegId !== null) {
+                    if ($rungOutAgentId !== null) {
+                        $this->rangOutAt[$rungOutAgentId] = now();
+                    }
+
                     $this->enterWaitingRoom('the agent we rang did not pick up');
 
                     return;
@@ -1076,6 +1244,7 @@ class CallToAgentFlow
         // free a leaked tag while the tab keeps stamping). Best-effort: never mask the
         // original telephony error.
         rescue(fn () => $this->releaseAllReservations(), report: false);
+        $this->recordMissedCallIfNeverConnected();
         $this->hangupHeldLegs();
         $this->dispose();
     }
@@ -1102,8 +1271,32 @@ class CallToAgentFlow
         // fires on an UNEXPECTED error, which could strike after we reserved an agent but
         // before they connected — release the tag so they are not stuck "On a call".
         rescue(fn () => $this->releaseAllReservations(), report: false);
+        $this->recordMissedCallIfNeverConnected();
         $this->hangupHeldLegs();
         $this->reset();
+    }
+
+    /**
+     * An error tore this call down — a refused verb (abort) or the switchboard's backstop
+     * catching a bug (discard). If nobody had reached an agent yet, the caller still gets
+     * the missed-call row QD-5 promises (S88 review #5): without this, the one outcome the
+     * waiting room exists to guarantee is the one that silently does not happen, and the
+     * caller vanishes from every call report exactly as they would have before this slice.
+     *
+     * `no_answer` per QD-6's mapping — we stopped waiting on their behalf, they did not
+     * give up. Only for a call that never connected: once an agent is on the line their
+     * screen owns the row (D2), and writing here would duplicate it. Ordered BEFORE the
+     * teardown because reset() wipes the client, the ticket and the arrival time this
+     * needs. The write is best-effort inside recordMissedCall(), so an error path cannot
+     * become a second error.
+     */
+    private function recordMissedCallIfNeverConnected(): void
+    {
+        if ($this->state !== CallFlowState::Waiting && $this->state !== CallFlowState::RingingAgent) {
+            return;
+        }
+
+        $this->recordMissedCall(CallOutcome::NoAnswer);
     }
 
     /** The sole agent on the call — used at connect, where exactly one agent exists. */
@@ -1160,9 +1353,22 @@ class CallToAgentFlow
         $agent->reservedAgentId = null;
     }
 
-    /** Release every reservation we still hold (a ringing inbound/added agent). */
+    /**
+     * Release every reservation we still hold — a ringing inbound/added agent, and the one
+     * booked but not yet carried by a leg (S88 review #1). The pending one is released
+     * first, and by the company/agent pair it was booked with rather than the call's own,
+     * because a transfer books on an outbound call whose tenantId is null. The release
+     * itself is the router's usual conditional one, so it still cannot overwrite a status
+     * the agent's screen set during the gap.
+     */
     private function releaseAllReservations(): void
     {
+        if ($this->pendingReservedTenantId !== null && $this->pendingReservedAgentId !== null) {
+            $this->router->releaseReservation($this->pendingReservedTenantId, $this->pendingReservedAgentId);
+            $this->pendingReservedTenantId = null;
+            $this->pendingReservedAgentId = null;
+        }
+
         foreach ($this->agents as $agent) {
             $this->releaseReservation($agent);
         }
@@ -1185,6 +1391,9 @@ class CallToAgentFlow
         $this->startedAt = null;
         $this->ringSeconds = null;
         $this->maxHoldSeconds = null;
-        $this->rungAgentIds = [];
+        $this->rangOutAt = [];
+        $this->pendingReservedTenantId = null;
+        $this->pendingReservedAgentId = null;
+        $this->holdMusicOn = false;
     }
 }

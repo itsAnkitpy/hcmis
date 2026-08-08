@@ -4,7 +4,6 @@ use App\Models\CallHandoff;
 use App\Models\Tenant;
 use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\Flows\Switchboard;
-use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
@@ -36,7 +35,7 @@ it('drops a handoff note for the reserved agent in the call\'s own company, carr
     $agent = clientUserWithRole($tenant, 'agent');
     fakeAgentRouter($agent->id);   // the board hands back this agent
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
 
@@ -59,7 +58,7 @@ it('prunes the agent\'s prior note on the next ring — at most one note per age
     $agent = clientUserWithRole($tenant, 'agent');
     fakeAgentRouter($agent->id);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer');
     $telephony->shouldReceive('placeCall')->andReturn('agent-leg');
 
@@ -83,7 +82,7 @@ it('prunes the agent\'s prior note on the next ring — at most one note per age
 it('writes no handoff note when the call carries no company label (TH-5 — no orphan write)', function () {
     fakeAgentRouter(6);   // would hand back an agent — but it is never asked without a label
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');   // RD-5 clean end
     $telephony->shouldNotReceive('answer');
     $telephony->shouldNotReceive('placeCall');

@@ -10,9 +10,11 @@ use App\Models\Tenant;
 use App\Models\User;
 use App\Telephony\AgentRouter;
 use App\Telephony\NumberDirectory;
+use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
+use Mockery\MockInterface;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -294,6 +296,28 @@ function fakeAgentRouter(?int $agentId = 6): AgentRouter
     app()->instance(AgentRouter::class, $router);
 
     return $router;
+}
+
+/**
+ * A mocked phone system for tests that are not ABOUT the hold music (S88).
+ *
+ * Since the music now runs from the moment we answer right through to the moment the
+ * caller and agent are joined, every inbound call touches those two verbs — including
+ * the transfer, conference and handoff tests, none of which care. This declares them
+ * as "may happen, any number of times" so those tests stay about their own subject.
+ *
+ * Tests that ARE about the music (CallToAgentFlowWaitingRoomTest, SwitchboardTest's
+ * sweep cases) build their own strict mock instead, so the counts stay real there.
+ *
+ * @return TelephonyProvider&MockInterface
+ */
+function fakeTelephony(): MockInterface
+{
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('startHoldMusic')->zeroOrMoreTimes();
+    $telephony->shouldReceive('stopHoldMusic')->zeroOrMoreTimes();
+
+    return $telephony;
 }
 
 /**

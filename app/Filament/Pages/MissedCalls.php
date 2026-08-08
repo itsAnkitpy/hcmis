@@ -93,6 +93,26 @@ class MissedCalls extends Page
             ->get();
     }
 
+    /**
+     * How long this caller was on the line before they were lost (S88 review #6).
+     *
+     * The hour matters and used to be thrown away: `i:s` alone renders an hour-long wait
+     * as `00:00`, which reads on this screen as somebody who hung up instantly — the
+     * opposite of what happened, and the opposite of what the floor should do about it.
+     * A client may set their maximum hold as high as an hour (TenantForm), so it is
+     * reachable. Hours appear only when there are some, so the ordinary row stays short.
+     */
+    public function waitedFor(Call $call): string
+    {
+        $seconds = $call->duration_seconds;
+
+        if ($seconds === null) {
+            return '—';
+        }
+
+        return gmdate($seconds >= 3600 ? 'H:i:s' : 'i:s', $seconds);
+    }
+
     /** Plain words for how a caller ended up on this list (QD-6). */
     public function reasonFor(Call $call): string
     {

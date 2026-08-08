@@ -26,8 +26,24 @@ use Illuminate\Console\Command;
  *
  * It is transport + translation only (B4 D5): it reads engine events, turns
  * them into app events (translate()), and hands each raw event to the switchboard
- * that drives call control across many concurrent calls (B2.1). A fresh switchboard
- * is built per connection, so a reconnect starts with no half-finished calls in hand.
+ * that drives call control across many concurrent calls (B2.1).
+ *
+ * 🔴 ONE switchboard for the life of the process, NOT one per connection (S88 review #2).
+ * It used to be rebuilt on every reconnect, on the assumption that a dropped pipe means
+ * the calls are gone too. Asterisk does the opposite: losing the websocket only makes our
+ * app INACTIVE — new calls cannot enter it, but "existing ones remain in it", and their
+ * events resume for us the moment the pipe is back
+ * (https://community.asterisk.org/t/problem-with-websockets-and-stasis-app-not-active/87295).
+ *
+ * So every caller we were holding is still on the line, still hearing music — and a fresh
+ * switchboard had never heard of them. Nothing swept them, the client's maximum hold never
+ * fired, no missed-call row was ever written, and any agent whose phone was ringing at that
+ * instant stayed tagged "On a call" for good. They simply held until they gave up, invisible
+ * to every call report. On this box the pipe drops roughly every thirty minutes.
+ *
+ * Keeping the switchboard is also self-cleaning in the bad case: if the calls really did go
+ * away (Asterisk itself restarted), the next thing we ask of each stale call is refused, and
+ * a refused verb already tears that one call down properly — record written, agent freed.
  */
 #[Signature('telephony:listen')]
 #[Description('Hold the ARI event pipe open: register the app with Asterisk, translate engine events into app events, and run the call flow')]
@@ -66,6 +82,9 @@ class TelephonyListen extends Command
     public function handle(): void
     {
         $backoff = self::BACKOFF_INITIAL_SECONDS;
+        // Built ONCE, outside the reconnect loop: the calls survive a dropped pipe, so our
+        // memory of them has to as well (S88 review #2 — see the note on this class).
+        $switchboard = new Switchboard($this->telephony);
 
         while (true) {
             $pipe = $this->makePipe();
@@ -78,7 +97,7 @@ class TelephonyListen extends Command
                 ));
                 $backoff = self::BACKOFF_INITIAL_SECONDS;
 
-                $this->listen($pipe, new Switchboard($this->telephony));
+                $this->listen($pipe, $switchboard);
             } catch (TelephonyException $exception) {
                 $this->error("Event pipe lost: {$exception->getMessage()} — reconnecting in {$backoff}s.");
                 $pipe->close();

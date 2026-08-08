@@ -40,7 +40,7 @@ beforeEach(function () {
 it('connects an answering agent and merges the call once both recordings finish', function () {
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->with('caller-leg', 'agent-leg')->andReturn('conv-1');
@@ -75,7 +75,7 @@ it('connects an answering agent and merges the call once both recordings finish'
 });
 
 it('hangs up the agent leg when the caller abandons before pickup', function () {
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');
@@ -114,7 +114,7 @@ it('puts the caller in the waiting room when the agent never answers — never h
 });
 
 it('passes the caller number to placeCall as the agent leg caller-ID (B4 D4)', function () {
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()
         ->with('PJSIP/1003', 'agent', '9991234567', 20)
@@ -129,7 +129,7 @@ it('passes the caller number to placeCall as the agent leg caller-ID (B4 D4)', f
 });
 
 it('presents no caller-ID when the caller is anonymous (empty number)', function () {
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()
         ->with('PJSIP/1003', 'agent', null, 20)
@@ -146,7 +146,7 @@ it('presents no caller-ID when the caller is anonymous (empty number)', function
 it('does not drive a second caller while a call is already in progress', function () {
     $session = new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');   // only the first caller
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
     $telephony->shouldReceive('join')->once()->andReturn('conv-1');
@@ -180,7 +180,7 @@ it('dials the customer when the agent leg arrives carrying the number, then join
 
     $session = new RecordingSession('customer-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     // The flow does NOT place the agent leg (the console did); it places the
     // customer leg using the number that rode in as args[1], with the prefix and
     // the configured outbound caller-ID.
@@ -222,7 +222,7 @@ it('threads the injected UUID (args[2]) as the recording callId so RecordingRead
 
     $session = new RecordingSession('customer-leg', 'call-1', 'snoop-said', 'snoop-heard');
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('placeCall')->once()
         ->with('PJSIP/1002', 'outbound', '1800555000')
         ->andReturn('customer-leg');
@@ -255,7 +255,7 @@ it('does not join until the outbound customer actually answers', function () {
     config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
     config()->set('telephony.outbound.caller_id', null);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('placeCall')->once()
         ->with('PJSIP/1002', 'outbound', null)
         ->andReturn('customer-leg');
@@ -274,7 +274,7 @@ it('tears down the agent leg when the outbound customer never answers (no-answer
     config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
     config()->set('telephony.outbound.caller_id', null);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('placeCall')->once()
         ->with('PJSIP/1002', 'outbound', null)
         ->andReturn('customer-leg');
@@ -298,7 +298,7 @@ it('cancels the customer leg when the agent abandons before the customer answers
     config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
     config()->set('telephony.outbound.caller_id', null);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('placeCall')->once()
         ->with('PJSIP/1002', 'outbound', null)
         ->andReturn('customer-leg');
@@ -329,7 +329,7 @@ it('cancels the customer leg when the agent abandons before the customer answers
 */
 
 it('mints a fresh ticket number when an inbound call is born (FD-3)', function () {
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
 
@@ -346,7 +346,7 @@ it('reuses the web-minted UUID (args[2]) as the ticket number for an outbound ca
     config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
     config()->set('telephony.outbound.caller_id', null);
 
-    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony = fakeTelephony();
     $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
 
     $switchboard = new Switchboard($telephony);
