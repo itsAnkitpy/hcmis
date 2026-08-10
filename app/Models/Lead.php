@@ -4,8 +4,10 @@ namespace App\Models;
 
 use App\Audit\LogsModelActivity;
 use App\Enums\LeadStatus;
+use App\Support\PhoneNumber;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\LeadFactory;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -55,6 +57,28 @@ class Lead extends Model
             'attempts' => 'integer',
             'custom_fields' => 'array',
         ];
+    }
+
+    /**
+     * Every lead phone is stored in ONE spelling — the DncEntry mutator pattern
+     * (M6 D-M6-5), which leads never got. Import normalized on write; hand-entry
+     * did not, so `999-123 4567` and `9991234567` could sit side by side as two
+     * leads for one person, and screen-pop's exact match missed the formatted one
+     * entirely (it normalizes the INCOMING number only).
+     *
+     * Placed on the model, not on a form or an importer, because that is the one
+     * door every write path already goes through — Filament create/edit, the
+     * importer's Lead::create, and the factory. There are no raw SQL inserts.
+     *
+     * This is also what makes the unique (tenant_id, phone) rule meaningful: to
+     * the database those two spellings are different strings, so the constraint
+     * alone would never have caught them.
+     */
+    protected function phone(): Attribute
+    {
+        return Attribute::make(
+            set: fn (mixed $value): ?string => PhoneNumber::normalize($value),
+        );
     }
 
     /**

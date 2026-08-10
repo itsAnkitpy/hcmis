@@ -78,3 +78,23 @@ it('matches a formatted caller-ID against the bare stored phone', function () {
     expect($result)->not->toBeNull()
         ->and($result['id'])->toBe($leadId);
 });
+
+/**
+ * The reverse direction of the case above, and the one that failed before the
+ * Lead phone mutator existed. The four original tests all stored a bare phone,
+ * so a lead SAVED with formatting (hand-entry, which never normalized) was
+ * invisible to a caller ringing in — lookupLead normalizes the incoming number
+ * and matches exactly, so `9991234567` never found a stored `999-123 4567`.
+ * The lead sat right there in the list and the screen said "No matching lead".
+ */
+it('matches a bare caller-ID against a lead saved with a formatted phone', function () {
+    $tenant = Tenant::factory()->create();
+    $leadId = TenantContext::run($tenant->id, fn (): int => Lead::factory()->create(['phone' => '999-123 4567'])->id);
+
+    $result = lookupCaller($tenant->id, '9991234567');
+
+    expect($result)->not->toBeNull()
+        ->and($result['id'])->toBe($leadId)
+        // Stored in the one agreed spelling, so the card shows the clean number.
+        ->and($result['phone'])->toBe('9991234567');
+});

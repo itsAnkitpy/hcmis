@@ -17,6 +17,13 @@ use Filament\Schemas\Schema;
  * options are tenant-scoped automatically (their queries run through the active
  * client's wall). Selecting a campaign reactively renders that campaign's
  * custom fields (FR-LC02) and scopes the disposition list to it (review C1).
+ *
+ * The phone is normalized on save (model mutator) and scopedUnique enforces "one
+ * lead per number, per client" — the rule the importer has enforced alone since
+ * M5. `scopedUnique`, not plain `unique`: Laravel's rule skips global scopes, so
+ * a plain one would compare across every client and let client A's numbers block
+ * client B's (the M6 D-M6-4 lesson). Filament ignores the record being edited by
+ * default, so re-saving a lead without touching its number does not trip it.
  */
 class LeadForm
 {
@@ -42,7 +49,9 @@ class LeadForm
                 TextInput::make('phone')
                     ->tel()
                     ->required()
-                    ->maxLength(40),
+                    ->maxLength(40)
+                    ->scopedUnique()
+                    ->helperText('Spaces and dashes are removed automatically. One lead per number, per client.'),
                 TextInput::make('email')
                     ->email()
                     ->maxLength(255),
