@@ -212,9 +212,10 @@ it('caps a dead session\'s open break at the stale cutoff — the BK-6 read rule
     $agent = clientUserWithRole($tenant, RoleName::Agent->value);
 
     TenantContext::run($tenant->id, function () use ($agent): void {
-        // Break started 30 min ago, heartbeat died 20 min ago: with the 60s stale
-        // window the session effectively ended 19 min ago -> 11 countable minutes,
-        // NOT 30 — a crashed tab must not keep "earning" break time.
+        // Break started 30 min ago, heartbeat died 20 min ago: the session
+        // effectively ended one stale window after that last heartbeat, so only the
+        // first 10 minutes plus that window are countable — NOT 30. A crashed tab
+        // must not keep "earning" break time.
         AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)
             ->create(['last_seen_at' => now()->subMinutes(20)]);
         AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
@@ -225,7 +226,12 @@ it('caps a dead session\'s open break at the stale cutoff — the BK-6 read rule
     $this->actingAs($agent);
 
     TenantContext::run($tenant->id, function (): void {
-        expect((new MyDay)->breakMinutes())->toBe(11);
+        // Derived from the window, not hardcoded: the countable minutes are a
+        // CONSEQUENCE of how long silence is tolerated, so tuning that setting must
+        // not look like a broken test. (Assumes a minute-aligned window, which it is.)
+        $staleMinutes = intdiv((int) config('telephony.presence.stale_after_seconds'), 60);
+
+        expect((new MyDay)->breakMinutes())->toBe(10 + $staleMinutes);
     });
 });
 

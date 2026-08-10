@@ -10,6 +10,7 @@ use App\Filament\Widgets\DirectionSplitChart;
 use App\Filament\Widgets\DispositionMixChart;
 use App\Filament\Widgets\LiveAvailabilitySnapshot;
 use App\Filament\Widgets\OperationOverview;
+use App\Filament\Widgets\TodayVsYesterdayChart;
 use App\Models\AgentPresence;
 use App\Models\Call;
 use App\Models\Campaign;
@@ -41,6 +42,7 @@ function dashboardWidgets(): array
     return [
         OperationOverview::class,
         CallStatsOverview::class,
+        TodayVsYesterdayChart::class,
         CallsPerDayChart::class,
         DispositionMixChart::class,
         CallsByAgentChart::class,
@@ -382,6 +384,100 @@ it('ignores the date range — the strip is inventory, not history', function ()
     ));
 
     expect(array_map(fn ($stat) => $stat->getValue(), $stats))->toBe([2, 4, 2, 2]);
+});
+
+// --- Slice 4: today's calls beside yesterday's ---
+
+/**
+ * A client with a deliberately lopsided two days, so no two of the six numbers match
+ * and a swapped series or a mislabelled bar cannot hide:
+ *
+ *  - today     — 2 inbound + 1 outbound  → total 3
+ *  - yesterday — 1 inbound + 3 outbound  → total 4, one of them at 23:00
+ *  - one call the day before yesterday, which belongs to neither bar
+ */
+function seedTwoDayFixture(Tenant $tenant): void
+{
+    TenantContext::run($tenant->id, function (): void {
+        Call::factory()->count(2)->inbound()->create(['created_at' => now()]);
+        Call::factory()->create(['created_at' => now()]);
+
+        Call::factory()->inbound()->create(['created_at' => now()->subDay()->setTime(12, 0)]);
+        Call::factory()->count(2)->create(['created_at' => now()->subDay()->setTime(12, 0)]);
+        Call::factory()->create(['created_at' => now()->subDay()->setTime(23, 0)]);
+
+        Call::factory()->create(['created_at' => now()->subDays(2)->setTime(12, 0)]);
+    });
+}
+
+it('draws today beside yesterday, and keeps a late-night call on its own day', function () {
+    $tenant = Tenant::factory()->create();
+    seedTwoDayFixture($tenant);
+
+    $data = TenantContext::run(
+        $tenant->id,
+        fn (): array => readWidget(widgetWith(TodayVsYesterdayChart::class), 'getData'),
+    );
+
+    expect($data['labels'])->toBe(['Total calls', 'Inbound', 'Outbound'])
+        ->and($data['datasets'][0]['label'])->toBe('Today')
+        ->and($data['datasets'][0]['data'])->toBe([3, 2, 1])
+        // 4, not 3: the 23:00 call stayed in yesterday instead of being swept into
+        // today. And not 5 either: the day-before-yesterday call is in neither bar.
+        ->and($data['datasets'][1]['label'])->toBe('Yesterday')
+        ->and($data['datasets'][1]['data'])->toBe([4, 1, 3]);
+});
+
+it('walls the two-day chart to the current client', function () {
+    $clientA = Tenant::factory()->create();
+    $clientB = Tenant::factory()->create();
+    seedTwoDayFixture($clientA);
+    seedTwoDayFixture($clientB);
+
+    $data = TenantContext::run(
+        $clientA->id,
+        fn (): array => readWidget(widgetWith(TodayVsYesterdayChart::class), 'getData'),
+    );
+
+    // A's own two days, never doubled by B's identical fixture.
+    expect($data['datasets'][0]['data'])->toBe([3, 2, 1])
+        ->and($data['datasets'][1]['data'])->toBe([4, 1, 3]);
+});
+
+it('narrows the two-day chart to one client for global staff, and rolls up when they pick none', function () {
+    $clientA = Tenant::factory()->create();
+    $clientB = Tenant::factory()->create();
+    seedTwoDayFixture($clientA);
+    seedTwoDayFixture($clientB);
+
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $narrowed = readWidget(widgetWith(TodayVsYesterdayChart::class, ['clientId' => $clientA->id]), 'getData');
+    $rolledUp = readWidget(widgetWith(TodayVsYesterdayChart::class), 'getData');
+
+    expect($narrowed['datasets'][0]['data'])->toBe([3, 2, 1])
+        ->and($narrowed['datasets'][1]['data'])->toBe([4, 1, 3])
+        // No client picked: both clients' days added together, not pinned to one.
+        ->and($rolledUp['datasets'][0]['data'])->toBe([6, 4, 2])
+        ->and($rolledUp['datasets'][1]['data'])->toBe([8, 2, 6]);
+});
+
+it('ignores the date range — this chart is always today and yesterday', function () {
+    $tenant = Tenant::factory()->create();
+    seedTwoDayFixture($tenant);
+
+    // A window two years back with nothing in it. The tiles above would empty out;
+    // these bars must not move, because the two days ARE the chart.
+    $data = TenantContext::run($tenant->id, fn (): array => readWidget(
+        widgetWith(TodayVsYesterdayChart::class, [
+            'startDate' => now()->subYears(2)->toDateString(),
+            'endDate' => now()->subYears(2)->addDay()->toDateString(),
+        ]),
+        'getData',
+    ));
+
+    expect($data['datasets'][0]['data'])->toBe([3, 2, 1])
+        ->and($data['datasets'][1]['data'])->toBe([4, 1, 3]);
 });
 
 // --- The customized dashboard mounts with its widgets for a permitted user ---

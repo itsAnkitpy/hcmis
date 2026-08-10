@@ -137,17 +137,35 @@ return [
     | Presence — the who's-free board (B2.2 PD-4)
     |--------------------------------------------------------------------------
     |
-    | The agent's screen stamps "still here" every 'heartbeat_seconds'. A board
-    | row whose last stamp is older than 'stale_after_seconds' reads as Offline
-    | (a crashed tab must not leave a lying "Ready"). The default ~15s/~60s is the
-    | common heartbeat/timeout pattern (PD-4 internet check). The browser timer
-    | reads heartbeat_seconds; the server staleness check reads stale_after.
+    | The agent's screen stamps "still here" every 15s. A board row whose last
+    | stamp is older than 'stale_after_seconds' reads as Offline (a crashed tab
+    | must not leave a lying "Ready"), and the SAME window decides who is eligible
+    | for the next caller (AgentRouter::reserveFreeAgent).
+    |
+    | WHY 120 AND NOT 60 (S93). Chrome throttles a hidden tab's timers to ONCE PER
+    | MINUTE once it has been in the background ~5 minutes, and — unlike Firefox —
+    | holding a WebSocket open does NOT exempt it, so the console's SIP connection
+    | buys nothing here. At a 60s window the throttled beat lands exactly on the
+    | cutoff, so an agent sitting Ready with the console in a background tab aged
+    | off the board AND silently stopped being offered calls. Confirmed live, not
+    | theorised. 120s clears one throttled beat with margin.
+    | Reference: https://developer.chrome.com/blog/timer-throttling-in-chrome-88
+    |
+    | THE TRADE, taken deliberately: a genuinely dead tab now holds a lying "Ready"
+    | for up to 120s instead of 60s, so one caller may burn one ring on an empty
+    | desk. Bounded — the per-call skip list (QD-4) moves them straight on to the
+    | next agent. Losing calls from live agents is the worse failure.
+    |
+    | 'heartbeat_seconds' is NOT read by anything: the browser timer hardcodes 15s
+    | at resources/js/agent-console.js. Kept because it documents the intended beat
+    | and rides an env var that may already be set on a box. Wire it or drop it —
+    | but do not trust it as live.
     |
     */
 
     'presence' => [
         'heartbeat_seconds' => (int) env('TELEPHONY_PRESENCE_HEARTBEAT', 15),
-        'stale_after_seconds' => (int) env('TELEPHONY_PRESENCE_STALE_AFTER', 60),
+        'stale_after_seconds' => (int) env('TELEPHONY_PRESENCE_STALE_AFTER', 120),
     ],
 
     /*

@@ -11,6 +11,7 @@ use App\Filament\Widgets\DirectionSplitChart;
 use App\Filament\Widgets\DispositionMixChart;
 use App\Filament\Widgets\LiveAvailabilitySnapshot;
 use App\Filament\Widgets\OperationOverview;
+use App\Filament\Widgets\TodayVsYesterdayChart;
 use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\Tenant;
@@ -77,10 +78,14 @@ class Dashboard extends BaseDashboard
 
     /**
      * The fixed widget set for the operations dashboard, in display order: the counter
-     * strip, then the period stat tiles, then the four charts, then the live
+     * strip, then the period stat tiles, then the five charts, then the live
      * availability snapshot. An explicit list (rather than the panel-wide discovered
      * widgets) keeps the order deterministic and the board scoped to reporting. Each
      * widget is canView()-gated, so Filament hides them from users who cannot view calls.
+     *
+     * TodayVsYesterdayChart leads the charts (S92 slice 4): "are we up or down today"
+     * is the question a manager asks first, and it should not need reading a six-week
+     * line to answer. Like the strip, it ignores the date range and says so itself.
      *
      * The strip goes FIRST on purpose (S92, DialShree parity): it is the size of the
      * operation — campaigns, leads, users, agents logged in — the frame a manager reads
@@ -103,6 +108,7 @@ class Dashboard extends BaseDashboard
         return [
             OperationOverview::class,
             CallStatsOverview::class,
+            TodayVsYesterdayChart::class,
             CallsPerDayChart::class,
             DispositionMixChart::class,
             CallsByAgentChart::class,

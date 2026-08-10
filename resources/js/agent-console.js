@@ -47,6 +47,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     // and the handle for the ~15s heartbeat timer (PD-4), cleared on unmount.
     presence: null,
     heartbeatTimer: null,
+    visibilityHandler: null,
 
     // BK-3 break picker: the client's active break types (server-rendered at page
     // load), whether the picker is open, and the chosen type while on break —
@@ -235,6 +236,20 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         // call — exactly when the board must keep the agent shown alive. heartbeat()
         // is renderless server-side, so this never disturbs a live call.
         this.heartbeatTimer = setInterval(() => this.$wire.heartbeat(), 15000);
+
+        // ...and beat once the moment this tab is looked at again (S93). Chrome
+        // slows a hidden tab's timers to once a minute after ~5 minutes background,
+        // and can freeze the tab outright, which stops the beat above ALTOGETHER —
+        // an open WebSocket does not exempt it, so the SIP connection is no help.
+        // The widened stale window (telephony.presence.stale_after_seconds) covers
+        // the slowed case; this covers the frozen one, so an agent coming back to
+        // the tab is on the board immediately instead of waiting out the next tick.
+        this.visibilityHandler = () => {
+            if (! document.hidden) {
+                this.$wire.heartbeat();
+            }
+        };
+        document.addEventListener('visibilitychange', this.visibilityHandler);
 
         // The strip's display tick (BK-3): browser-only, updates the reactive clock
         // the time-in-status and break countdown read. Never touches the server.
@@ -737,6 +752,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     destroy() {
         clearInterval(this.heartbeatTimer);
         clearInterval(this.clockTimer);
+        document.removeEventListener('visibilitychange', this.visibilityHandler);
         clearTimeout(this.transferTimer);
         clearTimeout(this.conferenceTimer);
         this.phone?.stop();
