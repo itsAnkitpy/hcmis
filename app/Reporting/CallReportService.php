@@ -121,6 +121,14 @@ class CallReportService
      * calls in range (the same grand total the other reports show), so the rows plus
      * an implicit "no disposition" remainder account for every call.
      *
+     * Grouped by LABEL, not by disposition id. Dispositions are per-campaign, so
+     * "No answer" exists once per campaign as its own row; grouping by id produced
+     * one slice per campaign, every one of them printed with the same name. The
+     * dashboard donut showed "No answer" twice in its legend and the true share of
+     * the outcome — the only number a manager is actually reading — appeared nowhere
+     * (S91). Narrowing to a single campaign still counts only that campaign's calls;
+     * the merge widens the reading, never the rows counted.
+     *
      * @return array<int, array{label: string, count: int, percentage: float}>
      */
     public function dispositionBreakdown(CallReportFilters $filters): array
@@ -131,8 +139,12 @@ class CallReportService
             ->whereNotNull('calls.disposition_id')
             ->selectRaw('dispositions.label as label')
             ->selectRaw('COUNT(*) as count')
-            ->groupBy('dispositions.id', 'dispositions.label')
+            ->groupBy('dispositions.label')
+            // Label breaks count ties so equal-sized outcomes keep a stable order:
+            // DispositionMixChart folds the tail of this list into "Other", and an
+            // unstable tail would reshuffle the donut between two identical reads.
             ->orderByDesc('count')
+            ->orderBy('dispositions.label')
             ->toBase()
             ->get()
             ->map(fn (object $row): array => [

@@ -1,6 +1,10 @@
 <?php
 
+use App\Models\Call;
+use App\Models\Campaign;
+use App\Models\Disposition;
 use App\Models\Tenant;
+use App\Models\User;
 use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
 use App\Tenancy\TenantContext;
@@ -71,6 +75,52 @@ it('breaks calls down by disposition as a share of all calls in range', function
         ->and(collect($rows)->firstWhere('label', 'Interested'))->toMatchArray(['count' => 2, 'percentage' => 40.0])
         ->and(collect($rows)->firstWhere('label', 'Sold'))->toMatchArray(['count' => 1, 'percentage' => 20.0])
         ->and(collect($rows)->firstWhere('label', 'No answer'))->toMatchArray(['count' => 1, 'percentage' => 20.0]);
+});
+
+it('merges same-named dispositions from different campaigns into one row', function () {
+    $tenant = Tenant::factory()->create();
+
+    $campaigns = TenantContext::run($tenant->id, function (): array {
+        $agent = User::factory()->create();
+        $first = Campaign::factory()->create();
+        $second = Campaign::factory()->create();
+
+        // Dispositions are per-campaign, so each campaign carries its OWN "No answer"
+        // row: same label, different id. Grouping by id split these into two slices
+        // that read identically on the dashboard donut and the summary report, and
+        // hid the real total for the outcome.
+        $firstNoAnswer = Disposition::factory()->forCampaign($first)->create([
+            'label' => 'No answer', 'is_contact' => false, 'is_sale' => false,
+        ]);
+        $secondNoAnswer = Disposition::factory()->forCampaign($second)->create([
+            'label' => 'No answer', 'is_contact' => false, 'is_sale' => false,
+        ]);
+
+        Call::factory()->forAgent($agent)->count(2)->create([
+            'campaign_id' => $first->id, 'disposition_id' => $firstNoAnswer->id, 'created_at' => now(),
+        ]);
+        Call::factory()->forAgent($agent)->create([
+            'campaign_id' => $second->id, 'disposition_id' => $secondNoAnswer->id, 'created_at' => now(),
+        ]);
+
+        return ['first' => $first];
+    });
+
+    $service = new CallReportService;
+
+    // Across all campaigns: ONE row carrying the true total, not two rows of 2 and 1.
+    $all = TenantContext::run($tenant->id, fn (): array => $service->dispositionBreakdown(new CallReportFilters));
+
+    expect($all)->toHaveCount(1)
+        ->and($all[0])->toMatchArray(['label' => 'No answer', 'count' => 3, 'percentage' => 100.0]);
+
+    // Narrowed to one campaign, the merge does not over-count: only that campaign's 2.
+    $narrowed = TenantContext::run($tenant->id, fn (): array => $service->dispositionBreakdown(
+        CallReportFilters::fromArray(['campaignId' => $campaigns['first']->id]),
+    ));
+
+    expect($narrowed)->toHaveCount(1)
+        ->and($narrowed[0])->toMatchArray(['label' => 'No answer', 'count' => 2]);
 });
 
 it('buckets calls by day', function () {
