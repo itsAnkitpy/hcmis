@@ -35,7 +35,17 @@ class LiveAvailabilitySnapshot extends StatsOverviewWidget
 
     protected ?string $heading = "Who's available now";
 
-    protected ?string $description = 'Current agent status — refresh to update';
+    protected ?string $description = 'Current agent status — refresh to update. Live Agents has the per-agent detail.';
+
+    /**
+     * One row, five states. Filament's default grid picks 3 columns for a five-stat
+     * widget, which laid these out 3-over-2 and cost roughly a third of the page
+     * height for five numbers that are usually small (S91). Pinning the count keeps
+     * the tally a single glance-able strip.
+     *
+     * @var int | array<string, ?int> | null
+     */
+    protected int|array|null $columns = 5;
 
     public static function canView(): bool
     {

@@ -97,6 +97,25 @@ it('shows break detail and flags only the break that is over its limit', functio
         ->and($byName['Fresh Fred']['overstayed'])->toBeFalse();
 });
 
+// BK-3 fallback, inherited from the dashboard's break-detail widget when that was
+// removed as a duplicate of this board (S91): a client with no active break categories
+// gets untyped stints, which must read as a plain "Break" with nothing to overstay.
+
+it('shows an untyped break as a plain "Break" with no limit and no overstay', function () {
+    $tenant = Tenant::factory()->create();
+
+    $rows = TenantContext::run($tenant->id, function (): array {
+        floorAgent('Untyped Uma', PresenceStatus::OnBreak, sinceMinutes: 90); // no category
+
+        return (new LiveAgents)->roster();
+    });
+
+    expect($rows)->toHaveCount(1)
+        ->and($rows[0]['breakCategory'])->toBe('Break')
+        ->and($rows[0]['limitMinutes'])->toBeNull()
+        ->and($rows[0]['overstayed'])->toBeFalse();
+});
+
 // --- LB-3: calls today from the shared counting layer (never disagrees with reports) ---
 
 it("counts each agent's calls handled today, today only", function () {

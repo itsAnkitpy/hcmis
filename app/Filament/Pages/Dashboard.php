@@ -10,7 +10,7 @@ use App\Filament\Widgets\CallStatsOverview;
 use App\Filament\Widgets\DirectionSplitChart;
 use App\Filament\Widgets\DispositionMixChart;
 use App\Filament\Widgets\LiveAvailabilitySnapshot;
-use App\Filament\Widgets\OnBreakAgents;
+use App\Filament\Widgets\OperationOverview;
 use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\Tenant;
@@ -76,24 +76,38 @@ class Dashboard extends BaseDashboard
     }
 
     /**
-     * The fixed widget set for the operations dashboard, in display order: the stat
-     * tiles first, then the four charts, then the live availability snapshot. An
-     * explicit list (rather than the panel-wide discovered widgets) keeps the order
-     * deterministic and the board scoped to reporting. Each widget is canView()-gated,
-     * so Filament hides them from users who cannot view calls.
+     * The fixed widget set for the operations dashboard, in display order: the counter
+     * strip, then the period stat tiles, then the four charts, then the live
+     * availability snapshot. An explicit list (rather than the panel-wide discovered
+     * widgets) keeps the order deterministic and the board scoped to reporting. Each
+     * widget is canView()-gated, so Filament hides them from users who cannot view calls.
+     *
+     * The strip goes FIRST on purpose (S92, DialShree parity): it is the size of the
+     * operation — campaigns, leads, users, agents logged in — the frame a manager reads
+     * before any of the period numbers underneath it mean anything. It is the one block
+     * here that ignores the date range, which its own heading says out loud.
+     *
+     * This board answers "how did the period go" — a date range the reader chooses.
+     * "Who is on the floor right now" is a different question that refreshes on its
+     * own clock, and it has its own screen: Live Agents (LB-1…LB-4). The per-agent
+     * break detail that used to sit at the bottom here was the same rows that page
+     * already draws, so it was removed rather than moved (S91). What stays is the
+     * one-line availability tally — the "is anyone there at all" glance a manager
+     * wants without leaving the board, and the only live read that honours the
+     * global-staff client filter.
      *
      * @return array<class-string<Widget> | WidgetConfiguration>
      */
     public function getWidgets(): array
     {
         return [
+            OperationOverview::class,
             CallStatsOverview::class,
             CallsPerDayChart::class,
             DispositionMixChart::class,
             CallsByAgentChart::class,
             DirectionSplitChart::class,
             LiveAvailabilitySnapshot::class,
-            OnBreakAgents::class,
         ];
     }
 

@@ -9,13 +9,12 @@ use App\Filament\Widgets\CallStatsOverview;
 use App\Filament\Widgets\DirectionSplitChart;
 use App\Filament\Widgets\DispositionMixChart;
 use App\Filament\Widgets\LiveAvailabilitySnapshot;
-use App\Filament\Widgets\OnBreakAgents;
+use App\Filament\Widgets\OperationOverview;
 use App\Models\AgentPresence;
-use App\Models\AgentStatusHistory;
-use App\Models\BreakCategory;
 use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\Disposition;
+use App\Models\Lead;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Reporting\ChartPalette;
@@ -40,13 +39,13 @@ afterEach(function () {
 function dashboardWidgets(): array
 {
     return [
+        OperationOverview::class,
         CallStatsOverview::class,
         CallsPerDayChart::class,
         DispositionMixChart::class,
         CallsByAgentChart::class,
         DirectionSplitChart::class,
         LiveAvailabilitySnapshot::class,
-        OnBreakAgents::class,
     ];
 }
 
@@ -283,148 +282,106 @@ it('narrows the live tile to one client for global staff', function () {
     expect($counts[PresenceStatus::Ready->value])->toBe(2); // A's two, never B's three
 });
 
-// --- BK-5: per-agent break detail under the availability counts ---
+// --- The counter strip: the size of the operation, above everything else ---
 
-it('lists agents on break with type, elapsed minutes, and the overstay flag, longest away first', function () {
-    $tenant = Tenant::factory()->create();
+/**
+ * A client with a known shape: 2 campaigns switched on + 1 switched off, 4 leads all
+ * hung off ONE of those campaigns (Lead::factory() makes its own campaign otherwise,
+ * which would inflate the campaign count), 2 users, and 3 board rows of which one has
+ * a dead heartbeat.
+ */
+function seedOperationFixture(Tenant $tenant): void
+{
+    clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    clientUserWithRole($tenant, RoleName::Agent->value);
 
-    TenantContext::run($tenant->id, function () {
-        $lunch = BreakCategory::factory()->withLimit(30)->create(['code' => 'LUNCH_TEST', 'label' => 'Lunch']);
-        $tea = BreakCategory::factory()->withLimit(15)->create(['code' => 'TEA_TEST', 'label' => 'Tea']);
+    TenantContext::run($tenant->id, function (): void {
+        $live = Campaign::factory()->create();
+        Campaign::factory()->create();
+        Campaign::factory()->inactive()->create();
 
-        // 45 minutes into a 30-minute lunch — the red row.
-        $overstayer = User::factory()->create(['name' => 'Asha']);
-        AgentPresence::factory()->forUser($overstayer)->status(PresenceStatus::OnBreak)->create();
-        AgentStatusHistory::factory()->forUser($overstayer)->onBreak($lunch)
-            ->create(['started_at' => now()->subMinutes(45)]);
+        Lead::factory()->count(4)->forCampaign($live)->create();
 
-        // 5 minutes into a 15-minute tea — within its limit.
-        $withinLimit = User::factory()->create(['name' => 'Bilal']);
-        AgentPresence::factory()->forUser($withinLimit)->status(PresenceStatus::OnBreak)->create();
-        AgentStatusHistory::factory()->forUser($withinLimit)->onBreak($tea)
-            ->create(['started_at' => now()->subMinutes(5)]);
+        AgentPresence::factory()->count(2)->status(PresenceStatus::Ready)->create();
+        AgentPresence::factory()->status(PresenceStatus::Ready)->stale()->create();
     });
+}
 
-    $rows = TenantContext::run(
+it('counts campaigns, leads, users and agents on the floor', function () {
+    $tenant = Tenant::factory()->create();
+    seedOperationFixture($tenant);
+
+    $stats = TenantContext::run(
         $tenant->id,
-        fn (): array => readWidget(widgetWith(OnBreakAgents::class), 'onBreakRows'),
+        fn (): array => readWidget(widgetWith(OperationOverview::class), 'getStats'),
     );
 
-    expect($rows)->toHaveCount(2)
-        ->and($rows[0]['name'])->toBe('Asha')
-        ->and($rows[0]['category'])->toBe('Lunch')
-        ->and($rows[0]['elapsedMinutes'])->toBe(45)
-        ->and($rows[0]['limitMinutes'])->toBe(30)
-        ->and($rows[0]['overstayed'])->toBeTrue()
-        ->and($rows[1]['name'])->toBe('Bilal')
-        ->and($rows[1]['overstayed'])->toBeFalse();
+    expect($stats[0]->getValue())->toBe(2)  // switched-on campaigns only — the third is off
+        ->and($stats[1]->getValue())->toBe(4)
+        ->and($stats[2]->getValue())->toBe(2)
+        ->and($stats[3]->getValue())->toBe(2); // the stale heartbeat reads Offline, not logged in
 });
 
-it('shows an untyped break as a plain "Break" with no limit and no overstay', function () {
-    $tenant = Tenant::factory()->create();
-
-    TenantContext::run($tenant->id, function () {
-        $agent = User::factory()->create();
-        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
-        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)
-            ->create(['started_at' => now()->subMinutes(90)]);
-    });
-
-    $rows = TenantContext::run(
-        $tenant->id,
-        fn (): array => readWidget(widgetWith(OnBreakAgents::class), 'onBreakRows'),
-    );
-
-    expect($rows)->toHaveCount(1)
-        ->and($rows[0]['category'])->toBe('Break')
-        ->and($rows[0]['limitMinutes'])->toBeNull()
-        ->and($rows[0]['overstayed'])->toBeFalse(); // no limit — nothing to overstay
-});
-
-it('hides a dangling break stint whose heartbeat went stale, matching the Offline count above', function () {
-    $tenant = Tenant::factory()->create();
-
-    // Open break stint, but the session died: the presence heartbeat is stale, so
-    // the counts above read this agent as Offline (BK-6) — the detail list must
-    // not contradict them by still showing "on break".
-    TenantContext::run($tenant->id, function () {
-        $agent = User::factory()->create();
-        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->stale()->create();
-        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)
-            ->create(['started_at' => now()->subMinutes(20)]);
-    });
-
-    $rows = TenantContext::run(
-        $tenant->id,
-        fn (): array => readWidget(widgetWith(OnBreakAgents::class), 'onBreakRows'),
-    );
-
-    expect($rows)->toBe([]);
-});
-
-it('walls the break detail to the current client', function () {
+it('walls the counter strip to the current client', function () {
     $clientA = Tenant::factory()->create();
     $clientB = Tenant::factory()->create();
+    seedOperationFixture($clientA);
+    seedOperationFixture($clientB);
 
-    TenantContext::run($clientB->id, function () {
-        $agent = User::factory()->create();
-        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
-        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
-    });
-
-    $rows = TenantContext::run(
+    $stats = TenantContext::run(
         $clientA->id,
-        fn (): array => readWidget(widgetWith(OnBreakAgents::class), 'onBreakRows'),
+        fn (): array => readWidget(widgetWith(OperationOverview::class), 'getStats'),
     );
 
-    expect($rows)->toBe([]); // B's on-break agent never leaks into A's board
+    // A's own numbers, never doubled by B's identical fixture — including Users,
+    // which carries no tenant wall of its own and is scoped by membership instead.
+    expect(array_map(fn ($stat) => $stat->getValue(), $stats))->toBe([2, 4, 2, 2]);
 });
 
-it('narrows the break detail to one client for global staff', function () {
+it('narrows the counter strip to one client for global staff', function () {
     $clientA = Tenant::factory()->create();
     $clientB = Tenant::factory()->create();
+    seedOperationFixture($clientA);
+    seedOperationFixture($clientB);
 
-    foreach ([$clientA, $clientB] as $client) {
-        TenantContext::run($client->id, function () {
-            $agent = User::factory()->create();
-            AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
-            AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
-        });
-    }
-
-    // Global cross-tenant view, narrowed to client A via the shared filter.
     TenantContext::applyWebRequest(null, crossTenant: true);
 
-    $rows = readWidget(
-        widgetWith(OnBreakAgents::class, ['clientId' => $clientA->id]),
-        'onBreakRows',
-    );
+    $stats = readWidget(widgetWith(OperationOverview::class, ['clientId' => $clientA->id]), 'getStats');
 
-    expect($rows)->toHaveCount(1); // A's one agent, never B's
+    expect(array_map(fn ($stat) => $stat->getValue(), $stats))->toBe([2, 4, 2, 2]);
 });
 
-it('renders the break detail view with the red overstay marker', function () {
+it('rolls the counter strip across every client when global staff pick none', function () {
+    $clientA = Tenant::factory()->create();
+    $clientB = Tenant::factory()->create();
+    seedOperationFixture($clientA);
+    seedOperationFixture($clientB);
+
+    // HC's own staff belong to no client, so they must not swell the Users count —
+    // the strip measures the clients' operation, not the people watching it.
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $stats = readWidget(widgetWith(OperationOverview::class), 'getStats');
+
+    expect(array_map(fn ($stat) => $stat->getValue(), $stats))->toBe([4, 8, 4, 4]);
+});
+
+it('ignores the date range — the strip is inventory, not history', function () {
     $tenant = Tenant::factory()->create();
-    $teamLeader = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    seedOperationFixture($tenant);
 
-    TenantContext::run($tenant->id, function () {
-        $lunch = BreakCategory::factory()->withLimit(30)->create(['code' => 'LUNCH_TEST', 'label' => 'Lunch']);
-        $agent = User::factory()->create(['name' => 'Asha']);
-        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create();
-        AgentStatusHistory::factory()->forUser($agent)->onBreak($lunch)
-            ->create(['started_at' => now()->subMinutes(45)]);
-    });
+    // A window with nothing in it. The tiles below the strip would empty out; these
+    // four must not move, because none of them is a thing that happened in a period.
+    $stats = TenantContext::run($tenant->id, fn (): array => readWidget(
+        widgetWith(OperationOverview::class, [
+            'startDate' => now()->subYears(2)->toDateString(),
+            'endDate' => now()->subYears(2)->addDay()->toDateString(),
+        ]),
+        'getStats',
+    ));
 
-    $this->actingAs($teamLeader);
-    TenantContext::applyWebRequest($tenant->id, crossTenant: false);
-
-    // Mounts the widget's actual blade — the row, its break type, and the
-    // over-the-limit marker all reach the rendered page.
-    Livewire::test(OnBreakAgents::class)
-        ->assertOk()
-        ->assertSee('Asha')
-        ->assertSee('Lunch')
-        ->assertSee('over the limit');
+    expect(array_map(fn ($stat) => $stat->getValue(), $stats))->toBe([2, 4, 2, 2]);
 });
 
 // --- The customized dashboard mounts with its widgets for a permitted user ---
