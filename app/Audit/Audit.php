@@ -2,6 +2,7 @@
 
 namespace App\Audit;
 
+use App\Models\AgentPresence;
 use App\Models\Call;
 use App\Models\Callback;
 use App\Models\Disposition;
@@ -204,6 +205,33 @@ class Audit
             ->event('recording_accessed')
             ->withProperties(['mode' => $mode, 'call_id' => $call->id])
             ->log("call recording {$mode}"));
+    }
+
+    /**
+     * Record that a supervisor forced a stuck agent offline from the Live Agents board
+     * (LB-15). On the `presence` stream: the board row is overwritten in place and keeps
+     * no history of its own, so without this line an agent asking "why was I logged out
+     * mid-shift?" has no answer. The causer is the supervisor from web auth.
+     *
+     * The subject is the agent's BOARD ROW, never the agent. Every audit row is filed
+     * under a client, and ActivityLog works that out from the subject — the users table
+     * has no client column (one person can work for more than one client), so a note
+     * filed against the agent falls back to whichever client the presser is sitting in.
+     * A team leader sits in one; our own global staff sit in none. The note would then be
+     * filed nowhere and nobody inside that client could ever see it happened. The board
+     * row is client-owned, so this reads the right client for both.
+     */
+    public static function agentForcedOffline(AgentPresence $presence): void
+    {
+        self::record('presence', fn (ActivityLogger $log) => $log
+            ->performedOn($presence)
+            ->event('forced_offline')
+            ->withProperties(self::withoutNulls([
+                'agent_id' => $presence->user_id,
+                'agent_name' => $presence->user?->name,
+                'was_showing' => $presence->status->value,
+            ]))
+            ->log('agent forced offline'));
     }
 
     /**

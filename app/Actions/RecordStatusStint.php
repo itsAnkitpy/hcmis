@@ -9,11 +9,10 @@ use App\Models\AgentStatusHistory;
 use App\Models\BreakCategory;
 
 /**
- * The history half of the single door (BK-2): called by AgentConsole::setPresence()
- * — and nowhere else — inside the same transaction as the board upsert, so the
- * board and its memory can never disagree. Closes the agent's open stint and opens
- * the next one; repeating the SAME status in a live session is a no-op (no
- * duplicate stints).
+ * The history half of the single door (BK-2): called by SetAgentPresence — and
+ * nowhere else — inside the same transaction as the board upsert, so the board and
+ * its memory can never disagree. Closes the agent's open stint and opens the next
+ * one; repeating the SAME status in a live session is a no-op (no duplicate stints).
  *
  * The BK-6 lazy close lives here: when the open stint belongs to a session that
  * went stale (heartbeat quiet past the window), it is closed retroactively at
@@ -37,8 +36,9 @@ class RecordStatusStint
      * @param  PresenceStatus  $status  the status just written to the board
      * @param  BreakCategory|null  $category  resolved + active break type (break stints only)
      * @param  AgentPresence|null  $previous  the board row BEFORE this write (staleness evidence)
+     * @param  bool  $forced  a supervisor ended this session rather than the agent (LB-15)
      */
-    public static function run(int $userId, PresenceStatus $status, ?BreakCategory $category, ?AgentPresence $previous): void
+    public static function run(int $userId, PresenceStatus $status, ?BreakCategory $category, ?AgentPresence $previous, bool $forced = false): void
     {
         $open = AgentStatusHistory::query()
             ->open()
@@ -58,7 +58,16 @@ class RecordStatusStint
                 // BK-6's shared arithmetic lives on the model (staleEndCutoff), so
                 // this physical close and every reader's virtual close agree.
                 'ended_at' => $sessionWentStale ? $open->staleEndCutoff($previous) : now(),
-                'ended_via' => $sessionWentStale ? StintEndedVia::Stale : StintEndedVia::Changed,
+                // Stale wins over forced ON PURPOSE (LB-15): when a supervisor clears an
+                // agent whose screen really had died, the honest end is "last heartbeat +
+                // the stale window" — Priya stopped working at 2:15pm, not at 3:47pm when
+                // somebody noticed. Forced is for the other case: a live, answering screen
+                // whose owner has plainly gone home.
+                'ended_via' => match (true) {
+                    $sessionWentStale => StintEndedVia::Stale,
+                    $forced => StintEndedVia::Forced,
+                    default => StintEndedVia::Changed,
+                },
             ]);
         }
 

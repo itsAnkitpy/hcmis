@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Filament\Pages;
 
 use App\Actions\AdvanceLeadStatus;
-use App\Actions\RecordStatusStint;
+use App\Actions\SetAgentPresence;
 use App\Audit\Audit;
 use App\Enums\CallbackStatus;
 use App\Enums\CallDirection;
@@ -149,10 +149,12 @@ class AgentConsole extends Page
      * the upsert). The browser calls this over $wire on each state transition. Renderless:
      * it fires mid-call (entering on-call / wrap-up), so it must not morph the live console.
      *
-     * BK-2: this is also the single door to the status HISTORY — the board upsert and
-     * the stint close/open share one transaction (RecordStatusStint), so the board and
-     * its memory can never disagree. The board row is read BEFORE the upsert because
-     * the lazy stale-close (BK-6) judges the dying session by its pre-write heartbeat.
+     * BK-2: the board upsert and the stint close/open share one transaction, so the
+     * board and its memory can never disagree. That transaction now lives in
+     * SetAgentPresence — the single door, moved out in slice 5 so a supervisor forcing
+     * a frozen screen offline (LB-15b) goes through the same one instead of a copy.
+     * This method's job is what it always was: work out WHO (auth, never the browser)
+     * and WHAT, then walk through the door.
      *
      * $breakCategoryId is the picker's break type (BK-3, browser-supplied): resolved
      * server-side to an ACTIVE category in the agent's own client — RLS walls foreign
@@ -168,16 +170,7 @@ class AgentConsole extends Page
 
         $category = $this->resolveBreakCategory($presence, $breakCategoryId);
 
-        DB::transaction(function () use ($presence, $category): void {
-            $previous = AgentPresence::query()->where('user_id', auth()->id())->first();
-
-            AgentPresence::query()->updateOrCreate(
-                ['user_id' => auth()->id()],
-                ['status' => $presence, 'last_seen_at' => now()],
-            );
-
-            RecordStatusStint::run((int) auth()->id(), $presence, $category, $previous);
-        });
+        SetAgentPresence::run((int) auth()->id(), $presence, $category);
     }
 
     /**
