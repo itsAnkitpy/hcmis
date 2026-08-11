@@ -666,6 +666,23 @@ class AgentConsole extends Page
         $this->callPartyNumber = $customerNumber;
         $this->callCorrelationId = (string) Str::uuid();
 
+        // Call Stats CS-4: say which client this call is for. An outbound call used to
+        // belong to nobody — the listener only ever learned the client from an INBOUND
+        // call's dialled number — so the live call counts would have quietly dropped
+        // every outbound call in progress. This console is already sitting in one client,
+        // so it simply says which, as one more ordered value on the leg's label. Nothing
+        // is looked up: working it out afterwards from the person who dialled would be a
+        // guess, because someone can belong to more than one client.
+        //
+        // Our own global staff dial with no client in scope; they send nothing and their
+        // calls stay uncounted, which is honest rather than guessed.
+        $tagDetails = [$customerNumber, $this->callCorrelationId, (string) auth()->id()];
+        $tenantId = TenantContext::id();
+
+        if ($tenantId !== null) {
+            $tagDetails[] = (string) $tenantId;
+        }
+
         app(TelephonyProvider::class)->placeCall(
             // Ring the LOGGED-IN agent's OWN phone (B2.2b Fold A directory), not the one
             // fixed endpoint — so a 2nd agent's outbound leg rings 1004, not 1003 (closes
@@ -677,12 +694,9 @@ class AgentConsole extends Page
             // B2.4a (TD-4 fold): thread the dialing agent's user id onto the agent leg
             // (the 4th ordered tag value) so the handler retains WHO is serving and an
             // OUTBOUND call can be transferred too — the transfer signal finds the
-            // B2.4a (TD-4 fold): thread the dialing agent's user id onto the agent leg
-            // (the 4th ordered tag value) so the handler retains WHO is serving and an
-            // OUTBOUND call can be transferred too — the transfer signal finds the
             // handler by it. Backwards-compatible: the flow's >= 2 arg guard tolerates
-            // the extra value, and CP-B2.4a demos the inbound path either way.
-            tagDetails: [$customerNumber, $this->callCorrelationId, (string) auth()->id()],
+            // the extra values, and CP-B2.4a demos the inbound path either way.
+            tagDetails: $tagDetails,
         );
     }
 

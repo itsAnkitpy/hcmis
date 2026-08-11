@@ -604,6 +604,33 @@ it('leaves alone an agent who is already offline', function () {
     });
 });
 
+// --- LB-4: the running clock behind the "For" column ---
+
+it('hands the browser the moment each status began, and a readable fallback', function () {
+    $tenant = Tenant::factory()->create();
+    $leader = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+
+    TenantContext::run($tenant->id, function () {
+        floorAgent('Ready Rita', PresenceStatus::Ready, sinceMinutes: 65);
+    });
+
+    $this->actingAs($leader);
+    TenantContext::applyWebRequest($tenant->id, crossTenant: false);
+
+    [$started, $stint] = TenantContext::run($tenant->id, fn (): array => [
+        (new LiveAgents)->roster()[0]['startedAtMs'],
+        AgentStatusHistory::query()->open()->first(),
+    ]);
+
+    // The stint's own start, to the millisecond — not a duration worked out on the
+    // server, so a throttled background tab is right again the moment it is looked at.
+    expect($started)->toBe($stint->started_at->getTimestampMs());
+
+    Livewire::test(LiveAgents::class)
+        ->assertSee("clock({$started})", escape: false) // the browser counts up from it
+        ->assertSee('1h 5m');                           // and this shows if its JS never runs
+});
+
 // --- LB-13: the Client column, for our own global staff only ---
 
 it('shows the Client column to global staff and hides it from a team leader', function () {

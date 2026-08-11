@@ -11,11 +11,14 @@ use App\Events\Telephony\RecordingFailed;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\AriWebSocket;
 use App\Telephony\Flows\Switchboard;
+use App\Telephony\LiveCallCounts;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * The event side of B1 (D2/D5): one long-lived process holding the ARI
@@ -71,11 +74,26 @@ class TelephonyListen extends Command
      */
     private const SWEEP_EVERY_SECONDS = 1.0;
 
+    /**
+     * How often the three live call numbers are left where the website can read them
+     * (Call Stats CS-2b). Its own gate for the same reason the sweep above has one: the
+     * five-second read window only paces a QUIET line, and a busy floor — the one where
+     * these numbers matter most — would otherwise write to the cache, a database table
+     * here, hundreds of times a second. The board refreshes every fifteen seconds and a
+     * note lives for twenty, so nothing downstream can tell the difference.
+     */
+    private const PUBLISH_EVERY_SECONDS = 5.0;
+
     /** When the waiting room was last swept (a monotonic-enough clock for a 1s gate). */
     private float $lastSweptAt = 0.0;
 
-    public function __construct(private readonly TelephonyProvider $telephony)
-    {
+    /** When the call counts were last published (the same kind of clock, same job). */
+    private float $lastPublishedAt = 0.0;
+
+    public function __construct(
+        private readonly TelephonyProvider $telephony,
+        private readonly LiveCallCounts $counts,
+    ) {
         parent::__construct();
     }
 
@@ -134,6 +152,7 @@ class TelephonyListen extends Command
             $event = $pipe->readEvent(self::READ_TIMEOUT_SECONDS);
 
             $this->sweepWaitingCallers($switchboard);
+            $this->publishCallCounts($switchboard);
 
             if ($event === null) {
                 $this->assertPipeAlive($pipe);
@@ -157,6 +176,35 @@ class TelephonyListen extends Command
 
         $this->lastSweptAt = $now;
         $switchboard->sweepWaiting();
+    }
+
+    /**
+     * Leave the three live call numbers where the website can read them, at most once
+     * every PUBLISH_EVERY_SECONDS (Call Stats CS-2b). Nothing new runs for this: it rides
+     * the loop that is already going round. Telling a client whose last call just ended
+     * that it is now at zero is the pigeonhole's own job (LiveCallCounts::publish).
+     *
+     * Best-effort, the shape the missed-call writer already uses: a cache write that fails
+     * must never take the listener — and every live call with it — down with it. The notes
+     * expire on their own, so the worst a missed publish costs is a board that goes back to
+     * saying the phone service is not reporting.
+     */
+    private function publishCallCounts(Switchboard $switchboard): void
+    {
+        $now = microtime(true);
+
+        if ($now - $this->lastPublishedAt < self::PUBLISH_EVERY_SECONDS) {
+            return;
+        }
+
+        $this->lastPublishedAt = $now;
+
+        rescue(
+            fn () => $this->counts->publish($switchboard->tallyByTenant()),
+            fn (Throwable $exception) => Log::warning('Live call counts were not published — the board will say the phone service is not reporting.', [
+                'error' => $exception->getMessage(),
+            ]),
+        );
     }
 
     private function assertPipeAlive(AriWebSocket $pipe): void

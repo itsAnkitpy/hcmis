@@ -301,6 +301,47 @@ class Switchboard implements HandlerRegistry
     }
 
     /**
+     * The three live call numbers, per client (Call Stats CS-1): how many calls are
+     * connected, how many are ringing, and how many callers are holding. Nothing is
+     * measured or invented — every live call already carries the state that answers this,
+     * and the phone-book already holds every live call. Walks the SAME deduped list the
+     * waiting-room sweep does, so a call is counted exactly once however many legs it has.
+     *
+     * A call mid-transfer or in a 3-way (AddingAgent) counts as ACTIVE on purpose: that
+     * caller is talking to somebody. Counting it otherwise would make the number dip every
+     * time an agent transfers a call.
+     *
+     * A call with no client yet — a handler still Idle, an inbound call on a number we do
+     * not recognise — is left out of every count rather than lumped into a default.
+     *
+     * @return array<int, array{active: int, ringing: int, waiting: int}>
+     */
+    public function tallyByTenant(): array
+    {
+        $counts = [];
+
+        foreach ($this->uniqueHandlers() as $handler) {
+            $tenantId = $handler->tenantId();
+
+            $number = match ($handler->state()) {
+                CallFlowState::InCall, CallFlowState::AddingAgent => 'active',
+                CallFlowState::RingingAgent, CallFlowState::RingingCustomer => 'ringing',
+                CallFlowState::Waiting => 'waiting',
+                CallFlowState::Idle => null,
+            };
+
+            if ($tenantId === null || $number === null) {
+                continue;
+            }
+
+            $counts[$tenantId] ??= ['active' => 0, 'ringing' => 0, 'waiting' => 0];
+            $counts[$tenantId][$number]++;
+        }
+
+        return $counts;
+    }
+
+    /**
      * How many live calls the switchboard is holding (distinct handlers, since a call
      * holds two legs). A monitoring hook for the FD-8 "stranded calls" scale-out signal,
      * and the proof a disposed handler is truly forgotten (its legs leave the phone-book).

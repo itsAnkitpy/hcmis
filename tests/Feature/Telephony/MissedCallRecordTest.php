@@ -137,6 +137,29 @@ it('writes nothing for a call that reached an agent — the wrap-up owns that ro
     expect(allCalls())->toHaveCount(0);
 });
 
+it('writes nothing when an outbound customer never picks up, now that outbound calls carry a client (CS-4)', function () {
+    $tenant = Tenant::factory()->create();
+    fakeAgentRouter(6);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+    $telephony->shouldReceive('hangup')->once()->with('agent-leg');
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+
+    // The console dialled from inside a client, so the client now rides in on the label
+    // (the fifth value). Before CS-4 an outbound call belonged to nobody, and THAT is what
+    // this write used to say it relied on — so this guard walks straight past the old
+    // reason. What actually keeps the row unwritten is that an outbound call has no
+    // arrival time: only an inbound caller gets one, and the write needs it.
+    $flow->handle(stasisStart('agent-leg', ['agent', '5550000', 'uuid-1', '6', (string) $tenant->id]));
+    $flow->handle(channelDestroyed('customer-leg'));   // rang out — nobody home
+
+    // The row for an outbound call belongs to the agent's own screen at wrap-up (D2).
+    expect(allCalls())->toHaveCount(0);
+});
+
 it('writes nothing when the dialled number belongs to no client (ND-4 — a row must have an owner)', function () {
     fakeAgentRouter(6);   // would hand back an agent, but the board is never read without an owner
 

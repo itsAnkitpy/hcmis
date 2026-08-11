@@ -11,8 +11,10 @@ use App\Enums\RoleName;
 use App\Models\AgentPresence;
 use App\Models\AgentStatusHistory;
 use App\Models\Call;
+use App\Models\Tenant;
 use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
+use App\Telephony\LiveCallCounts;
 use App\Tenancy\TenantContext;
 use BackedEnum;
 use Filament\Notifications\Notification;
@@ -113,7 +115,7 @@ class LiveAgents extends Page
      * and today's per-agent call count from the counting layer. All tenant-walled by
      * the request context.
      *
-     * @return array<int, array{id: int|null, name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int, client: string|null, canLogOut: bool}>
+     * @return array<int, array{id: int|null, name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, startedAtMs: int|null, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int, client: string|null, canLogOut: bool}>
      */
     public function roster(): array
     {
@@ -152,6 +154,12 @@ class LiveAgents extends Page
                 'statusLabel' => $status->label(),
                 'statusColor' => $this->statusColor($status),
                 'inStatusMinutes' => $stint ? (int) $stint->started_at->diffInMinutes(now()) : 0,
+                // When this status began, as a plain instant — the browser counts up from
+                // it once a second (LB-4). Sent as an absolute moment rather than a
+                // duration so a tab that Chrome throttles in the background shows the
+                // right number the instant it is looked at again, instead of resuming a
+                // counter that stopped. Null when there is no open stint to count from.
+                'startedAtMs' => $stint?->started_at->getTimestampMs(),
                 'breakCategory' => $onBreak ? ($stint?->breakCategory?->label ?? 'Break') : null,
                 'limitMinutes' => $limit,
                 'overstayed' => $limit !== null && now()->greaterThan($stint->started_at->copy()->addMinutes($limit)),
@@ -248,6 +256,41 @@ class LiveAgents extends Page
         $tabs[] = ['key' => 'stuck', 'label' => 'Stuck', 'count' => $stuckCount];
 
         return $tabs;
+    }
+
+    /**
+     * The three live call numbers (Call Stats CS-5): how many calls are connected right
+     * now, how many are ringing, and how many callers are holding. Read out of the
+     * pigeonhole the listener leaves them in — nothing is counted here, and no network
+     * call is made to the phone engine on a page load.
+     *
+     * Null means the phone service is not reporting (CS-7), which the board must SAY
+     * rather than draw as three zeros: a calm floor and a dead listener look identical
+     * otherwise, and only one of them needs somebody to do something about it.
+     *
+     * Who is counted follows the same line as the Client column (LB-13): a team leader
+     * sees their own client, our own global staff see every client added together. Notes
+     * are asked for by name because a cache cannot be asked for "everything with this
+     * prefix" — so the client list is read here, from our own database.
+     *
+     * No filtering by client status: a suspended client has no live calls, so it simply
+     * has no note.
+     *
+     * @return array{active: int, ringing: int, waiting: int}|null
+     */
+    public function callStats(): ?array
+    {
+        $counts = app(LiveCallCounts::class);
+
+        if (! $counts->isReporting()) {
+            return null;
+        }
+
+        $tenantId = TenantContext::id();
+
+        return $counts->read($this->showsClient()
+            ? array_map('intval', Tenant::query()->pluck('id')->all())
+            : ($tenantId === null ? [] : [$tenantId]));
     }
 
     /**

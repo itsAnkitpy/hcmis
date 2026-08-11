@@ -1,4 +1,33 @@
 <x-filament-panels::page>
+    {{-- The running clock behind the "For" column, copied from the agent console's own
+         strip (agent-console.js: `now` + formatClock) so a duration is spelled the same
+         on the agent's screen and the supervisor's — 4:07, or 1:02:07 past the hour.
+
+         Three deliberate details:
+          - it lives OUTSIDE the polled block, so the 15-second refresh can never replace
+            the element and leave a second timer running behind the first;
+          - `skew` corrects the browser's clock against the server's once, at page load,
+            so a laptop whose clock is five minutes out still shows the true duration;
+          - the tick only re-reads the wall clock. Nothing is counted up, so a tab that
+            Chrome throttles in the background (the S93 lesson) is right again the moment
+            it is looked at, and no server traffic rides this at all. --}}
+    <div
+        x-data="{
+            now: Date.now(),
+            skew: 0,
+            clock(startedAtMs) {
+                const total = Math.max(0, Math.floor((this.now - this.skew - startedAtMs) / 1000));
+                const pad = (n) => String(n).padStart(2, '0');
+                const hours = Math.floor(total / 3600);
+                const minutes = Math.floor((total % 3600) / 60);
+
+                return hours > 0
+                    ? hours + ':' + pad(minutes) + ':' + pad(total % 60)
+                    : minutes + ':' + pad(total % 60);
+            },
+        }"
+        x-init="skew = Date.now() - {{ now()->getTimestampMs() }}; setInterval(() => (now = Date.now()), 1000)"
+    >
     {{-- LB-4: the board re-asks the server every 15s so a supervisor watching it sees
          agents move between states without touching anything. The whole roster + header
          recompute on each poll (roster() below). --}}
@@ -41,6 +70,30 @@
                     x-on:click="document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()"
                 >Fullscreen</x-filament::button>
             </div>
+        </div>
+
+        {{-- Call Stats CS-5: the three numbers about the PHONE LINES, in their own
+             labelled group so they never read as being about the people in the tabs
+             above. Active and the "On a call" tab can legitimately disagree — the tab
+             counts agents whose own screen says they are on a call, this counts calls the
+             phone engine is carrying — and the label is what keeps that from becoming a
+             support ticket.
+
+             CS-7: when the phone service is not reporting, say so. Three zeros on a calm
+             floor and three zeros on a dead listener look the same, and the second one is
+             the situation somebody has to act on. --}}
+        @php $callStats = $this->callStats(); @endphp
+        <div class="mb-4 flex flex-wrap items-center gap-2 text-sm">
+            <span class="font-medium text-gray-500 dark:text-gray-400">Calls right now</span>
+            @if ($callStats === null)
+                <span class="text-gray-400">&mdash; phone service not reporting</span>
+            @else
+                <span class="tabular-nums">Active <span class="font-semibold">{{ $callStats['active'] }}</span></span>
+                <span class="text-gray-400">&middot;</span>
+                <span class="tabular-nums">Ringing <span class="font-semibold">{{ $callStats['ringing'] }}</span></span>
+                <span class="text-gray-400">&middot;</span>
+                <span class="tabular-nums">Waiting <span class="font-semibold">{{ $callStats['waiting'] }}</span></span>
+            @endif
         </div>
 
         {{-- LB-6: the Stuck tab is its own, smaller table — these people are not on the
@@ -194,7 +247,15 @@
                                 </td>
                                 <td class="px-3 py-2 tabular-nums text-gray-500 dark:text-gray-400" style="text-align:left">
                                     @php $minutes = $row['inStatusMinutes']; @endphp
-                                    {{ $minutes >= 60 ? intdiv($minutes, 60) . 'h ' . ($minutes % 60) . 'm' : $minutes . 'm' }}
+                                    {{-- The server-rendered figure stays inside the span as the
+                                         fallback: Alpine overwrites it on init, but if the page's
+                                         JavaScript never runs, the most-watched column on the board
+                                         still reads correctly instead of going blank. --}}
+                                    @if ($row['startedAtMs'] !== null)
+                                        <span x-text="clock({{ $row['startedAtMs'] }})">{{ $minutes >= 60 ? intdiv($minutes, 60) . 'h ' . ($minutes % 60) . 'm' : $minutes . 'm' }}</span>
+                                    @else
+                                        <span class="text-gray-400">—</span>
+                                    @endif
                                 </td>
                                 <td class="px-3 py-2" style="text-align:left">
                                     @if ($row['breakCategory'] !== null)
@@ -252,5 +313,6 @@
             </div>
         </x-filament::section>
         @endif
+    </div>
     </div>
 </x-filament-panels::page>

@@ -229,6 +229,24 @@ class CallToAgentFlow
     }
 
     /**
+     * Where this call is in its lifecycle, and which client it belongs to (Call Stats
+     * CS-1). The switchboard's tally is the only reader: it walks the live calls and
+     * sorts them into the three numbers a team leader watches. Read-only — nothing
+     * outside may set either, and a call whose client is not known yet (an inbound one
+     * on an unrecognised number, a handler still Idle) reports null and is left out of
+     * every count rather than added to a default.
+     */
+    public function state(): CallFlowState
+    {
+        return $this->state;
+    }
+
+    public function tenantId(): ?int
+    {
+        return $this->tenantId;
+    }
+
+    /**
      * Feed the flow one raw engine event. It never throws on a refused verb — a
      * mid-call telephony error aborts that one call and the flow resets, so the
      * listener keeps running. A lost pipe (AriConnectionLost) is the listener's
@@ -279,11 +297,12 @@ class CallToAgentFlow
      *   ['snoop']            -> our recording taps; infrastructure, ignored.
      *   ['agent']            -> an agent leg WE placed (inbound pickup, or a
      *                           transfer/conference's added agent) answering.
-     *   ['agent', <number>, <uuid?>, <agentId?>]
+     *   ['agent', <number>, <uuid?>, <agentId?>, <tenantId?>]
      *                        -> outbound entry: the agent leg, carrying the customer
      *                           number to dial next (agent-first, CP-O0), the call's
-     *                           tracking number (the B3 UUID), and the serving agent's
-     *                           user id (B2.4a, so an outbound call is transferable).
+     *                           tracking number (the B3 UUID), the serving agent's
+     *                           user id (B2.4a, so an outbound call is transferable),
+     *                           and the client the console was sitting in (CS-4).
      *   ['outbound']         -> outbound customer pickup (the customer leg we placed).
      *   []                   -> an untagged outside caller (inbound entry).
      *
@@ -318,15 +337,17 @@ class CallToAgentFlow
         }
 
         // Outbound entry (agent-first): the agent's own leg arrives first carrying the
-        // customer's number (arg 1), the call's UUID (arg 2), and the serving agent's
-        // user id (arg 3). >= 2 tolerates the pre-B3 two-arg shape, the three-arg one,
-        // and the four-arg one — each trailing detail is optional, default null.
+        // customer's number (arg 1), the call's UUID (arg 2), the serving agent's user
+        // id (arg 3), and the client the console dialled from (arg 4, CS-4). >= 2
+        // tolerates every shape from the pre-B3 two-arg leg upwards — each trailing
+        // detail is optional, default null.
         if (is_array($args) && count($args) >= 2 && $args[0] === 'agent' && $this->state === CallFlowState::Idle) {
             $this->beginOutboundCall(
                 $legId,
                 (string) $args[1],
                 isset($args[2]) ? (string) $args[2] : null,
                 isset($args[3]) ? (int) $args[3] : null,
+                isset($args[4]) ? (int) $args[4] : null,
             );
 
             return;
@@ -720,8 +741,16 @@ class CallToAgentFlow
      * built to save would be the ones invisible to every call report.
      *
      * Best-effort (rescue + tenant-scoped run, the ticket-handoff shape): a failed write
-     * logs a warning and must never affect a live call. A no-op on an outbound call and
-     * on an inbound one whose client was never known — both leave `tenantId` null.
+     * logs a warning and must never affect a live call. A no-op on an inbound call whose
+     * client was never known (`tenantId` null — an unrecognised number).
+     *
+     * 🔴 IT IS STILL A NO-OP ON OUTBOUND, but no longer for the reason this comment used
+     * to give (CS-4). Outbound calls now carry a client, so `tenantId` is no longer what
+     * keeps them out. Two other things do, and both still hold: `startedAt` is set only
+     * on the inbound path (beginCall), and the guard below reads it; and the one other way
+     * in, recordMissedCallIfNeverConnected(), fires only from Waiting or RingingAgent,
+     * neither of which an outbound call ever reaches. An outbound call's row belongs to
+     * the agent's own screen at wrap-up (D2) — writing one here would duplicate it.
      */
     private function recordMissedCall(CallOutcome $outcome): void
     {
@@ -799,10 +828,18 @@ class CallToAgentFlow
      * onto callerLegId so the join/record/teardown below reuse unchanged. The
      * bare number rides as a clean arg; the engine-specific endpoint prefix and
      * the single outbound caller-ID (O2) are read from config here.
+     *
+     * The client rides in on the label too (CS-4). An outbound call used to belong to
+     * nobody, so the live call counts would have silently dropped every one of them —
+     * and the Active number would be wrong on any floor doing outbound work. The console
+     * that dialled was already sitting in one client, so it simply says which; nothing is
+     * looked up or guessed here. Null when our own global staff dial with no client in
+     * scope, which leaves that call out of the counts rather than in a made-up one.
      */
-    private function beginOutboundCall(string $agentLegId, string $customerNumber, ?string $correlationId = null, ?int $servingAgentId = null): void
+    private function beginOutboundCall(string $agentLegId, string $customerNumber, ?string $correlationId = null, ?int $servingAgentId = null, ?int $tenantId = null): void
     {
         $this->correlationId = $correlationId;
+        $this->tenantId = $tenantId;
         // Outbound reuses the web's tracking number as the ticket (FD-3); if a pre-B3
         // two-arg leg carried none, mint one so every call still has a unique ticket.
         $this->ticketNumber = $correlationId ?? (string) Str::uuid();
@@ -823,6 +860,7 @@ class CallToAgentFlow
 
         Log::info('Outbound call: agent connected, ringing the customer.', [
             'ticket' => $this->ticketNumber,
+            'tenant' => $tenantId,
             'agent' => $agentLegId,
             'customer' => $this->callerLegId,
             'customerNumber' => $customerNumber,
