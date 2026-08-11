@@ -93,6 +93,7 @@
                                                 <x-filament::button
                                                     size="xs"
                                                     color="danger"
+                                                    outlined
                                                     wire:click="forceLogOut({{ $row['id'] }})"
                                                     wire:confirm="{{ $row['name'] }} last responded {{ $quiet }} minutes ago. If they are still working, this will cut them off."
                                                 >Log out</x-filament::button>
@@ -121,16 +122,25 @@
                     <thead>
                         {{-- LB-11: three headings sort, two do not. Status would just
                              return the order the page already opens in, and Break is
-                             mostly dashes. The arrow shows only on the heading in use,
-                             so a board in its default urgency order shows none at all. --}}
+                             mostly dashes.
+
+                             Every sortable heading carries a faint up-down mark even when
+                             nothing is sorted — otherwise the sorting is a feature nobody
+                             can see. The heading in use swaps it for the direction it is
+                             sorted in, in the link colour. --}}
                         @php
-                            $arrow = fn (string $key): string => $this->sort === $key
-                                ? ($this->sortDirection === 'asc' ? ' ▲' : ' ▼')
-                                : '';
+                            $mark = fn (string $key): string => $this->sort === $key
+                                ? ($this->sortDirection === 'asc' ? '▲' : '▼')
+                                : '↕';
+                            $markClass = fn (string $key): string => $this->sort === $key
+                                ? 'text-primary-600 dark:text-primary-400'
+                                : 'text-gray-400';
                         @endphp
                         <tr class="border-b border-gray-200 dark:border-white/10">
                             <th class="px-3 py-2 font-medium" style="text-align:left">
-                                <button type="button" wire:click="sortBy('name')" class="font-medium hover:text-primary-600 dark:hover:text-primary-400">Agent{{ $arrow('name') }}</button>
+                                <button type="button" wire:click="sortBy('name')" class="inline-flex cursor-pointer items-center gap-1 font-medium hover:text-primary-600 dark:hover:text-primary-400">
+                                    Agent <span class="text-xs {{ $markClass('name') }}">{{ $mark('name') }}</span>
+                                </button>
                             </th>
                             {{-- LB-13: our own global staff see every client's agents in one
                                  list, so they get a column saying whose each one is — and
@@ -138,16 +148,22 @@
                                  grouping. A team leader's list is all their own people. --}}
                             @if ($this->showsClient())
                                 <th class="px-3 py-2 font-medium" style="text-align:left">
-                                    <button type="button" wire:click="sortBy('client')" class="font-medium hover:text-primary-600 dark:hover:text-primary-400">Client{{ $arrow('client') }}</button>
+                                    <button type="button" wire:click="sortBy('client')" class="inline-flex cursor-pointer items-center gap-1 font-medium hover:text-primary-600 dark:hover:text-primary-400">
+                                        Client <span class="text-xs {{ $markClass('client') }}">{{ $mark('client') }}</span>
+                                    </button>
                                 </th>
                             @endif
                             <th class="px-3 py-2 font-medium" style="text-align:left">Status</th>
                             <th class="px-3 py-2 font-medium" style="text-align:left">
-                                <button type="button" wire:click="sortBy('inStatusMinutes')" class="font-medium hover:text-primary-600 dark:hover:text-primary-400">For{{ $arrow('inStatusMinutes') }}</button>
+                                <button type="button" wire:click="sortBy('inStatusMinutes')" class="inline-flex cursor-pointer items-center gap-1 font-medium hover:text-primary-600 dark:hover:text-primary-400">
+                                    For <span class="text-xs {{ $markClass('inStatusMinutes') }}">{{ $mark('inStatusMinutes') }}</span>
+                                </button>
                             </th>
                             <th class="px-3 py-2 font-medium" style="text-align:left">Break</th>
                             <th class="px-3 py-2 font-medium" style="text-align:right">
-                                <button type="button" wire:click="sortBy('callsToday')" class="font-medium hover:text-primary-600 dark:hover:text-primary-400">Calls today{{ $arrow('callsToday') }}</button>
+                                <button type="button" wire:click="sortBy('callsToday')" class="inline-flex cursor-pointer items-center gap-1 font-medium hover:text-primary-600 dark:hover:text-primary-400">
+                                    Calls today <span class="text-xs {{ $markClass('callsToday') }}">{{ $mark('callsToday') }}</span>
+                                </button>
                             </th>
                             @if ($this->canForceLogOut())
                                 <th class="px-3 py-2 font-medium" style="text-align:right">&nbsp;</th>
@@ -209,9 +225,14 @@
                                 @if ($this->canForceLogOut())
                                     <td class="px-3 py-2" style="text-align:right">
                                         @if ($row['canLogOut'])
+                                            {{-- Outlined, not solid: on a twenty-agent floor a
+                                                 column of solid red pulls the eye away from the
+                                                 over-break flag, which is the thing that actually
+                                                 needs attention. Still unmistakably destructive. --}}
                                             <x-filament::button
                                                 size="xs"
                                                 color="danger"
+                                                outlined
                                                 wire:click="forceLogOut({{ $row['id'] }})"
                                                 wire:confirm="{{ $row['name'] }} has been {{ strtolower($row['statusLabel']) }} for {{ $row['inStatusMinutes'] }} minutes. If they are still working, this will cut them off."
                                             >Log out</x-filament::button>
