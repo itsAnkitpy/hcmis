@@ -8,6 +8,7 @@ use App\Models\Tenant;
 use App\Tenancy\TenantContext;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Mockery\MockInterface;
@@ -69,9 +70,24 @@ it('releases for a bounded retry when the row is not written yet (the race)', fu
     $uuid = (string) Str::uuid();
 
     [$listener, $job] = listenerWithJob(attempts: 1);
-    $job->shouldReceive('release')->once()->with(5);
+    $job->shouldReceive('release')->once()->with(10);
 
     // No row exists yet (the merge beat the wrap-up) — the listener must retry.
+    $listener->handle(recordingReadyFor($uuid));
+});
+
+it('keeps waiting well past a minute — the wrap-up has no time limit', function () {
+    $uuid = (string) Str::uuid();
+
+    // 🔴 The regression this pins. The bound used to be ~60s, sized against an estimate
+    // that agents pick a disposition in 5-30 seconds. A real staging call on 2026-08-12
+    // was orphaned in the SAME SECOND its row was written, because the agent spent 69
+    // seconds typing notes — and the log carried the same warning on 2026-08-05 and
+    // 2026-08-11. Recordings had been going missing for over a week, silently, whenever
+    // anybody took their time.
+    [$listener, $job] = listenerWithJob(attempts: 12);   // where it used to give up
+    $job->shouldReceive('release')->once()->with(10);    // now it is still waiting
+
     $listener->handle(recordingReadyFor($uuid));
 });
 
@@ -80,10 +96,17 @@ it('gives up gracefully — logs, does not retry — once the bound is reached (
 
     Log::shouldReceive('warning')->once();
 
-    [$listener, $job] = listenerWithJob(attempts: 12); // at the tries bound
+    [$listener, $job] = listenerWithJob(attempts: 60); // at the tries bound, ~10 minutes in
     $job->shouldNotReceive('release');
 
     $listener->handle(recordingReadyFor($uuid)); // reaches here without throwing
+});
+
+it('is registered exactly once, so a recording is not filed twice (S103)', function () {
+    // Laravel finds this listener by scanning app/Listeners. AppServiceProvider used to
+    // register it BY HAND as well, so it ran twice on every recorded call — visible on
+    // staging as every orphan warning logged in duplicate at an identical timestamp.
+    expect(Event::getListeners(RecordingReady::class))->toHaveCount(1);
 });
 
 it('attaches an INBOUND recording whose id is the call ticket — the gap this slice closes (TH-4)', function () {

@@ -38,10 +38,29 @@ class AttachRecordingToCall implements ShouldQueue
 {
     use InteractsWithQueue;
 
-    /** ~60s of retries (12 attempts x 5s) to outlast the disposition-pick race. */
-    public int $tries = 12;
+    /**
+     * ~10 minutes of retries (60 attempts x 10s) to outlast the wrap-up.
+     *
+     * 🔴 It used to be ~60s (12 x 5s), sized against the docblock's estimate that an
+     * agent picks a disposition in 5-30 seconds. Staging says otherwise: a real call on
+     * 2026-08-12 was orphaned in the SAME SECOND its row was written, because the agent
+     * spent 69 seconds on the wrap-up screen — and the log carries the same warning on
+     * 2026-08-05 and 2026-08-11. **Recordings had been going missing for over a week
+     * whenever anybody typed unhurried notes, with nothing to say so.** Wrap-up has no
+     * time limit and never did; only this bound pretended it had one.
+     *
+     * The first attempt is immediate, so the ordinary case (the row already exists)
+     * still attaches at once. The retries only cost a sleeping job.
+     *
+     * ponytail: a fixed 10-minute bound, not a real fix for an unbounded wait — an agent
+     * who takes longer still loses the audio, silently. The proper fix is for the row to
+     * find the recording rather than the recording to wait for the row (the CT-15 shape),
+     * which needs the orphan parked somewhere the wrap-up can look. Do that if this bound
+     * is ever hit in earnest; the log warning is the signal.
+     */
+    public int $tries = 60;
 
-    public int $backoff = 5;
+    public int $backoff = 10;
 
     public function handle(RecordingReady $event): void
     {

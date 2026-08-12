@@ -3,8 +3,6 @@
 namespace App\Providers;
 
 use App\Enums\RoleName;
-use App\Events\Telephony\RecordingReady;
-use App\Listeners\AttachRecordingToCall;
 use App\Listeners\LogAuthenticationActivity;
 use App\Models\User;
 use App\Telephony\AsteriskAriProvider;
@@ -38,9 +36,13 @@ class AppServiceProvider extends ServiceProvider
         // Audit the auth events (M7 D-M7-2): login / logout / failed / reset.
         Event::subscribe(LogAuthenticationActivity::class);
 
-        // B3 CP-B3-2 (D3/D6): attach the merged recording to its calls row by UUID,
-        // off the queue (ShouldQueue) with bounded retry for the merge-vs-wrap-up race.
-        Event::listen(RecordingReady::class, AttachRecordingToCall::class);
+        // B3 CP-B3-2's recording attach (RecordingReady -> AttachRecordingToCall) is NOT
+        // registered here. Laravel finds it by scanning app/Listeners, and registering it
+        // by hand as well meant it ran TWICE on every recorded call — visible on staging
+        // as every orphan warning logged in duplicate at an identical timestamp
+        // (2026-08-11, 2026-08-12). Harmless in effect, since both runs write the same
+        // values, but double the queue work and twice as confusing to read a log through.
+        // `php artisan event:list` is the check if this is ever in doubt.
 
         // B4 CP3 (decision C): the narrow write-gate for recording a handled
         // call's outcome. Same population as AgentConsole::canAccess() — agent +
