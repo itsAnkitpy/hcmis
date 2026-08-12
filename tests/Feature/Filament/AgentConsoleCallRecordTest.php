@@ -90,7 +90,17 @@ it('writes an outbound answered calls row on a contact wrap-up, with lead update
         ->and($call->disposition_id)->toBe($dispositionId)
         ->and($call->to_number)->toBe('9991234567')
         ->and($call->from_number)->toBe(OUTBOUND_CALLER_ID)
-        ->and($call->ended_at)->not->toBeNull()
+        // CT-6: ended_at used to be the Done click and is now the real hang-up, which
+        // reaches the row via the listener's handoff note. An outbound call mints its
+        // own ticket at the Dial click and the outbound path writes no note, so it
+        // matches nothing and every moment stays blank — CT-8's "outbound carries no
+        // wait" falling out of the ticket match. The blank is deliberate: CT-6 forbids
+        // falling back to the Done time, which is the inflated number this slice
+        // removes. See PRD/phase-2/call-timing.md — outbound timing is not in this slice.
+        ->and($call->started_at)->toBeNull()
+        ->and($call->ringing_at)->toBeNull()
+        ->and($call->answered_at)->toBeNull()
+        ->and($call->ended_at)->toBeNull()
         ->and($call->tenant_id)->toBe($tenant->id);
 
     // Side-effects of the row, same transaction: the lead advanced and the

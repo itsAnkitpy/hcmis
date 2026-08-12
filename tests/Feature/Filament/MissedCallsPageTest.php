@@ -142,9 +142,18 @@ it('shows an hour-long wait as an hour, not as an instant hang-up (S88 review #6
 
         // The hour used to be thrown away, so the person who held longest of all appeared
         // on this screen as the one who hung up straight away.
-        expect($page->waitedFor(missedCall(['duration_seconds' => 3725])))->toBe('01:02:05')
-            ->and($page->waitedFor(missedCall(['duration_seconds' => 125])))->toBe('02:05')
-            ->and($page->waitedFor(missedCall(['duration_seconds' => null])))->toBe('—');
+        //
+        // CT-4: the figures are unchanged, only their source is. They are now computed
+        // from arrival -> the moment they were lost, rather than read from the retired
+        // `duration_seconds` — the same column the Calls list labelled "Duration".
+        $waited = fn (int $seconds): Call => missedCall([
+            'started_at' => now()->subSeconds($seconds),
+            'ended_at' => now(),
+        ]);
+
+        expect($page->waitedFor($waited(3725)))->toBe('01:02:05')
+            ->and($page->waitedFor($waited(125)))->toBe('02:05')
+            ->and($page->waitedFor(missedCall(['started_at' => null, 'ended_at' => null])))->toBe('—');
     });
 });
 

@@ -78,11 +78,24 @@ class AttachRecordingToCall implements ShouldQueue
 
         // Stamp the recording scoped to the owning tenant so RLS backstops the
         // write and the `call.updated` enrichment is audited in the right context.
+        //
+        // EVERY matching row, not the first one found (CT-13). A transferred or
+        // conferenced call now leaves TWO rows carrying the same ticket — the fresh note
+        // CT-5 hands the second agent is what makes them share it — and this query had
+        // no ordering, so the audio landed on one of them at random and the other looked
+        // like it had none. One recording of one call; whoever opens either half can
+        // play it. Our recording rides the caller's leg and that leg never moves
+        // (TD-3/TD-6), so it is one continuous file covering both agents; splitting it
+        // per agent is the industry's answer and is its own slice.
+        //
+        // ⤳ This alone does not finish the job: on a real transfer the second agent's
+        // row does not EXIST yet when this runs (they are still typing their notes),
+        // so it is the wrap-up that back-fills from its sibling — see CT-15 in
+        // AgentConsole::siblingRecording().
         TenantContext::run($tenantId, function () use ($event): void {
             Call::query()
                 ->where('correlation_id', $event->callId)
-                ->first()
-                ?->update([
+                ->update([
                     'recording_disk' => $event->disk,
                     'recording_path' => $event->path,
                 ]);

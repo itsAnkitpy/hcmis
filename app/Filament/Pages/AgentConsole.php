@@ -1004,15 +1004,87 @@ class AgentConsole extends Page
     }
 
     /**
+     * The four moments the listener left for THIS call, or null if there is no note
+     * (call-timing.md CT-3). The listener owns every clock on a call but cannot write
+     * the row (D2's single-writer rule), so it stamps its moments onto the handoff note
+     * and this read copies them across at wrap-up — one clock, so the arithmetic
+     * between them can never disagree.
+     *
+     * 🔴 Matched on the TICKET this console is holding, not on "my newest note" (CT-11).
+     * A note lingers between calls: an agent whose phone rang out is still holding that
+     * caller's arrival time, and a newest-note read would stamp an inbound wait onto
+     * their next outbound row. Matched on the agent too, so on a conference each of the
+     * two agents reads their own part rather than their colleague's.
+     *
+     * An outbound call mints its own ticket at the Dial click and the listener files a
+     * note under it too (CT-16), so it gets a ring, a pickup and a hang-up — but never an
+     * arrival, because nobody waited: we placed the call. CT-8 ("outbound carries no
+     * wait") therefore still holds by construction, with no direction check anywhere.
+     *
+     * A miss is normal and harmless (TH-2): the note write is best-effort, so a database
+     * hiccup mid-call costs this row its timing and nothing else.
+     */
+    private function handoffMoments(): ?CallHandoff
+    {
+        if ($this->callCorrelationId === null) {
+            return null;
+        }
+
+        return CallHandoff::query()
+            ->where('ticket', $this->callCorrelationId)
+            ->where('agent_user_id', auth()->id())
+            ->first();
+    }
+
+    /**
+     * The recording already filed on another row of THIS call, if there is one (CT-15).
+     *
+     * 🔴 The ordering this exists for, and it is the ordinary one on every transfer:
+     * Priya transfers the caller to Rahul and clicks Done thirty seconds later, so her
+     * row exists. Rahul talks for three more minutes. The caller hangs up, the audio
+     * merges a second or two later, and the filing job runs — while Rahul is still
+     * typing. HIS ROW DOES NOT EXIST YET. The job files onto Priya's row, succeeds, and
+     * never runs again, because it only retries when it finds no row at all. So CT-13's
+     * "update every matching row" updates every row that exists at that instant, and
+     * Rahul's is minutes away.
+     *
+     * Back-filling here closes it from the other end: whichever row is written second
+     * picks the audio up from the first. Every ordering is then covered — job first,
+     * both rows first, or neither row yet (the job's own retry handles that one).
+     *
+     * Indexed on correlation_id, so this is one cheap lookup on the wrap-up path.
+     */
+    private function siblingRecording(): ?Call
+    {
+        if ($this->callCorrelationId === null) {
+            return null;
+        }
+
+        return Call::query()
+            ->where('correlation_id', $this->callCorrelationId)
+            ->whereNotNull('recording_path')
+            ->first();
+    }
+
+    /**
      * Write the B3 calls-table row — the single writer (D2). Shared by the matched
      * wrap-up and the no-match/ad-hoc path. `agent_id` is the wrapping agent (web
-     * auth); tenant_id is auto-stamped by BelongsToTenant. `ended_at` is COARSE in
-     * v1 (= now, D4); precise timing + the recording arrive later via the listener.
+     * auth); tenant_id is auto-stamped by BelongsToTenant.
+     *
+     * The five moments (CT-2): four copied off the listener's note, and the fifth is
+     * this row's own `created_at` — the Done click, which we were already storing
+     * without noticing. Any of them may be null, and a null STAYS null (CT-6): if the
+     * hang-up has not landed by the time Done is clicked, `ended_at` is blank rather
+     * than falling back to now(), because that fallback silently reinstates the
+     * wrap-up-inflated "duration" this slice exists to remove. A dash on one row is
+     * honest; a plausible wrong number is not (B3 D4).
      */
     private function recordCall(?Lead $lead, ?Disposition $disposition): void
     {
         $isOutbound = $this->callDirection === CallDirection::Outbound;
         $ourNumber = $isOutbound ? config('telephony.outbound.caller_id') : null;
+        $moments = $this->handoffMoments();
+        $sibling = $this->siblingRecording();
 
         Call::create([
             'direction' => $this->callDirection,
@@ -1024,7 +1096,15 @@ class AgentConsole extends Page
             'disposition_id' => $disposition?->id,
             'outcome' => $this->outcomeFor($disposition),
             'correlation_id' => $this->callCorrelationId,
-            'ended_at' => now(),
+            'started_at' => $moments?->arrived_at,
+            // The note's own created_at IS the ring moment — it is written immediately
+            // before the agent's phone is rung, so the carrier needed no column for it.
+            'ringing_at' => $moments?->created_at,
+            'answered_at' => $moments?->answered_at,
+            'ended_at' => $moments?->ended_at,
+            // The other half of a passed-on call already has the audio (CT-15).
+            'recording_disk' => $sibling?->recording_disk,
+            'recording_path' => $sibling?->recording_path,
         ]);
     }
 

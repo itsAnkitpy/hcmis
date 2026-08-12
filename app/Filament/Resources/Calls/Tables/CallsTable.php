@@ -51,10 +51,18 @@ class CallsTable
                     ->placeholder('—')
                     ->formatStateUsing(fn (?CallOutcome $state): string => $state?->label() ?? '—')
                     ->sortable(),
-                TextColumn::make('duration_seconds')
-                    ->label('Duration')
-                    ->placeholder('—')
-                    ->formatStateUsing(fn (?int $state): string => $state !== null ? gmdate('i:s', $state) : '—'),
+                // CT-7: how long this customer waited before somebody picked up. The one
+                // new thing on this screen, and the reason the slice exists — every wait
+                // figure a report can quote starts here.
+                TextColumn::make('waited')
+                    ->label('Waited')
+                    ->state(fn (Call $record): string => Call::asClock($record->waitedSeconds()))
+                    ->tooltip('How long this customer waited before an agent picked up.'),
+                // CT-4: computed from pickup -> hang-up, not read from the retired
+                // duration column. "Duration" now means one thing on every screen.
+                TextColumn::make('duration')
+                    ->label('Talked')
+                    ->state(fn (Call $record): string => Call::asClock($record->talkedSeconds())),
                 IconColumn::make('recording_path')->label('Rec')->boolean(),
             ])
             ->defaultSort('created_at', 'desc')

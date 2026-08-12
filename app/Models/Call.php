@@ -31,8 +31,33 @@ use Illuminate\Support\Carbon;
  * AGENT-REPORTED and provisional in v1 (derived from the disposition's is_contact;
  * null for dispositionless ad-hoc calls). The trunk-era watcher overrides it with
  * the real line-result via `correlation_id`. The disposition stays the separate
- * business record. `started_at`/`answered_at`/`duration_seconds` are likewise
- * trunk-era; `ended_at` is COARSE (= wrap-up time) in v1.
+ * business record.
+ *
+ * TIMING — the five moments (call-timing.md CT-1/CT-2). Every one is a POINT IN TIME;
+ * no duration is ever stored, because a stored length only answers the question it was
+ * built for and two moments can be re-cut for ever:
+ *
+ *   started_at   the caller reached us       ("waited" = started_at -> answered_at)
+ *   ringing_at   the far end started ringing ("rang"   = ringing_at -> answered_at)
+ *   answered_at  the far end picked up       ("talked" = answered_at -> ended_at)
+ *   ended_at     THIS AGENT's part ended     ("wrap-up"= ended_at -> created_at)
+ *   created_at   the agent clicked Done
+ *
+ * "The far end" because the middle three read the same way in both directions: inbound
+ * it is the agent's phone ringing and the agent picking up, outbound it is the
+ * customer's (CT-16). `started_at` is the one that is inbound-only — an outbound call
+ * has no arrival because nobody waited, we placed it (CT-8), so its "waited" is blank.
+ *
+ * All four are stamped by the listener onto the handoff note and copied here by the
+ * wrap-up (CT-3), so they share one clock. Any of them may be null — a missing moment
+ * degrades to a blank and is NEVER faked (CT-6): a dash on one row is honest, a
+ * plausible wrong number is not.
+ *
+ * ⤳ `ended_at` used to be the Done click and is now the real hang-up (CT-6, superseding
+ * b3-calls-table.md D4). `duration_seconds` is RETIRED (CT-4): it was labelled "Waited
+ * for" on one screen and "Duration" on another, so nothing writes it any more and both
+ * figures are computed from the moments above. Left in place, unwritten, pending a
+ * decision to drop it (CT-14).
  *
  * @property int $id
  * @property int $tenant_id
@@ -46,6 +71,7 @@ use Illuminate\Support\Carbon;
  * @property CallOutcome|null $outcome
  * @property string|null $correlation_id
  * @property Carbon|null $started_at
+ * @property Carbon|null $ringing_at
  * @property Carbon|null $answered_at
  * @property Carbon|null $ended_at
  * @property int|null $duration_seconds
@@ -68,6 +94,7 @@ class Call extends Model
         'outcome',
         'correlation_id',
         'started_at',
+        'ringing_at',
         'answered_at',
         'ended_at',
         'duration_seconds',
@@ -84,10 +111,61 @@ class Call extends Model
             'direction' => CallDirection::class,
             'outcome' => CallOutcome::class,
             'started_at' => 'datetime',
+            'ringing_at' => 'datetime',
             'answered_at' => 'datetime',
             'ended_at' => 'datetime',
             'duration_seconds' => 'integer',
         ];
+    }
+
+    /**
+     * How long this customer waited before somebody picked up — or, if nobody ever did,
+     * before they were lost (CT-4/CT-7). One expression covers both because the wait
+     * ends the same way in each: the moment they stopped waiting.
+     *
+     * Computed, never stored (CT-1). The retired `duration_seconds` was written for the
+     * missed-call case only and labelled "Waited for" there and "Duration" on the Calls
+     * list — the same number meaning two different things on two screens.
+     */
+    public function waitedSeconds(): ?int
+    {
+        $stoppedWaiting = $this->answered_at ?? $this->ended_at;
+
+        return $this->started_at !== null && $stoppedWaiting !== null
+            ? (int) $this->started_at->diffInSeconds($stoppedWaiting)
+            : null;
+    }
+
+    /**
+     * How long the agent and the customer were actually talking (CT-4/CT-6).
+     *
+     * Pickup to hang-up — NOT to the Done click, which is the row's own created_at and
+     * includes however long the agent spent typing notes. On a transferred call the
+     * hang-up stored here is when THIS agent's part ended, so each agent's row carries
+     * their own conversation rather than the whole call (CT-12).
+     */
+    public function talkedSeconds(): ?int
+    {
+        return $this->answered_at !== null && $this->ended_at !== null
+            ? (int) $this->answered_at->diffInSeconds($this->ended_at)
+            : null;
+    }
+
+    /**
+     * A span of seconds as a clock, or a dash when we do not have it.
+     *
+     * Hours appear only when there are some, so an ordinary row stays short. That
+     * matters more than it looks: `i:s` alone renders an hour-long wait as `00:00`,
+     * which reads as somebody who hung up instantly — the opposite of what happened.
+     * A client can set their maximum hold as high as an hour, so it is reachable.
+     */
+    public static function asClock(?int $seconds): string
+    {
+        if ($seconds === null) {
+            return '—';
+        }
+
+        return gmdate($seconds >= 3600 ? 'H:i:s' : 'i:s', $seconds);
     }
 
     /**

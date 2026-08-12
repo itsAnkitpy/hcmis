@@ -115,3 +115,28 @@ it('still skips a genuine non-UUID callId without retrying (a stray raw-leg / la
     // attach. Inbound calls are no longer in this bucket (they now carry the ticket, TH-4).
     $listener->handle(recordingReadyFor('1718999999.42'));
 });
+
+it('files the recording on BOTH rows of a passed-on call, not whichever came back first (CT-13)', function () {
+    $tenant = Tenant::factory()->create();
+    $uuid = (string) Str::uuid();
+
+    // A transferred call leaves TWO rows carrying the same ticket — the fresh note CT-5
+    // hands the second agent is what makes them share it. This query used to take
+    // ->first() with no ordering, so the audio landed on one of them at random and the
+    // other looked like it had none.
+    TenantContext::run($tenant->id, function () use ($uuid): void {
+        Call::factory()->count(2)->create([
+            'correlation_id' => $uuid,
+            'recording_disk' => null,
+            'recording_path' => null,
+        ]);
+    });
+
+    (new AttachRecordingToCall)->handle(recordingReadyFor($uuid));
+
+    $rows = TenantContext::run($tenant->id, fn () => Call::query()->where('correlation_id', $uuid)->get());
+
+    // One recording of one call; whoever opens either half can play it.
+    expect($rows)->toHaveCount(2)
+        ->and($rows->every(fn (Call $call): bool => $call->recording_path === 'recordings/call-1.mp3'))->toBeTrue();
+});

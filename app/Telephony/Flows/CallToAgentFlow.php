@@ -17,6 +17,7 @@ use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -531,22 +532,10 @@ class CallToAgentFlow
         // and this caller may be handed past several desks.
         $this->startHoldMusicIfSilent();
 
-        rescue(
-            fn () => TenantContext::run((int) $this->tenantId, function () use ($reservedAgentId): void {
-                CallHandoff::query()->where('agent_user_id', $reservedAgentId)->delete();
-                CallHandoff::query()->create([
-                    'agent_user_id' => $reservedAgentId,
-                    'ticket' => $this->ticketNumber,
-                ]);
-            }),
-            function (Throwable $exception) use ($reservedAgentId): void {
-                Log::warning('Ticket handoff write failed — inbound recording will not attach (the call is unaffected).', [
-                    'ticket' => $this->ticketNumber,
-                    'agentUser' => $reservedAgentId,
-                    'error' => $exception->getMessage(),
-                ]);
-            },
-        );
+        // The caller's arrival travels with the ticket (CT-2/CT-3). The note's own
+        // created_at is the ring moment — it is written immediately before the phone
+        // rings, so that moment needs no column of its own.
+        $this->writeHandoffNote($reservedAgentId, $this->startedAt);
 
         $agentLegId = $this->telephony->placeCall(
             $this->directory->endpointFor($reservedAgentId),
@@ -589,6 +578,99 @@ class CallToAgentFlow
      * their phone ring out. Each hands its own reason to the log, because they mean
      * different things to whoever reads it (understaffed vs one desk not answering).
      */
+    /**
+     * Drop a handoff note for an agent we are about to ring (TH-5/TH-6): prune their
+     * prior note, then write this call's ticket, so their screen reads the RIGHT call's
+     * ticket at ring-time and stamps it on the row for the recording to attach to.
+     *
+     * $arrivedAt is the caller's arrival, and it is deliberately null for the second
+     * agent on a transfer or conference (CT-5): when the call reached them the customer
+     * was not in the waiting room, they were mid-conversation. Copying the arrival
+     * across would read as "waited 5m30s" for someone who waited 30 seconds, inflating
+     * the average wait most on exactly the calls that got the most attention.
+     *
+     * Best-effort by design (TH-2 graceful miss): a note-write failure must NEVER drop a
+     * live call. If the write throws (a DB hiccup), the call still connects; that row
+     * just gets no timing and no recording — the same graceful degradation we already
+     * accept for a recording that does not attach. We log and ring on.
+     */
+    private function writeHandoffNote(int $agentUserId, ?Carbon $arrivedAt): void
+    {
+        // No client, nothing to scope the write to — our own global staff dialling out
+        // with no client in scope (CS-4's null case). That call stays out of the timing
+        // figures rather than being filed under a made-up client.
+        if ($this->tenantId === null) {
+            return;
+        }
+
+        rescue(
+            fn () => TenantContext::run((int) $this->tenantId, function () use ($agentUserId, $arrivedAt): void {
+                CallHandoff::query()->where('agent_user_id', $agentUserId)->delete();
+                CallHandoff::query()->create([
+                    'agent_user_id' => $agentUserId,
+                    'ticket' => $this->ticketNumber,
+                    'arrived_at' => $arrivedAt,
+                ]);
+            }),
+            function (Throwable $exception) use ($agentUserId): void {
+                Log::warning('Ticket handoff write failed — that row will carry no timing and the recording will not attach (the call is unaffected).', [
+                    'ticket' => $this->ticketNumber,
+                    'agentUser' => $agentUserId,
+                    'error' => $exception->getMessage(),
+                ]);
+            },
+        );
+    }
+
+    /**
+     * Stamp a moment onto this call's handoff note(s) — the timing carrier (CT-3). The
+     * listener owns every moment on a call but must not write the calls row (D2's
+     * single-writer rule), so it leaves them here and the agent's screen copies them
+     * across at wrap-up. One clock for all four, so they can never disagree.
+     *
+     * 🔴 Matched on the TICKET, never on the agent alone (CT-11). A note is filed under
+     * an agent and lingers between calls, so "this agent's newest note" can belong to a
+     * different call — an agent who let their phone ring out is still holding that
+     * caller's arrival time. Pass $agentUserId to narrow to one agent's own note (their
+     * pickup, their end); omit it to reach every note on this call, which is what the
+     * hang-up needs on a conference where two agents are still connected (CT-12).
+     *
+     * An end never overwrites an end already there — FIRST CLOSE WINS (CT-12a). An
+     * agent's part can finish well before the call does: dropped by a transfer, or
+     * hanging up out of a conference the others carry on with. The teardown then fills
+     * in only whoever is still open, and every ordering lands the same way.
+     *
+     * Best-effort, exactly like the note write itself (TH-2): a database hiccup must
+     * never disturb a live call. A missed stamp costs one blank on one report row.
+     *
+     * @param  array<string, Carbon>  $moments
+     */
+    private function stampHandoff(array $moments, ?int $agentUserId = null): void
+    {
+        $ticket = $this->ticketNumber;
+
+        if ($ticket === null || $this->tenantId === null) {
+            return;
+        }
+
+        rescue(
+            fn () => TenantContext::run((int) $this->tenantId, function () use ($moments, $agentUserId, $ticket): void {
+                CallHandoff::query()
+                    ->where('ticket', $ticket)
+                    ->when($agentUserId !== null, fn (Builder $query) => $query->where('agent_user_id', $agentUserId))
+                    ->when(isset($moments['ended_at']), fn (Builder $query) => $query->whereNull('ended_at'))
+                    ->update($moments);
+            }),
+            function (Throwable $exception) use ($moments, $ticket): void {
+                Log::warning('Call-timing stamp failed — this call will be missing a moment on its report row (the call itself is unaffected).', [
+                    'ticket' => $ticket,
+                    'moments' => array_keys($moments),
+                    'error' => $exception->getMessage(),
+                ]);
+            },
+        );
+    }
+
     private function enterWaitingRoom(string $why): void
     {
         $this->startHoldMusicIfSilent();
@@ -784,8 +866,12 @@ class CallToAgentFlow
                 'outcome' => $outcome,
                 'correlation_id' => $this->ticketNumber,
                 'started_at' => $startedAt,
+                // Both moments, no duration (CT-1/CT-4). `duration_seconds` used to be
+                // written here and shown as "Waited for" on Missed Calls while the same
+                // column read "Duration" on the Calls list — one field, two meanings,
+                // invisible only because nothing else ever filled it. The wait is now
+                // computed from these two moments wherever it is shown.
                 'ended_at' => $endedAt,
-                'duration_seconds' => (int) $startedAt->diffInSeconds($endedAt),
             ])),
             function (Throwable $exception) use ($outcome): void {
                 Log::warning('Missed-call record write failed — the caller will not appear in the missed-call list.', [
@@ -864,6 +950,16 @@ class CallToAgentFlow
         // switchboard already registered this leg when it made the handler.
         $this->agents[$agentLegId] = new AgentLeg($agentLegId, userId: $servingAgentId, connected: true);
 
+        // CT-16: outbound gets the same carrier as inbound, so an outbound call has talk
+        // time too. No arrival on it — nobody waited, we placed the call (CT-8 unchanged,
+        // and still by construction rather than by a rule). The note's own created_at is
+        // the moment we started ringing the CUSTOMER, which is written immediately below
+        // — the outbound mirror of the inbound ring. Skipped when the leg carries no
+        // agent id (a pre-B2.4a leg): there is nobody to file it under.
+        if ($servingAgentId !== null) {
+            $this->writeHandoffNote($servingAgentId, arrivedAt: null);
+        }
+
         $this->callerLegId = $this->telephony->placeCall(
             config('telephony.outbound.dial_prefix').$customerNumber.config('telephony.outbound.dial_suffix'),
             'outbound',
@@ -921,6 +1017,11 @@ class CallToAgentFlow
         // agent's user id already rode in with the AgentLeg, so there is nothing to copy
         // here (the B2.4a "copy before the wipe" dance is gone — each member owns its id).
         $agent->markConnected();
+
+        // The pickup moment (CT-2), onto this agent's own note. This is the line where
+        // caller and agent are joined, so it is what "answered" means — and it is the
+        // point the customer's wait stops, which is where every vendor stops it too.
+        $this->stampHandoff(['answered_at' => now()], $agent->userId);
 
         // Register the pending merge the MOMENT recording starts — not at hang-up. When the
         // recorded (caller) leg drops, Asterisk destroys its taps and emits "recording
@@ -1027,6 +1128,13 @@ class CallToAgentFlow
         $this->pendingReservedTenantId = $tenantId;
         $this->pendingReservedAgentId = $reservedAgentId;
 
+        // 🔴 B gets a FRESH note before their phone rings (CT-5). Without it their screen
+        // reads whatever note is left from their PREVIOUS call — a stale ticket today, on
+        // this branch, independent of this feature; stale timing once the note carries
+        // moments. No arrival on it: when this call reached B the customer was not in the
+        // waiting room, so the wait belongs to the first agent alone.
+        $this->writeHandoffNote($reservedAgentId, arrivedAt: null);
+
         // B's leg carries no caller-ID in this slice (the customer number isn't retained
         // past the first ring; a nicety parked for later). It enters the set RINGING with
         // a FRESH reservation, so releaseReservation guards B's tag, never a connected
@@ -1089,9 +1197,19 @@ class CallToAgentFlow
             $this->telephony->removeFromBridge((string) $this->conversationId, $a->legId);
             $this->telephony->hangup($a->legId);
             unset($this->agents[$a->legId]);
+
+            // 🔴 A's conversation ends HERE, not when the caller hangs up minutes later
+            // (CT-12). The teardown stamp never reaches A — she is already dropped and
+            // wrapped up by then — so without this line no transferred call would ever
+            // carry talk time, which is the one thing transfers are budgeted for.
+            $this->stampHandoff(['ended_at' => now()], $a->userId);
         }
 
         $b->markConnected();
+        // B's pickup does NOT travel connectAgent() (CT-12) — this is the only place a
+        // transferred-to agent is joined, so it is the only place their pickup exists.
+        $this->stampHandoff(['answered_at' => now()], $b->userId);
+
         $this->addedAgentIntent = null;
         $this->state = CallFlowState::InCall;
 
@@ -1116,6 +1234,11 @@ class CallToAgentFlow
         $this->telephony->addToBridge((string) $this->conversationId, $bLegId);
 
         $b->markConnected();
+        // Same as a transfer: B's pickup does not travel connectAgent() (CT-12). A is
+        // untouched — they are still talking, so their note stays open and the teardown
+        // closes both of them together.
+        $this->stampHandoff(['answered_at' => now()], $b->userId);
+
         $this->addedAgentIntent = null;
         $this->state = CallFlowState::InCall;
 
@@ -1243,6 +1366,12 @@ class CallToAgentFlow
             // hanging up any still-ringing added agent too (never strand the caller).
             unset($this->agents[$legId]);
 
+            // Their part of the conversation ended here (CT-12a). On a conference the
+            // others carry on for as long as they like, and the teardown stamp will not
+            // reach this agent because first close wins — so without this line, an agent
+            // who leaves a three-way early carries the whole call's length as talk time.
+            $this->stampHandoff(['ended_at' => now()], $agent->userId);
+
             if ($this->connectedAgents() !== []) {
                 Log::info('An agent left the call; it continues with the remaining agent(s).', [
                     'ticket' => $this->ticketNumber,
@@ -1308,6 +1437,14 @@ class CallToAgentFlow
      */
     private function dispose(): void
     {
+        // The hang-up (CT-6), onto every note on this call that has not already closed
+        // — first close wins (CT-12a). Every teardown path funnels through here, so a
+        // call that ends any way at all closes whoever was still talking. Deliberately
+        // NOT in discard(), the switchboard's bug-backstop: a crashed call leaving no
+        // end time is CT-6's honest blank, not a number worth inventing. Ordered before
+        // reset(), which wipes the ticket this needs.
+        $this->stampHandoff(['ended_at' => now()]);
+
         $this->reset();
         $this->registry->release($this);
     }

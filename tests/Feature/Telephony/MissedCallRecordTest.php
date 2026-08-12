@@ -70,7 +70,12 @@ it('writes an abandoned record when a waiting caller gives up (QD-6)', function 
         ->and($call->outcome)->toBe(CallOutcome::Abandoned)
         ->and($call->from_number)->toBe('9998887777')
         ->and($call->to_number)->toBe(dialledNumberForTenant($tenant->id))
-        ->and($call->duration_seconds)->toBe(45)
+        // CT-4: the two moments, and the wait computed from them. `duration_seconds` is
+        // no longer written — it read as "Waited for" here and "Duration" on the Calls
+        // list, so answered calls getting timing would have quietly mixed the two.
+        ->and($call->waitedSeconds())->toBe(45)
+        ->and($call->duration_seconds)->toBeNull()
+        ->and($call->talkedSeconds())->toBeNull()   // nobody talked to them
         ->and($call->agent_id)->toBeNull()          // nobody handled it — that is the point
         ->and($call->correlation_id)->toBe($ticket);
 });
@@ -139,7 +144,10 @@ it('writes nothing for a call that reached an agent — the wrap-up owns that ro
 
 it('writes nothing when an outbound customer never picks up, now that outbound calls carry a client (CS-4)', function () {
     $tenant = Tenant::factory()->create();
-    fakeAgentRouter(6);
+    // A real agent, because the outbound path now files a timing note under the dialling
+    // agent (CT-16) and that write has a foreign key to honour.
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    fakeAgentRouter($agent->id);
 
     $telephony = fakeTelephony();
     $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
@@ -153,7 +161,7 @@ it('writes nothing when an outbound customer never picks up, now that outbound c
     // this write used to say it relied on — so this guard walks straight past the old
     // reason. What actually keeps the row unwritten is that an outbound call has no
     // arrival time: only an inbound caller gets one, and the write needs it.
-    $flow->handle(stasisStart('agent-leg', ['agent', '5550000', 'uuid-1', '6', (string) $tenant->id]));
+    $flow->handle(stasisStart('agent-leg', ['agent', '5550000', 'uuid-1', (string) $agent->id, (string) $tenant->id]));
     $flow->handle(channelDestroyed('customer-leg'));   // rang out — nobody home
 
     // The row for an outbound call belongs to the agent's own screen at wrap-up (D2).
@@ -203,7 +211,8 @@ it('still writes the record when an error tears down a waiting caller (S88 revie
         ->and($call->direction)->toBe(CallDirection::Inbound)
         ->and($call->outcome)->toBe(CallOutcome::NoAnswer)   // we stopped waiting, they did not give up
         ->and($call->from_number)->toBe('9998887777')
-        ->and($call->duration_seconds)->toBe(30)
+        ->and($call->waitedSeconds())->toBe(30)     // computed from the moments (CT-4)
+        ->and($call->duration_seconds)->toBeNull()
         ->and($call->agent_id)->toBeNull();
 });
 

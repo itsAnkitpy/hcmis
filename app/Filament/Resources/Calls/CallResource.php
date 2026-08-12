@@ -64,10 +64,13 @@ class CallResource extends Resource
                     TextEntry::make('campaign.name')->label('Campaign')->placeholder('—'),
                     TextEntry::make('from_number')->label('From')->placeholder('—'),
                     TextEntry::make('to_number')->label('To')->placeholder('—'),
-                    TextEntry::make('duration_seconds')
-                        ->label('Duration')
-                        ->placeholder('—')
-                        ->formatStateUsing(fn (?int $state): string => $state !== null ? gmdate('i:s', $state) : '—'),
+                    // The same two figures as the list, computed the same way (CT-4/CT-7).
+                    TextEntry::make('waited')
+                        ->label('Waited')
+                        ->state(fn (Call $record): string => Call::asClock($record->waitedSeconds())),
+                    TextEntry::make('duration')
+                        ->label('Talked')
+                        ->state(fn (Call $record): string => Call::asClock($record->talkedSeconds())),
                 ]),
             Section::make('Recording')
                 ->schema([

@@ -167,3 +167,35 @@ it('shows the no-recording fallback and no player when the call has none', funct
         ->assertSee('No recording for this call.')
         ->assertDontSee('<audio', false);
 });
+
+// --- CT-4/CT-7: the Waited column, and Duration computed rather than stored ---
+
+it('shows the wait and the talk time computed from the moments, on both screens (CT-4/CT-7)', function () {
+    $admin = callReviewHcUser(RoleName::HcAdmin->value);
+
+    // A caller who waited 90 seconds, talked for 4 minutes, then hung up — and an agent
+    // who spent another 10 minutes typing notes before clicking Done. Talk time must be
+    // the 4 minutes, never the 14 (CT-6).
+    $call = TenantContext::run(
+        Tenant::factory()->create()->id,
+        fn (): Call => Call::factory()->create([
+            'started_at' => now()->subSeconds(960),
+            'ringing_at' => now()->subSeconds(900),
+            'answered_at' => now()->subSeconds(870),
+            'ended_at' => now()->subSeconds(600),
+            // The retired column, still carrying an old value: nothing may read it (CT-4).
+            'duration_seconds' => 9999,
+        ]),
+    );
+
+    expect($call->waitedSeconds())->toBe(90)
+        ->and($call->talkedSeconds())->toBe(270)          // 4m30s of conversation...
+        ->and(Call::asClock($call->talkedSeconds()))->toBe('04:30')
+        ->and(Call::asClock($call->waitedSeconds()))->toBe('01:30');
+
+    $this->actingAs($admin);
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(ListCalls::class)->assertOk()->assertSee('Waited');
+    Livewire::test(ViewCall::class, ['record' => $call->getRouteKey()])->assertOk()->assertSee('01:30');
+});
