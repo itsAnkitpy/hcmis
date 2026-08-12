@@ -31,15 +31,22 @@ it('shows a team leader their own client\'s numbers and never another client\'s'
     $theirs = Tenant::factory()->create();
     $leader = clientUserWithRole($ours, RoleName::TeamLeader->value);
 
+    $this->freezeTime();
+    $ourOldest = now()->subMinutes(2)->getTimestamp();
+
     (new LiveCallCounts)->publish([
-        $ours->id => ['active' => 2, 'ringing' => 1, 'waiting' => 3],
-        $theirs->id => ['active' => 9, 'ringing' => 9, 'waiting' => 9],
+        $ours->id => ['active' => 2, 'ringing' => 1, 'waiting' => 3, 'oldestWaitingAt' => $ourOldest],
+        $theirs->id => ['active' => 9, 'ringing' => 9, 'waiting' => 9, 'oldestWaitingAt' => now()->subHour()->getTimestamp()],
     ]);
 
     $this->actingAs($leader->fresh());
     TenantContext::applyWebRequest($ours->id, crossTenant: false);
 
-    expect((new LiveAgents)->callStats())->toBe(['active' => 2, 'ringing' => 1, 'waiting' => 3]);
+    // The other client's much older caller must not leak in — it would be the bigger
+    // number, so a wrong answer here shows up as an alarming one.
+    expect((new LiveAgents)->callStats())->toBe(['active' => 2, 'ringing' => 1, 'waiting' => 3, 'oldestWaitingAt' => $ourOldest]);
+
+    Livewire::test(LiveAgents::class)->assertSee('Longest wait');
 });
 
 it('adds every client together for our own global staff', function () {
@@ -47,15 +54,20 @@ it('adds every client together for our own global staff', function () {
     $two = Tenant::factory()->create();
     Tenant::factory()->create();   // a third client with no calls at all — contributes zeros
 
+    $this->freezeTime();
+    $longest = now()->subMinutes(6)->getTimestamp();
+
     (new LiveCallCounts)->publish([
-        $one->id => ['active' => 2, 'ringing' => 1, 'waiting' => 3],
-        $two->id => ['active' => 1, 'ringing' => 0, 'waiting' => 4],
+        $one->id => ['active' => 2, 'ringing' => 1, 'waiting' => 3, 'oldestWaitingAt' => now()->subMinutes(2)->getTimestamp()],
+        $two->id => ['active' => 1, 'ringing' => 0, 'waiting' => 4, 'oldestWaitingAt' => $longest],
     ]);
 
     $this->actingAs(reportsHcUser(RoleName::OpsManager->value)->fresh());
     TenantContext::applyWebRequest(null, crossTenant: true);
 
-    expect((new LiveAgents)->callStats())->toBe(['active' => 3, 'ringing' => 1, 'waiting' => 7]);
+    // Counts add across clients; the wait does not. Six minutes and two minutes is a
+    // longest wait of six (LW-3).
+    expect((new LiveAgents)->callStats())->toBe(['active' => 3, 'ringing' => 1, 'waiting' => 7, 'oldestWaitingAt' => $longest]);
 });
 
 it('shows zeros on a calm floor, because the phone service is still reporting', function () {
@@ -67,11 +79,13 @@ it('shows zeros on a calm floor, because the phone service is still reporting', 
     $this->actingAs($leader->fresh());
     TenantContext::applyWebRequest($tenant->id, crossTenant: false);
 
-    expect((new LiveAgents)->callStats())->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0]);
+    expect((new LiveAgents)->callStats())->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null]);
 
     Livewire::test(LiveAgents::class)
         ->assertSee('Calls right now')
-        ->assertDontSee('phone service not reporting');
+        ->assertDontSee('phone service not reporting')
+        // LW-4: nobody is holding, so there is no clock at all — not a clock reading zero.
+        ->assertDontSee('Longest wait');
 });
 
 it('says the phone service is not reporting rather than drawing three zeros', function () {

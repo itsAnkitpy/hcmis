@@ -93,6 +93,28 @@
                 <span class="tabular-nums">Ringing <span class="font-semibold">{{ $callStats['ringing'] }}</span></span>
                 <span class="text-gray-400">&middot;</span>
                 <span class="tabular-nums">Waiting <span class="font-semibold">{{ $callStats['waiting'] }}</span></span>
+
+                {{-- LW-4: how long the caller who has waited longest has been holding. Shown
+                     only when somebody actually is — an empty floor has no clock to show, and
+                     "0:00" beside "Waiting 0" is the same fact written twice.
+
+                     The seconds are worked out HERE, on the server, from the arrival moment
+                     in the note, and the browser then counts on from that number by one a
+                     second. Counting up from a number the server gave us rather than from a
+                     timestamp the browser reads means a TV whose own clock is wrong still
+                     shows the right wait — only the ticking is the browser's, never the
+                     starting point. Without the tick the clock would sit frozen for fifteen
+                     seconds at a time, which on a wall screen reads as broken in a way a
+                     frozen COUNT never does. --}}
+                @if ($callStats['oldestWaitingAt'] !== null)
+                    <span class="text-gray-400">&middot;</span>
+                    <span class="tabular-nums"
+                          x-data="{ held: {{ max(0, now()->getTimestamp() - $callStats['oldestWaitingAt']) }} }"
+                          x-init="setInterval(() => held++, 1000)">
+                        Longest wait <span class="font-semibold"
+                            x-text="Math.floor(held / 60) + ':' + String(held % 60).padStart(2, '0')">&nbsp;</span>
+                    </span>
+                @endif
             @endif
         </div>
 

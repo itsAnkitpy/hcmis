@@ -38,12 +38,20 @@ it('sorts every live call into the three numbers, kept apart by client', functio
 
     $switchboard = new Switchboard($telephony);
 
-    // Client 3, call one: connected to an agent.
+    $this->freezeTime();
+
+    // Client 3, call one: connected to an agent. Arrived FIRST of all of them, and is
+    // deliberately not the longest wait — this caller is talking to somebody.
     $switchboard->handle(stasisStart('caller-A', [], tenantId: '3'));
     $switchboard->handle(stasisStart('agent-A', ['agent']));
 
-    // Client 3, call two: an agent's phone is ringing.
+    $this->travel(30)->seconds();
+    $ringingSince = now()->getTimestamp();
+
+    // Client 3, call two: an agent's phone is ringing. Still holding, from their side.
     $switchboard->handle(stasisStart('caller-B', [], tenantId: '3'));
+
+    $this->travel(10)->seconds();
 
     // Client 3, call three: nobody was free by now, so this caller is holding.
     $router->agentId = null;
@@ -53,9 +61,12 @@ it('sorts every live call into the three numbers, kept apart by client', functio
     // on the label the console stamped (CS-4) — the fifth value.
     $switchboard->handle(stasisStart('agent-D', ['agent', '5550000', 'uuid-D', '6', '7']));
 
+    // The longest wait is the RINGING caller, not the holding one: they arrived first and
+    // have not reached an agent either (LW-2). The connected caller is left out, and the
+    // outbound client has nobody holding at all.
     expect($switchboard->tallyByTenant())->toBe([
-        3 => ['active' => 1, 'ringing' => 1, 'waiting' => 1],
-        7 => ['active' => 0, 'ringing' => 1, 'waiting' => 0],
+        3 => ['active' => 1, 'ringing' => 1, 'waiting' => 1, 'oldestWaitingAt' => $ringingSince],
+        7 => ['active' => 0, 'ringing' => 1, 'waiting' => 0, 'oldestWaitingAt' => null],
     ]);
 });
 
@@ -77,7 +88,7 @@ it('counts a call that is mid-transfer as active, so the number does not dip eve
     $switchboard->handle(channelUserevent('transfer', ['agentUserId' => '6', 'tenantId' => '3']));
 
     expect($switchboard->tallyByTenant())->toBe([
-        3 => ['active' => 1, 'ringing' => 0, 'waiting' => 0],
+        3 => ['active' => 1, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null],
     ]);
 });
 
@@ -100,40 +111,92 @@ it('leaves a call with no client out of every count rather than putting it in a 
 it('adds up the notes of every client it is asked about, and ignores clients that have none', function () {
     $counts = new LiveCallCounts;
 
+    $this->freezeTime();
+    $threeMinutesAgo = now()->subMinutes(3)->getTimestamp();
+    $fiveMinutesAgo = now()->subMinutes(5)->getTimestamp();
+
     $counts->publish([
-        3 => ['active' => 2, 'ringing' => 1, 'waiting' => 0],
-        7 => ['active' => 1, 'ringing' => 0, 'waiting' => 4],
+        3 => ['active' => 2, 'ringing' => 1, 'waiting' => 0, 'oldestWaitingAt' => $threeMinutesAgo],
+        7 => ['active' => 1, 'ringing' => 0, 'waiting' => 4, 'oldestWaitingAt' => $fiveMinutesAgo],
     ]);
 
     // A team leader reads their own client only.
-    expect($counts->read([3]))->toBe(['active' => 2, 'ringing' => 1, 'waiting' => 0]);
+    expect($counts->read([3]))->toBe(['active' => 2, 'ringing' => 1, 'waiting' => 0, 'oldestWaitingAt' => $threeMinutesAgo]);
 
     // Our own global staff read every client, including one that has no note at all.
-    expect($counts->read([3, 7, 9]))->toBe(['active' => 3, 'ringing' => 1, 'waiting' => 4]);
+    expect($counts->read([3, 7, 9]))->toBe(['active' => 3, 'ringing' => 1, 'waiting' => 4, 'oldestWaitingAt' => $fiveMinutesAgo]);
+});
+
+it('takes the longest wait across clients rather than adding them together', function () {
+    $counts = new LiveCallCounts;
+
+    $this->freezeTime();
+    $fiveMinutesAgo = now()->subMinutes(5)->getTimestamp();
+    $threeMinutesAgo = now()->subMinutes(3)->getTimestamp();
+
+    $counts->publish([
+        3 => ['active' => 0, 'ringing' => 0, 'waiting' => 1, 'oldestWaitingAt' => $threeMinutesAgo],
+        7 => ['active' => 0, 'ringing' => 0, 'waiting' => 1, 'oldestWaitingAt' => $fiveMinutesAgo],
+    ]);
+
+    $totals = $counts->read([3, 7]);
+
+    // 🔴 The whole point (LW-3). Two callers holding is two callers — the counts add. But
+    // one floor's oldest waiting five minutes and another's waiting three is a longest
+    // wait of FIVE, never eight. The earliest arrival wins, because earliest is longest.
+    expect($totals['waiting'])->toBe(2)
+        ->and($totals['oldestWaitingAt'])->toBe($fiveMinutesAgo)
+        ->and(now()->getTimestamp() - $totals['oldestWaitingAt'])->toBe(300);
+});
+
+it('has no wait to show when every client is asked about and nobody is holding', function () {
+    $counts = new LiveCallCounts;
+
+    // Calls in flight, but every one of them already with an agent: nobody is holding, so
+    // there is no clock. Null rather than zero — "nobody waiting" is not "waited 0s".
+    $counts->publish([3 => ['active' => 4, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null]]);
+
+    expect($counts->read([3])['oldestWaitingAt'])->toBeNull();
 });
 
 it('tells a client that has gone quiet, instead of leaving its last note showing live calls', function () {
     $counts = new LiveCallCounts;
 
-    $counts->publish([3 => ['active' => 3, 'ringing' => 0, 'waiting' => 0]]);
-    expect($counts->read([3]))->toBe(['active' => 3, 'ringing' => 0, 'waiting' => 0]);
+    $counts->publish([3 => ['active' => 3, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null]]);
+    expect($counts->read([3]))->toBe(['active' => 3, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null]);
 
     // That floor's last call ends, so the tally stops mentioning it entirely.
     $counts->publish([]);
-    expect($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0]);
+    expect($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null]);
 
     // And it settles: the zeros we wrote are not themselves remembered, so the next quiet
     // pass writes nothing at all and the note is left to expire.
     Cache::flush();
     $counts->publish([]);
-    expect($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0])
+    expect($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null])
         ->and(Cache::has('telephony:live-calls:3'))->toBeFalse();
+});
+
+it('clears a waiting caller from a floor that has gone quiet, instead of leaving a clock climbing forever', function () {
+    $counts = new LiveCallCounts;
+
+    $this->freezeTime();
+
+    $counts->publish([3 => ['active' => 0, 'ringing' => 0, 'waiting' => 1, 'oldestWaitingAt' => now()->subMinutes(2)->getTimestamp()]]);
+    expect($counts->read([3])['oldestWaitingAt'])->not->toBeNull();
+
+    // The caller is answered (or gives up) and that floor drops out of the tally. Without
+    // the explicit all-zero note the board would go on counting a wait that has ended —
+    // and a clock that keeps climbing is far more obviously wrong than a stale count.
+    $counts->publish([]);
+
+    expect($counts->read([3])['oldestWaitingAt'])->toBeNull();
 });
 
 it('fades out on its own when the listener stops, instead of showing stale numbers all shift', function () {
     $counts = new LiveCallCounts;
 
-    $counts->publish([3 => ['active' => 3, 'ringing' => 1, 'waiting' => 2]]);
+    $counts->publish([3 => ['active' => 3, 'ringing' => 1, 'waiting' => 2, 'oldestWaitingAt' => now()->getTimestamp()]]);
 
     expect($counts->isReporting())->toBeTrue();
 
@@ -141,7 +204,7 @@ it('fades out on its own when the listener stops, instead of showing stale numbe
     $this->travel(LiveCallCounts::LIFETIME_SECONDS + 1)->seconds();
 
     expect($counts->isReporting())->toBeFalse()
-        ->and($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0]);
+        ->and($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null]);
 });
 
 it('says the phone service is reporting even when not one call is in flight anywhere', function () {
@@ -152,5 +215,5 @@ it('says the phone service is reporting even when not one call is in flight anyw
     // The whole point of the aliveness note: a calm floor and a dead listener must not
     // look the same, and both of them show zeros.
     expect($counts->isReporting())->toBeTrue()
-        ->and($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0]);
+        ->and($counts->read([3]))->toBe(['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null]);
 });

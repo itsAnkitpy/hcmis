@@ -314,7 +314,23 @@ class Switchboard implements HandlerRegistry
      * A call with no client yet — a handler still Idle, an inbound call on a number we do
      * not recognise — is left out of every count rather than lumped into a default.
      *
-     * @return array<int, array{active: int, ringing: int, waiting: int}>
+     * A FOURTH value rides alongside them (Longest Wait LW-2): the moment the caller who
+     * has been holding longest arrived. A MOMENT, not a duration — a duration would be
+     * wrong by however long the note sat in the pigeonhole, and an arrival time never goes
+     * stale, so whoever reads it works out the wait against their own clock.
+     *
+     * 🔴 WHO COUNTS AS STILL HOLDING IS WIDER THAN THE `waiting` NUMBER, deliberately. It
+     * is every inbound caller who has not yet reached an agent — the ones in the waiting
+     * room AND the one whose agent's phone is ringing right now. From the caller's side
+     * those are the same experience, it is the same clock the maximum-hold cap already
+     * measures (heldTooLong reads both states), and tying it to `waiting` alone would make
+     * the number blink out every time a desk was tried: our own callers cycle between
+     * holding and ringing once per ring for as long as they wait.
+     *
+     * Outbound is excluded by construction rather than by a rule — the console places
+     * those calls and nothing stamps an arrival on them, so startedAt is null.
+     *
+     * @return array<int, array{active: int, ringing: int, waiting: int, oldestWaitingAt: int|null}>
      */
     public function tallyByTenant(): array
     {
@@ -322,8 +338,9 @@ class Switchboard implements HandlerRegistry
 
         foreach ($this->uniqueHandlers() as $handler) {
             $tenantId = $handler->tenantId();
+            $state = $handler->state();
 
-            $number = match ($handler->state()) {
+            $number = match ($state) {
                 CallFlowState::InCall, CallFlowState::AddingAgent => 'active',
                 CallFlowState::RingingAgent, CallFlowState::RingingCustomer => 'ringing',
                 CallFlowState::Waiting => 'waiting',
@@ -334,8 +351,16 @@ class Switchboard implements HandlerRegistry
                 continue;
             }
 
-            $counts[$tenantId] ??= ['active' => 0, 'ringing' => 0, 'waiting' => 0];
+            $counts[$tenantId] ??= ['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null];
             $counts[$tenantId][$number]++;
+
+            $stillHolding = $state === CallFlowState::Waiting || $state === CallFlowState::RingingAgent;
+            $arrivedAt = $stillHolding ? $handler->startedAt()?->getTimestamp() : null;
+
+            if ($arrivedAt !== null) {
+                $oldest = $counts[$tenantId]['oldestWaitingAt'];
+                $counts[$tenantId]['oldestWaitingAt'] = $oldest === null ? $arrivedAt : min($oldest, $arrivedAt);
+            }
         }
 
         return $counts;

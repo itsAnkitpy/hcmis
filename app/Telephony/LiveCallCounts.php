@@ -66,14 +66,14 @@ class LiveCallCounts
      * remember is what the CALLER passed in, never the zeros we added, so a quiet floor is
      * written once and then left alone.
      *
-     * @param  array<int, array{active: int, ringing: int, waiting: int}>  $countsByTenant
+     * @param  array<int, array{active: int, ringing: int, waiting: int, oldestWaitingAt?: int|null}>  $countsByTenant
      */
     public function publish(array $countsByTenant): void
     {
         $liveTenantIds = array_keys($countsByTenant);
 
         foreach (array_diff($this->lastPublishedTenantIds, $liveTenantIds) as $goneQuietTenantId) {
-            $countsByTenant[$goneQuietTenantId] = ['active' => 0, 'ringing' => 0, 'waiting' => 0];
+            $countsByTenant[$goneQuietTenantId] = ['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null];
         }
 
         $this->lastPublishedTenantIds = $liveTenantIds;
@@ -93,12 +93,22 @@ class LiveCallCounts
      *
      * A client with no note (no live calls, or never any) contributes zeros.
      *
+     * 🔴 THE FOURTH VALUE IS NOT ADDED, AND ADDING IT WOULD BE A REAL BUG (Longest Wait
+     * LW-3). The three counts combine by adding — two clients with two calls each are four
+     * calls. The longest wait does not: one floor's oldest caller holding five minutes and
+     * another's holding three is a longest wait of FIVE, never eight. What is kept is the
+     * EARLIEST arrival across the clients asked for, because earliest arrival is longest
+     * wait — which is also why the note carries a moment rather than a duration.
+     *
+     * Null means nobody is holding on any of them: a floor with nothing waiting has no
+     * clock to show, which is a different statement from a wait of zero seconds.
+     *
      * @param  array<int, int>  $tenantIds
-     * @return array{active: int, ringing: int, waiting: int}
+     * @return array{active: int, ringing: int, waiting: int, oldestWaitingAt: int|null}
      */
     public function read(array $tenantIds): array
     {
-        $totals = ['active' => 0, 'ringing' => 0, 'waiting' => 0];
+        $totals = ['active' => 0, 'ringing' => 0, 'waiting' => 0, 'oldestWaitingAt' => null];
 
         if ($tenantIds === []) {
             return $totals;
@@ -114,8 +124,16 @@ class LiveCallCounts
                 continue;   // no note for that client: nothing live, or nothing yet
             }
 
-            foreach ($totals as $number => $total) {
-                $totals[$number] = $total + (int) ($counts[$number] ?? 0);
+            foreach (['active', 'ringing', 'waiting'] as $number) {
+                $totals[$number] += (int) ($counts[$number] ?? 0);
+            }
+
+            $arrivedAt = $counts['oldestWaitingAt'] ?? null;
+
+            if ($arrivedAt !== null) {
+                $totals['oldestWaitingAt'] = $totals['oldestWaitingAt'] === null
+                    ? (int) $arrivedAt
+                    : min($totals['oldestWaitingAt'], (int) $arrivedAt);
             }
         }
 

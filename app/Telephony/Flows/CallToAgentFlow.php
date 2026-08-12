@@ -247,6 +247,20 @@ class CallToAgentFlow
     }
 
     /**
+     * When this caller arrived — the zero of the wait clock (Longest Wait LW-1). Read by
+     * the switchboard's tally to find the caller who has been holding longest, and already
+     * the anchor the maximum-hold cap measures from (heldTooLong), so the two agree by
+     * construction rather than by a second stamp kept in step.
+     *
+     * Null on an outbound call, which never waits: the console places it, and only the
+     * inbound door (beginCall) stamps this. Read-only, like state() and tenantId().
+     */
+    public function startedAt(): ?Carbon
+    {
+        return $this->startedAt;
+    }
+
+    /**
      * Feed the flow one raw engine event. It never throws on a refused verb — a
      * mid-call telephony error aborts that one call and the flow resets, so the
      * listener keeps running. A lost pipe (AriConnectionLost) is the listener's

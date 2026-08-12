@@ -276,7 +276,13 @@ class LiveAgents extends Page
      * No filtering by client status: a suspended client has no live calls, so it simply
      * has no note.
      *
-     * @return array{active: int, ringing: int, waiting: int}|null
+     * A fourth value comes back alongside the three (Longest Wait LW-2): the MOMENT the
+     * caller who has been holding longest arrived, or null when nobody is holding. The
+     * screen turns that into "how long ago" against its own clock — the note carries an
+     * arrival time precisely so it can be up to twenty seconds old without the wait it
+     * describes being twenty seconds wrong.
+     *
+     * @return array{active: int, ringing: int, waiting: int, oldestWaitingAt: int|null}|null
      */
     public function callStats(): ?array
     {
