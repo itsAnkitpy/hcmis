@@ -1,5 +1,6 @@
 <?php
 
+use App\Enums\CallOutcome;
 use App\Enums\RoleName;
 use App\Filament\Pages\Reports\CallExportReport;
 use App\Models\Call;
@@ -200,4 +201,47 @@ it('is reachable from the export screen with the filters attached', function () 
         ->toContain('startDate=2026-08-01')
         ->toContain('agentId='.$agent->id)
         ->not->toContain('endDate');
+});
+
+// Staging (S107) showed three calls on the Calls screen that were absent from the file:
+// two abandoned ones with no agent, and one handled by a different agent. This walks the
+// whole pipeline over that exact mix — request, guards, query, generator, CSV writer —
+// so the export can never silently drop a row shape again.
+it('exports every row shape the Calls screen shows, over the full request', function () {
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+
+    $expected = TenantContext::run($tenant->id, function (): array {
+        $one = User::factory()->create(['name' => 'Abhikesh']);
+        $two = User::factory()->create(['name' => 'Demo Agent Two']);
+
+        return [
+            Call::factory()->inbound()->forAgent($one)->create(['created_at' => '2026-08-13 04:53:37'])->id,
+            // No agent, abandoned, no recording — the missed-call writer's shape.
+            Call::factory()->inbound()->create([
+                'agent_id' => null, 'outcome' => CallOutcome::Abandoned,
+                'created_at' => '2026-08-13 04:53:11', 'started_at' => '2026-08-13 04:48:11',
+            ])->id,
+            Call::factory()->inbound()->forAgent($one)->create(['created_at' => '2026-08-13 04:48:07'])->id,
+            // A different agent, no start moment — a transferred second leg (CT-5).
+            Call::factory()->inbound()->forAgent($two)->create([
+                'created_at' => '2026-08-12 11:35:00', 'started_at' => null,
+            ])->id,
+            Call::factory()->inbound()->forAgent($one)->create(['created_at' => '2026-08-12 11:32:29'])->id,
+            Call::factory()->inbound()->create([
+                'agent_id' => null, 'outcome' => CallOutcome::Abandoned,
+                'created_at' => '2026-08-12 05:45:24', 'started_at' => '2026-08-12 05:43:24',
+            ])->id,
+        ];
+    });
+
+    $ids = exportedIds($this->actingAs($tl)->get(route('calls.export', [
+        'startDate' => '2026-08-12',
+        'endDate' => '2026-08-13',
+    ]))->assertOk());
+
+    sort($ids);
+    sort($expected);
+
+    expect($ids)->toBe($expected);
 });

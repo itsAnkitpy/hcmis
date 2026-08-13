@@ -9,7 +9,14 @@
             One row per call, for the calls matching the filters above.
         </x-slot>
 
-        <p class="text-sm text-gray-500 dark:text-gray-400">
+        {{-- The filters read back in plain words, with the count from the very query
+             the download walks. This page has no table, so without this line a filter
+             left over from earlier is invisible until the spreadsheet is open. --}}
+        <p class="text-base font-medium text-gray-950 dark:text-white">
+            {{ $this->exportSummary() }}
+        </p>
+
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
             The file starts arriving as it is written, so a large range takes a while to
             finish downloading. Only one export runs at a time per person — if nothing
             seems to happen, check your browser's downloads before pressing again.

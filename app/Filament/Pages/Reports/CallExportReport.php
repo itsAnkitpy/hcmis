@@ -11,7 +11,9 @@ use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Reporting\CallExportRows;
 use BackedEnum;
+use Carbon\CarbonImmutable;
 use Filament\Actions\Action;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
@@ -123,10 +125,91 @@ class CallExportReport extends Page
      */
     public function downloadUrl(): string
     {
-        return route('calls.export', array_filter(
-            $this->filters ?? [],
-            fn (mixed $value): bool => filled($value),
-        ));
+        return route('calls.export', $this->exportFilters());
+    }
+
+    /**
+     * What the Download button is about to produce, read back in the same words as the
+     * filters — "Ready to export 6 calls · 12 Aug 2026 to 13 Aug 2026 · agent Abhikesh".
+     *
+     * WHY this exists (S107, from a real staging confusion). The other two report pages
+     * put a table on screen, so a stale filter is visible before you export: the numbers
+     * in front of you change. This page has no table by design — the client picks WHICH
+     * CALLS, never which columns (CE-1) — so a filter left over from earlier is invisible
+     * until the spreadsheet is already open, and the file looks like it lost rows. That
+     * is exactly the "a truncated export that looks complete is worse than no export"
+     * failure CE-3 refuses for; the same reasoning applies to a filtered one.
+     *
+     * The count comes from CallExportRows::query() — the SAME builder the download walks
+     * (CE-5a's one-builder rule), so the number promised here and the rows written can
+     * never disagree. It is also the count CE-3's row cap needs, arriving one step early.
+     */
+    public function exportSummary(): string
+    {
+        $count = (new CallExportRows($this->exportFilters()))->query()->count();
+        $noun = $count === 1 ? 'call' : 'calls';
+        $applied = $this->appliedFilters();
+
+        return $applied === []
+            ? sprintf('Ready to export %s %s — no filters set, so every call you can see.', number_format($count), $noun)
+            : sprintf('Ready to export %s %s — %s.', number_format($count), $noun, implode(' · ', $applied));
+    }
+
+    /**
+     * Every filter currently in force, in plain words. The list is what makes a
+     * leftover selection obvious; the count alone would only say the number is small.
+     *
+     * @return array<int, string>
+     */
+    public function appliedFilters(): array
+    {
+        $filters = $this->exportFilters();
+        $describe = fn (string $key, string $label, callable $name): ?string => filled($filters[$key] ?? null)
+            ? $label.' '.($name((int) $filters[$key]) ?? '#'.$filters[$key])
+            : null;
+
+        return array_values(array_filter([
+            $this->describeDates($filters['startDate'] ?? null, $filters['endDate'] ?? null),
+            $describe('agentId', 'agent', fn (int $id): ?string => User::find($id)?->name),
+            $describe('campaignId', 'campaign', fn (int $id): ?string => Campaign::find($id)?->name),
+            $describe('dispositionId', 'disposition', fn (int $id): ?string => Disposition::find($id)?->label),
+            $describe('clientId', 'client', fn (int $id): ?string => Tenant::find($id)?->name),
+            filled($filters['direction'] ?? null)
+                ? CallDirection::from($filters['direction'])->label().' only'
+                : null,
+            filled($filters['outcome'] ?? null)
+                ? 'outcome '.CallOutcome::from($filters['outcome'])->label()
+                : null,
+            match ($filters['hasRecording'] ?? null) {
+                null, '' => null,
+                '0', 0, false => 'without a recording',
+                default => 'with a recording',
+            },
+        ], fn (?string $part): bool => $part !== null));
+    }
+
+    /** The date range as a person would say it. */
+    private function describeDates(?string $from, ?string $until): ?string
+    {
+        $day = fn (string $date): string => CarbonImmutable::parse($date)->format('j M Y');
+
+        return match (true) {
+            filled($from) && filled($until) => $from === $until ? 'on '.$day($from) : $day($from).' to '.$day($until),
+            filled($from) => 'from '.$day($from),
+            filled($until) => 'up to '.$day($until),
+            default => null,
+        };
+    }
+
+    /**
+     * The filter form's state with blanks dropped — the one shape both the download link
+     * and the summary read, so what the line promises is what the link asks for.
+     *
+     * @return array<string, mixed>
+     */
+    private function exportFilters(): array
+    {
+        return array_filter($this->filters ?? [], fn (mixed $value): bool => filled($value));
     }
 
     /**
