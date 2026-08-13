@@ -1,0 +1,443 @@
+<?php
+
+use App\Enums\CallDirection;
+use App\Enums\CallOutcome;
+use App\Enums\RoleName;
+use App\Models\Call;
+use App\Models\Campaign;
+use App\Models\Disposition;
+use App\Models\Lead;
+use App\Models\Tenant;
+use App\Models\User;
+use App\Reporting\CallExportRows;
+use App\Tenancy\TenantContext;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+
+uses(RefreshDatabase::class);
+
+afterEach(function () {
+    TenantContext::resetWebRequest();
+    TenantContext::forget();
+});
+
+/**
+ * Call Export step 2 (call-export.md CE-4 + CE-5a) — the real menu and the one filtered
+ * query. The guards around it are covered in CallExportRouteTest; these tests are about
+ * WHICH calls come out and WHAT each row says.
+ */
+
+/**
+ * Run the exporter inside a client's context and return the rows as arrays.
+ *
+ * @param  array<string, mixed>  $filters
+ * @return array<int, array<int, string|int|null>>
+ */
+function exportRows(Tenant $tenant, array $filters = []): array
+{
+    return TenantContext::run($tenant->id, fn (): array => iterator_to_array(
+        (new CallExportRows($filters))->rows(),
+        preserve_keys: false,
+    ));
+}
+
+/** The heading list the export writes for the current posture. */
+function exportHeadings(Tenant $tenant, array $filters = []): array
+{
+    return TenantContext::run($tenant->id, fn (): array => (new CallExportRows($filters))->headings());
+}
+
+/** The value under a named heading, for one row. */
+function cell(Tenant $tenant, array $row, string $heading): string|int|null
+{
+    $index = array_search($heading, exportHeadings($tenant), strict: true);
+
+    expect($index)->not->toBeFalse("No column named {$heading}");
+
+    return $row[$index];
+}
+
+it('writes a heading for every value in a row, and no more', function () {
+    $tenant = Tenant::factory()->create();
+    TenantContext::run($tenant->id, fn () => Call::factory()->create());
+
+    $headings = exportHeadings($tenant);
+    $rows = exportRows($tenant);
+
+    expect($rows)->toHaveCount(1)
+        ->and($rows[0])->toHaveCount(count($headings));
+});
+
+// CE-4's honesty trap. `leads.attempts` exists as a column and nothing in the call path
+// ever increments it, so exporting it would produce authoritative-looking fiction. This
+// asserts on the heading list rather than a value, so nobody re-adds it by helpfulness.
+it('never exports a call-attempt count, however the lead is set up', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function () {
+        $campaign = Campaign::factory()->create();
+        $lead = Lead::factory()->create(['campaign_id' => $campaign->id, 'attempts' => 47]);
+        Call::factory()->forLead($lead)->create();
+    });
+
+    $flat = implode(' ', array_map('strtolower', exportHeadings($tenant)));
+
+    expect($flat)->not->toContain('attempt')->not->toContain('call count');
+    // Cell-by-cell, not a substring sweep: 47 turns up inside a random phone number
+    // often enough that a text search proves nothing.
+    expect(exportRows($tenant)[0])->not->toContain('47')->not->toContain(47);
+});
+
+it('fills the menu from the real call, not from blanks', function () {
+    $tenant = Tenant::factory()->create();
+
+    $ticket = (string) Str::uuid();
+
+    $call = TenantContext::run($tenant->id, function () use ($ticket): Call {
+        $agent = User::factory()->create(['name' => 'Asha']);
+        $campaign = Campaign::factory()->create(['name' => 'Renewals']);
+        $lead = Lead::factory()->create(['campaign_id' => $campaign->id, 'name' => 'Ravi Kumar']);
+        $sale = Disposition::factory()->sale()->create(['label' => 'Sold']);
+
+        return Call::factory()->forAgent($agent)->forLead($lead)->create([
+            'direction' => CallDirection::Inbound,
+            'disposition_id' => $sale->id,
+            'outcome' => CallOutcome::Answered,
+            'from_number' => '9812345678',
+            'to_number' => '1800111222',
+            'correlation_id' => $ticket,
+            'started_at' => now()->subSeconds(60),
+            'ringing_at' => now()->subSeconds(45),
+            'answered_at' => now()->subSeconds(30),
+            'ended_at' => now()->subSeconds(10),
+        ]);
+    });
+
+    $row = exportRows($tenant)[0];
+
+    expect(cell($tenant, $row, 'Call ID'))->toBe($call->id)
+        ->and(cell($tenant, $row, 'Ticket'))->toBe($ticket)
+        ->and(cell($tenant, $row, 'Direction'))->toBe('Inbound')
+        ->and(cell($tenant, $row, 'Agent'))->toBe('Asha')
+        ->and(cell($tenant, $row, 'Campaign'))->toBe('Renewals')
+        ->and(cell($tenant, $row, 'Lead name'))->toBe('Ravi Kumar')
+        ->and(cell($tenant, $row, 'Disposition'))->toBe('Sold')
+        ->and(cell($tenant, $row, 'Sale'))->toBe('Yes')
+        ->and(cell($tenant, $row, 'Outcome (provisional)'))->toBe('Answered')
+        // Inbound: they dialled us, so the customer is the from_number and our own
+        // number is the one they rang.
+        ->and(cell($tenant, $row, 'Customer number'))->toBe('9812345678')
+        ->and(cell($tenant, $row, 'Our number'))->toBe('1800111222')
+        // The wait, split their way: 15s holding, 15s ringing, 30s all told.
+        ->and(cell($tenant, $row, 'Queue time'))->toBe('15')
+        ->and(cell($tenant, $row, 'Ring time'))->toBe('15')
+        ->and(cell($tenant, $row, 'Waited'))->toBe('30')
+        ->and(cell($tenant, $row, 'Talked'))->toBe('20')
+        // Inbound has no dial time — that column is their outbound "Answered time".
+        ->and(cell($tenant, $row, 'Dial time'))->toBe('');
+});
+
+it('reads the customer and our own number from opposite ends on outbound', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->create([
+        'direction' => CallDirection::Outbound,
+        'from_number' => '1800111222',
+        'to_number' => '9812345678',
+        'ringing_at' => now()->subSeconds(20),
+        'answered_at' => now()->subSeconds(8),
+    ]));
+
+    $row = exportRows($tenant)[0];
+
+    expect(cell($tenant, $row, 'Customer number'))->toBe('9812345678')
+        ->and(cell($tenant, $row, 'Our number'))->toBe('1800111222')
+        ->and(cell($tenant, $row, 'Dial time'))->toBe('12');
+});
+
+it('leaves a missed call blank where nothing happened and filled where it did', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->inbound()->create([
+        'agent_id' => null,
+        'disposition_id' => null,
+        'outcome' => CallOutcome::Abandoned,
+        'started_at' => now()->subSeconds(40),
+        'answered_at' => null,
+        'ended_at' => now()->subSeconds(10),
+    ]));
+
+    $row = exportRows($tenant)[0];
+
+    expect(cell($tenant, $row, 'Agent'))->toBe('')
+        ->and(cell($tenant, $row, 'Talked'))->toBe('')
+        ->and(cell($tenant, $row, 'Disposition'))->toBe('')
+        ->and(cell($tenant, $row, 'Sale'))->toBe('')
+        // Nobody picked up, so the wait ended when we stopped waiting (CT-7).
+        ->and(cell($tenant, $row, 'Waited'))->toBe('30');
+});
+
+// CT-5: a transferred call is two rows sharing one ticket, and both say so.
+it('flags both halves of a transferred call as passed on', function () {
+    $tenant = Tenant::factory()->create();
+
+    $shared = (string) Str::uuid();
+    $lonely = (string) Str::uuid();
+
+    TenantContext::run($tenant->id, function () use ($shared, $lonely) {
+        Call::factory()->count(2)->create(['correlation_id' => $shared]);
+        Call::factory()->create(['correlation_id' => $lonely]);
+    });
+
+    $byTicket = collect(exportRows($tenant))->groupBy(fn (array $r): string => (string) cell($tenant, $r, 'Ticket'));
+
+    expect($byTicket[$shared]->every(fn (array $r): bool => cell($tenant, $r, 'Passed on') === 'Yes'))->toBeTrue()
+        ->and(cell($tenant, $byTicket[$lonely][0], 'Passed on'))->toBe('No');
+});
+
+it('does not treat two calls with no ticket at all as passed on', function () {
+    $tenant = Tenant::factory()->create();
+    TenantContext::run($tenant->id, fn () => Call::factory()->count(2)->create(['correlation_id' => null]));
+
+    expect(collect(exportRows($tenant))->every(fn (array $r): bool => cell($tenant, $r, 'Passed on') === 'No'))
+        ->toBeTrue();
+});
+
+it('exports durations as whole seconds by default and as a clock with the toggle', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->create([
+        'answered_at' => now()->subSeconds(125),
+        'ended_at' => now(),
+    ]));
+
+    expect(cell($tenant, exportRows($tenant)[0], 'Talked'))->toBe('125')
+        ->and(cell($tenant, exportRows($tenant, ['durationFormat' => 'clock'])[0], 'Talked'))->toBe('02:05');
+});
+
+it('links a recording only when there is one', function () {
+    $tenant = Tenant::factory()->create();
+
+    $with = TenantContext::run($tenant->id, fn (): Call => Call::factory()->withRecording()->create());
+    TenantContext::run($tenant->id, fn () => Call::factory()->create());
+
+    $rows = collect(exportRows($tenant))->keyBy(fn (array $r): int => (int) cell($tenant, $r, 'Call ID'));
+
+    expect(cell($tenant, $rows[$with->id], 'Recording'))->toBe('Yes')
+        ->and(cell($tenant, $rows[$with->id], 'Recording link'))->toBe(route('calls.recording', $with))
+        ->and(collect($rows)->firstWhere(fn (array $r): bool => cell($tenant, $r, 'Recording') === 'No'))
+        ->not->toBeNull();
+});
+
+// ---------------------------------------------------------------- the date boundary
+
+// CE-4a. The half-open end is the whole reason this test exists: `<= endDate` reads as
+// midnight and would drop nearly the entire final day.
+it('includes a call late on the last day and excludes one early the next', function () {
+    $tenant = Tenant::factory()->create();
+
+    [$inside, $outside] = TenantContext::run($tenant->id, fn (): array => [
+        Call::factory()->create(['created_at' => '2026-08-13 23:50:00']),
+        Call::factory()->create(['created_at' => '2026-08-14 00:05:00']),
+    ]);
+
+    $ids = collect(exportRows($tenant, ['startDate' => '2026-08-01', 'endDate' => '2026-08-13']))
+        ->map(fn (array $r): int => (int) cell($tenant, $r, 'Call ID'))
+        ->all();
+
+    expect($ids)->toContain($inside->id)->not->toContain($outside->id);
+});
+
+it('includes a call at the very start of the first day', function () {
+    $tenant = Tenant::factory()->create();
+
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::factory()
+        ->create(['created_at' => '2026-08-01 00:00:00']));
+
+    $ids = collect(exportRows($tenant, ['startDate' => '2026-08-01', 'endDate' => '2026-08-01']))
+        ->map(fn (array $r): int => (int) cell($tenant, $r, 'Call ID'))
+        ->all();
+
+    expect($ids)->toBe([$call->id]);
+});
+
+// CE-4a's first reason: filtering on started_at would have deleted every outbound call,
+// because beginOutboundCall writes no arrival at all (CT-8, nobody waited).
+it('keeps outbound calls in a date range even though they have no start moment', function () {
+    $tenant = Tenant::factory()->create();
+
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::factory()->create([
+        'direction' => CallDirection::Outbound,
+        'started_at' => null,
+        'created_at' => '2026-08-10 12:00:00',
+    ]));
+
+    $ids = collect(exportRows($tenant, ['startDate' => '2026-08-01', 'endDate' => '2026-08-31']))
+        ->map(fn (array $r): int => (int) cell($tenant, $r, 'Call ID'))
+        ->all();
+
+    expect($ids)->toBe([$call->id]);
+});
+
+// §8's parity test: the export and the Calls list must agree on WHICH calls fall in a
+// range. Run in UTC so both sides mean the same instants — CE-10a deliberately moves the
+// export's boundary into the client's zone later, and that divergence is its own test.
+it('returns the same calls as the Calls list for the same date range', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function () {
+        Call::factory()->create(['created_at' => '2026-08-12 09:00:00']);
+        Call::factory()->create(['created_at' => '2026-08-13 23:59:00']);
+        Call::factory()->create(['created_at' => '2026-08-14 00:01:00']);
+    });
+
+    $exported = collect(exportRows($tenant, ['startDate' => '2026-08-12', 'endDate' => '2026-08-13']))
+        ->map(fn (array $r): int => (int) cell($tenant, $r, 'Call ID'))
+        ->all();
+
+    // The Calls list's own filter, verbatim from CallsTable.
+    $listed = TenantContext::run($tenant->id, fn (): array => Call::query()
+        ->whereDate('created_at', '>=', '2026-08-12')
+        ->whereDate('created_at', '<=', '2026-08-13')
+        ->orderByDesc('created_at')
+        ->pluck('id')
+        ->all());
+
+    expect($exported)->toBe($listed);
+});
+
+// ---------------------------------------------------------------- the other filters
+
+it('narrows by each filter it offers', function (string $key, callable $make, int $expected) {
+    $tenant = Tenant::factory()->create();
+    $value = TenantContext::run($tenant->id, $make);
+
+    expect(exportRows($tenant, [$key => $value]))->toHaveCount($expected);
+})->with([
+    'agent' => ['agentId', function (): int {
+        $agent = User::factory()->create();
+        Call::factory()->forAgent($agent)->create();
+        Call::factory()->create();
+
+        return $agent->id;
+    }, 1],
+    'campaign' => ['campaignId', function (): int {
+        $campaign = Campaign::factory()->create();
+        Call::factory()->create(['campaign_id' => $campaign->id]);
+        Call::factory()->create();
+
+        return $campaign->id;
+    }, 1],
+    'disposition' => ['dispositionId', function (): int {
+        $disposition = Disposition::factory()->create();
+        Call::factory()->count(2)->create(['disposition_id' => $disposition->id]);
+        Call::factory()->create();
+
+        return $disposition->id;
+    }, 2],
+    'direction' => ['direction', function (): string {
+        Call::factory()->inbound()->create();
+        Call::factory()->create();
+
+        return CallDirection::Inbound->value;
+    }, 1],
+    'outcome' => ['outcome', function (): string {
+        Call::factory()->noAnswer()->create();
+        Call::factory()->create();
+
+        return CallOutcome::NoAnswer->value;
+    }, 1],
+    'has a recording' => ['hasRecording', function (): string {
+        Call::factory()->withRecording()->create();
+        Call::factory()->count(2)->create();
+
+        return '1';
+    }, 1],
+    'has no recording' => ['hasRecording', function (): string {
+        Call::factory()->withRecording()->create();
+        Call::factory()->count(2)->create();
+
+        return '0';
+    }, 2],
+]);
+
+it('applies every filter together rather than only the last one', function () {
+    $tenant = Tenant::factory()->create();
+
+    $agent = TenantContext::run($tenant->id, function (): User {
+        $agent = User::factory()->create();
+        // Matches everything.
+        Call::factory()->forAgent($agent)->inbound()->create(['created_at' => '2026-08-10 10:00:00']);
+        // Right agent, wrong direction.
+        Call::factory()->forAgent($agent)->create(['created_at' => '2026-08-10 10:00:00']);
+        // Right direction, wrong date.
+        Call::factory()->forAgent($agent)->inbound()->create(['created_at' => '2026-09-10 10:00:00']);
+
+        return $agent;
+    });
+
+    expect(exportRows($tenant, [
+        'agentId' => $agent->id,
+        'direction' => CallDirection::Inbound->value,
+        'startDate' => '2026-08-01',
+        'endDate' => '2026-08-31',
+    ]))->toHaveCount(1);
+});
+
+// ---------------------------------------------------------------- cost
+
+// CE-5a's whole point. Under cursor() — or with a relation missing from the pre-load —
+// this becomes one query per row, and the export gets slower than the array version it
+// replaced. A fixed row count against a fixed query budget is what proves it.
+it('issues a bounded number of queries however many rows there are', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function () {
+        $agent = User::factory()->create();
+        $campaign = Campaign::factory()->create();
+        $lead = Lead::factory()->create(['campaign_id' => $campaign->id]);
+        $disposition = Disposition::factory()->create();
+
+        Call::factory()->count(60)->forAgent($agent)->forLead($lead)->create([
+            'disposition_id' => $disposition->id,
+        ]);
+    });
+
+    DB::enableQueryLog();
+    DB::flushQueryLog();
+
+    exportRows($tenant);
+
+    $queries = count(DB::getQueryLog());
+    DB::disableQueryLog();
+
+    // One chunk fetch + one per pre-loaded relation, plus the context SETs around the
+    // run. Nowhere near sixty; a per-row read would put this past two hundred.
+    expect($queries)->toBeLessThan(20);
+});
+
+// ---------------------------------------------------------------- the Client column
+
+it('adds a populated Client column for global staff and hides it for everyone else', function () {
+    $a = Tenant::factory()->create(['name' => 'Acme']);
+    $b = Tenant::factory()->create(['name' => 'Beta']);
+    $hc = reportsHcUser(RoleName::OpsManager->value);
+
+    TenantContext::run($a->id, fn () => Call::factory()->create());
+    TenantContext::run($b->id, fn () => Call::factory()->create());
+
+    // A client's own supervisor: every row is the same client, so the column is noise.
+    expect(exportHeadings($a))->not->toContain('Client');
+
+    // Global staff in the all-clients posture.
+    $this->actingAs($hc);
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $headings = (new CallExportRows([]))->headings();
+    $rows = iterator_to_array((new CallExportRows([]))->rows(), preserve_keys: false);
+    $clientIndex = array_search('Client', $headings, strict: true);
+
+    expect($clientIndex)->not->toBeFalse()
+        ->and(collect($rows)->pluck($clientIndex)->sort()->values()->all())->toBe(['Acme', 'Beta']);
+});

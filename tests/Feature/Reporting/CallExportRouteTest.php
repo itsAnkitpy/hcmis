@@ -53,7 +53,7 @@ it('streams a CSV to a permitted reader of the owning client', function () {
 
     $response = $this->actingAs($tl)->get(route('calls.export'))->assertOk();
 
-    expect(exportBody($response))->toStartWith('"Call ID","Saved at"');
+    expect(exportBody($response))->toStartWith('"Call ID",Ticket,"Started (UTC)",Direction');
 });
 
 // CE-5c — the guard that could not be copied from the recording route. An agent passes

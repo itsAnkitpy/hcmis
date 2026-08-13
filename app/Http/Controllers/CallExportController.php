@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Enums\CallDirection;
 use App\Enums\CallOutcome;
 use App\Models\Call;
+use App\Reporting\CallExportRows;
 use App\Reporting\CallReportCsv;
 use App\Tenancy\TenantContext;
 use Generator;
@@ -46,10 +47,10 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  *     problems everywhere else; this route is the only one that knows it is allowed to
  *     take minutes.
  *
- * BUILD STATE (step 1 of the CE build order): guards + streaming, trivial columns. The
- * real menu (CE-4), the one filtered query (CE-5a/CallExportRows), the row cap (CE-3)
- * and the client-zone date boundary (CE-4a/CE-10a) land in the following steps — which
- * is why the validated filters are parsed here but not yet applied to a query.
+ * BUILD STATE (steps 1-2 of the CE build order): guards, streaming, the real menu and
+ * the one filtered query (CE-4/CE-5a, in CallExportRows). Still to come: the 50,000-row
+ * refusal (CE-3), the Excel-safety rules (CE-7), and the client-zone day boundary
+ * (CE-10/CE-10a), which today is cut in UTC and labelled as such in the headers.
  */
 class CallExportController extends Controller
 {
@@ -76,10 +77,12 @@ class CallExportController extends Controller
 
         set_time_limit(self::MAX_SECONDS);
 
+        $rows = new CallExportRows($filters);
+
         return CallReportCsv::stream(
             'calls-'.now()->format('Y-m-d').'.csv',
-            ['Call ID', 'Saved at'],
-            $this->rows($lock, TenantContext::id(), TenantContext::isCrossTenant()),
+            $rows->headings(),
+            $this->rows($rows, $lock, TenantContext::id(), TenantContext::isCrossTenant()),
         );
     }
 
@@ -106,14 +109,12 @@ class CallExportController extends Controller
      *
      * @return Generator<int, array<int, string|int>>
      */
-    private function rows(Lock $lock, ?int $tenantId, bool $crossTenant): Generator
+    private function rows(CallExportRows $source, Lock $lock, ?int $tenantId, bool $crossTenant): Generator
     {
         TenantContext::applyWebRequest($tenantId, $crossTenant);
 
         try {
-            foreach (Call::query()->lazyByIdDesc() as $call) {
-                yield [$call->id, $call->created_at?->toDateTimeString() ?? ''];
-            }
+            yield from $source->rows();
         } finally {
             $lock->release();
             TenantContext::resetWebRequest();
