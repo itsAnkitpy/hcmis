@@ -50,6 +50,9 @@ class CallExportReport extends Page
 
     protected static ?string $navigationLabel = 'Call export';
 
+    /** Match the sidebar. Left unset, Filament builds "Call Export Report" from the class name. */
+    protected static ?string $title = 'Call export';
+
     protected static ?int $navigationSort = 3;
 
     protected string $view = 'filament.pages.reports.call-export';

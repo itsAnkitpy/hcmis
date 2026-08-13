@@ -29,6 +29,23 @@ function exportBody(TestResponse $response): string
     return $response->streamedContent();
 }
 
+/**
+ * The call ids in the file, in the order written. Parsed from the first column rather
+ * than searched for as text: a bare `expect($body)->toContain('5')` matches the 5 in a
+ * timestamp and passes or fails by luck of the ids.
+ *
+ * @return array<int, int>
+ */
+function exportedIds(TestResponse $response): array
+{
+    return collect(explode("\n", trim(exportBody($response))))
+        ->skip(1)
+        ->filter()
+        ->map(fn (string $line): int => (int) str_getcsv($line)[0])
+        ->values()
+        ->all();
+}
+
 it('streams a CSV to a permitted reader of the owning client', function () {
     $tenant = Tenant::factory()->create();
     $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
@@ -63,10 +80,10 @@ it('never leaks another client\'s calls into the file', function () {
     $ours = TenantContext::run($mine->id, fn (): Call => Call::factory()->create());
     $foreign = TenantContext::run($theirs->id, fn (): Call => Call::factory()->create());
 
-    $body = exportBody($this->actingAs($tl)->get(route('calls.export'))->assertOk());
+    $ids = exportedIds($this->actingAs($tl)->get(route('calls.export'))->assertOk());
 
-    expect($body)->toContain((string) $ours->id)
-        ->and($body)->not->toContain((string) $foreign->id);
+    expect($ids)->toContain($ours->id)
+        ->and($ids)->not->toContain($foreign->id);
 });
 
 // CE-5d — a web address is a trust boundary a Filament form is not.
@@ -152,10 +169,9 @@ it('lets global staff export across clients', function () {
     $first = TenantContext::run($a->id, fn (): Call => Call::factory()->create());
     $second = TenantContext::run($b->id, fn (): Call => Call::factory()->create());
 
-    $body = exportBody($this->actingAs($hc)->get(route('calls.export'))->assertOk());
+    $ids = exportedIds($this->actingAs($hc)->get(route('calls.export'))->assertOk());
 
-    expect($body)->toContain((string) $first->id)
-        ->and($body)->toContain((string) $second->id);
+    expect($ids)->toContain($first->id)->toContain($second->id);
 });
 
 // CE-5a's order finding (S107): lazyById() walks ids upwards, the Calls list shows
@@ -165,13 +181,7 @@ it('writes newest first, matching the Calls list order', function () {
     $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
     $calls = TenantContext::run($tenant->id, fn () => Call::factory()->count(3)->create());
 
-    $body = exportBody($this->actingAs($tl)->get(route('calls.export'))->assertOk());
-
-    $ids = collect(explode("\n", trim($body)))
-        ->skip(1)
-        ->map(fn (string $line): int => (int) explode(',', $line)[0])
-        ->values()
-        ->all();
+    $ids = exportedIds($this->actingAs($tl)->get(route('calls.export'))->assertOk());
 
     expect($ids)->toBe($calls->pluck('id')->sortDesc()->values()->all());
 });
