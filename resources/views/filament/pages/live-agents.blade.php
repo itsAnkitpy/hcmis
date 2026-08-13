@@ -105,12 +105,17 @@
                      shows the right wait — only the ticking is the browser's, never the
                      starting point. Without the tick the clock would sit frozen for fifteen
                      seconds at a time, which on a wall screen reads as broken in a way a
-                     frozen COUNT never does. --}}
+                     frozen COUNT never does.
+
+                     LW-7: amber past 3 minutes, red past 5. The colour rides the SAME
+                     ticking number the text does, so it turns over on the floor without
+                     waiting for the next page refresh. --}}
                 @if ($callStats['oldestWaitingAt'] !== null)
                     <span class="text-gray-400">&middot;</span>
                     <span class="tabular-nums"
                           x-data="{ held: {{ max(0, now()->getTimestamp() - $callStats['oldestWaitingAt']) }} }"
-                          x-init="setInterval(() => held++, 1000)">
+                          x-init="setInterval(() => held++, 1000)"
+                          :class="held >= 300 ? 'text-red-600 dark:text-red-400' : (held >= 180 ? 'text-amber-600 dark:text-amber-400' : '')">
                         Longest wait <span class="font-semibold"
                             x-text="Math.floor(held / 60) + ':' + String(held % 60).padStart(2, '0')">&nbsp;</span>
                     </span>

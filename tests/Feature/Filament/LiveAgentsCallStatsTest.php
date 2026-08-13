@@ -46,7 +46,14 @@ it('shows a team leader their own client\'s numbers and never another client\'s'
     // number, so a wrong answer here shows up as an alarming one.
     expect((new LiveAgents)->callStats())->toBe(['active' => 2, 'ringing' => 1, 'waiting' => 3, 'oldestWaitingAt' => $ourOldest]);
 
-    Livewire::test(LiveAgents::class)->assertSee('Longest wait');
+    Livewire::test(LiveAgents::class)
+        ->assertSee('Longest wait')
+        // LW-7: the colour turns amber past 3 minutes and red past 5, off the same
+        // ticking number the text reads, so it changes on the wall screen between page
+        // refreshes. Only the thresholds can be checked from here — the switch itself
+        // happens in the browser.
+        ->assertSee('held >= 300', escape: false)
+        ->assertSee('held >= 180', escape: false);
 });
 
 it('adds every client together for our own global staff', function () {
