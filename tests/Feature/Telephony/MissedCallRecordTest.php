@@ -181,6 +181,12 @@ it('writes nothing when the dialled number belongs to no client (ND-4 — a row 
 });
 
 it('still writes the record when an error tears down a waiting caller (S88 review #5)', function () {
+    // Frozen, because the assertion below is an exact 30 against travel(30). Unfrozen,
+    // any real time spent between the caller arriving and the sweep — a database round
+    // trip is enough — lands the wait on 31 and fails the run. It only ever showed
+    // under a full-suite run, which is the worst way to find it.
+    $this->freezeTime();
+
     $tenant = Tenant::factory()->create();
     $router = fakeAgentRouter(null);
 

@@ -181,7 +181,30 @@ it('leaves a missed call blank where nothing happened and filled where it did', 
         ->and(cell($tenant, $row, 'Disposition'))->toBe('')
         ->and(cell($tenant, $row, 'Sale'))->toBe('')
         // Nobody picked up, so the wait ended when we stopped waiting (CT-7).
-        ->and(cell($tenant, $row, 'Waited'))->toBe('30');
+        ->and(cell($tenant, $row, 'Waited'))->toBe('30')
+        // BLANK, not zero. The listener writes this row at the moment it gives up, so
+        // the call's end and the row's own creation are the same instant and the span
+        // is a truthful-looking `0` — which reads as "the agent wrapped up instantly"
+        // on a call that had no agent at all.
+        ->and(cell($tenant, $row, 'Wrap-up'))->toBe('');
+});
+
+// The other side of the same rule: a call somebody DID answer still reports the time
+// the agent spent typing after it ended.
+it('reports wrap-up time on a call an agent actually handled', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create();
+
+        Call::factory()->forAgent($agent)->inbound()->create([
+            'answered_at' => now()->subSeconds(90),
+            'ended_at' => now()->subSeconds(40),
+            'created_at' => now()->subSeconds(10),
+        ]);
+    });
+
+    expect(cell($tenant, exportRows($tenant)[0], 'Wrap-up'))->toBe('30');
 });
 
 // CT-5: a transferred call is two rows sharing one ticket, and both say so.

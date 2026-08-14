@@ -9,6 +9,7 @@ use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Models\Call;
 use App\Models\CallHandoff;
+use App\Models\PhoneNumber;
 use App\Models\Tenant;
 use App\Telephony\AgentDirectory;
 use App\Telephony\AgentRouter;
@@ -870,6 +871,12 @@ class CallToAgentFlow
                 'direction' => CallDirection::Inbound,
                 'from_number' => $this->callerNumber,
                 'to_number' => $this->dialledNumber,
+                // CE-6, the half the answered path already had. A call nobody picked up
+                // still rang a known number, and "which campaign is losing callers" is
+                // the question these rows exist to answer — so leaving Campaign blank
+                // emptied the column on exactly the rows a supervisor groups by. Inside
+                // the tenant run below, so the lookup is scoped to this client.
+                'campaign_id' => PhoneNumber::campaignIdFor($this->dialledNumber),
                 'outcome' => $outcome,
                 'correlation_id' => $this->ticketNumber,
                 // CE-11, and this row is the one place we can say it without a note:

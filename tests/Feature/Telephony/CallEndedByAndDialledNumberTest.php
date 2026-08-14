@@ -4,6 +4,8 @@ use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Models\Call;
 use App\Models\CallHandoff;
+use App\Models\Campaign;
+use App\Models\PhoneNumber;
 use App\Models\Tenant;
 use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\Flows\Switchboard;
@@ -135,4 +137,63 @@ it('files an abandoned caller as ending the call themselves', function () {
 
     expect($call->outcome)->toBe(CallOutcome::Abandoned)
         ->and($call->ended_by)->toBe(CallEndedBy::Customer);
+});
+
+// CE-6, the half the console already had. Found on staging: the answered rows carried
+// their campaign and the unanswered ones did not — and "which campaign is losing
+// callers" is exactly the question these rows exist to answer.
+it('files the campaign that owns the number on a call nobody answered', function () {
+    [$tenant] = endedByTenant();
+    fakeAgentRouter(null); // nobody free, so the caller waits and then gives up
+
+    $campaignId = TenantContext::run($tenant->id, function () use ($tenant): int {
+        $campaign = Campaign::factory()->create();
+
+        PhoneNumber::factory()->forCampaign($campaign)->create([
+            'number' => dialledNumberForTenant($tenant->id),
+        ]);
+
+        return $campaign->id;
+    });
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('playHoldMusic')->andReturnNull();
+    $telephony->shouldReceive('stopHoldMusic')->andReturnNull();
+    $telephony->shouldReceive('hangup')->andReturnNull();
+    $telephony->shouldReceive('endConversation')->andReturnNull();
+
+    $flow = new CallToAgentFlow($telephony, new Switchboard($telephony));
+    $flow->handle(stasisStart('caller-leg', [], null, (string) $tenant->id));
+    $flow->handle(['type' => 'ChannelDestroyed', 'channel' => ['id' => 'caller-leg']]);
+
+    $call = TenantContext::run($tenant->id, fn (): ?Call => Call::query()->latest('id')->first());
+
+    expect($call->campaign_id)->toBe($campaignId);
+});
+
+// The number is real but nobody assigned it a campaign — a blank is the honest answer,
+// not a crash and not a guess.
+it('leaves the campaign blank when the number belongs to no campaign', function () {
+    [$tenant] = endedByTenant();
+    fakeAgentRouter(null);
+
+    TenantContext::run($tenant->id, fn () => PhoneNumber::factory()->create([
+        'number' => dialledNumberForTenant($tenant->id),
+    ]));
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('playHoldMusic')->andReturnNull();
+    $telephony->shouldReceive('stopHoldMusic')->andReturnNull();
+    $telephony->shouldReceive('hangup')->andReturnNull();
+    $telephony->shouldReceive('endConversation')->andReturnNull();
+
+    $flow = new CallToAgentFlow($telephony, new Switchboard($telephony));
+    $flow->handle(stasisStart('caller-leg', [], null, (string) $tenant->id));
+    $flow->handle(['type' => 'ChannelDestroyed', 'channel' => ['id' => 'caller-leg']]);
+
+    $call = TenantContext::run($tenant->id, fn (): ?Call => Call::query()->latest('id')->first());
+
+    expect($call->campaign_id)->toBeNull();
 });

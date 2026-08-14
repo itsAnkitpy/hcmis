@@ -54,6 +54,31 @@ class PhoneNumber extends Model
     }
 
     /**
+     * The campaign that owns a number a caller rang (call-export.md CE-6), or null
+     * when the number is unknown or nobody has assigned it a campaign.
+     *
+     * 🔴 SCOPED TO THE CURRENT CLIENT, deliberately NOT NumberDirectory. That lookup
+     * is company-blind on purpose, because at call-arrival time finding the owning
+     * client IS the question. Every caller of this method already knows the client,
+     * and a company-blind read could attach another client's campaign to our row —
+     * the one mistake that is worse than a blank column.
+     *
+     * Lives here rather than on either caller because BOTH row writers need it: the
+     * agent's console when a call is answered, and CallToAgentFlow when nobody
+     * answers. One copy, one set of reasoning.
+     */
+    public static function campaignIdFor(?string $number): ?int
+    {
+        if ($number === null) {
+            return null;
+        }
+
+        $campaignId = static::query()->where('number', $number)->value('campaign_id');
+
+        return $campaignId === null ? null : (int) $campaignId;
+    }
+
+    /**
      * @return array<int, string>
      */
     protected function activityLogAttributes(): array

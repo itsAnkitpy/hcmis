@@ -1128,24 +1128,16 @@ class AgentConsole extends Page
      * The campaign that owns the number this caller rang (CE-6) — the fallback when no
      * lead matched, which is the ordinary case for a first-time inbound caller.
      *
-     * Scoped to this request's client, deliberately NOT reusing NumberDirectory: that
-     * lookup is company-blind on purpose, because at call-arrival time finding the
-     * owning client IS the question. Here the client is already settled, and a
-     * company-blind read could attach another client's campaign to our row — the one
-     * mistake that is worse than a blank column.
+     * The lookup itself lives on the model, because the missed-call writer in
+     * CallToAgentFlow needs exactly the same one; the reasoning for why it is
+     * client-scoped rather than company-blind lives with it.
      *
      * `phone_numbers.campaign_id` is nullable, so a number nobody has assigned to a
      * campaign still exports a blank. CE-6 narrows this hole; it does not close it.
      */
     private function campaignForDialledNumber(?CallHandoff $moments): ?int
     {
-        if ($moments?->dialled_number === null) {
-            return null;
-        }
-
-        return PhoneNumberRecord::query()
-            ->where('number', $moments->dialled_number)
-            ->value('campaign_id');
+        return PhoneNumberRecord::campaignIdFor($moments?->dialled_number);
     }
 
     /**

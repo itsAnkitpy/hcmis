@@ -249,7 +249,15 @@ final class CallExportRows
                 ? $this->duration($this->secondsBetween($call->ringing_at, $call->answered_at))
                 : '',
             'talked' => $this->duration($call->talkedSeconds()),
-            'wrap' => $this->duration($this->secondsBetween($call->ended_at, $call->created_at)),
+            // Wrap-up is the agent's own typing time — the call ending to the Done
+            // click. A call NOBODY ANSWERED has no agent and no Done click: the row is
+            // written by the listener at the moment it gives up, so the two timestamps
+            // are the same instant and the span came out as a truthful-looking `0`.
+            // Zero says "the agent wrapped up instantly"; blank says "there was no
+            // agent", which is what happened (CE-4's honesty rule).
+            'wrap' => $this->duration($call->answered_at === null
+                ? null
+                : $this->secondsBetween($call->ended_at, $call->created_at)),
             // CE-11. Blank is a real answer here, not a gap: a call torn down by an
             // error, and every row written before CE-11 shipped, has no side that hung up.
             'ended_by' => $call->ended_by?->label() ?? '',
