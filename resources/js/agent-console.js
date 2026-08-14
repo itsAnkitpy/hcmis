@@ -605,14 +605,25 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
      * agent hears the caller go quiet, which is faster and more certain than anything a
      * second pipe could tell them. Only from 'onCall'.
      *
-     * 🔴 And not while a transfer or conference is ringing (S112 review #2). The screen
-     * stays 'onCall' for that whole window, but the listener has moved on and refuses the
-     * hold — so without this guard the button would flip to "Resume" over a caller who
-     * was never parked. The "the agent hears it" safety net does not catch this one,
-     * because nothing changes and there is nothing to hear.
+     * 🔴 Not while a TRANSFER is in flight, and deliberately not the same for a conference
+     * (S112 review #2, corrected on staging the same session). A transfer hands the call
+     * away: on success this agent's leg is hung up and this screen moves to wrap-up, so
+     * there is nothing here to hold. A conference does the opposite — this agent stays on
+     * the call, and is the very person who then wants to park the caller.
+     *
+     * `conferencing` cannot carry this guard anyway. It is a 35-second screen-side ring
+     * indicator with no signal behind it (CD-6: the agent hears the colleague join, the
+     * screen is never told), while the listener puts the call back to InCall the moment
+     * they join. Hanging Hold off it killed the button for half a minute after a
+     * successful conference — worse than the narrow case it was meant to close.
+     *
+     * What is left uncovered: press Hold during the few seconds a conference is genuinely
+     * ringing and the listener refuses it, while this button still flips to "Resume". One
+     * more click clears it. The real cure is a message back from the listener, which
+     * hold.md §5 lists as deliberately not built.
      */
     toggleHold() {
-        if (this.state !== 'onCall' || this.transferring || this.conferencing) {
+        if (this.state !== 'onCall' || this.transferring) {
             return;
         }
 

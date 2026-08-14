@@ -428,15 +428,15 @@
                          agent's own line. One toggle, next to Mute, shown only on a call.
                          The button flips at once and is never told whether the hold
                          landed — the agent hears the caller go quiet, which is faster
-                         than any confirmation the screen could be sent. Greyed out while
-                         a transfer or conference is ringing: the listener refuses a hold
-                         in that window, and a silent refusal is the one case the agent
-                         cannot hear (S112 review #2). --}}
+                         than any confirmation the screen could be sent. Greyed out while a
+                         TRANSFER is in flight — that hands the call away — but NOT during
+                         a conference, where this agent stays on the call and is the one
+                         who wants to park the caller (S112 review #2, corrected live). --}}
                     <button
                         type="button"
                         x-show="state === 'onCall'"
                         x-on:click="toggleHold()"
-                        :disabled="transferring || conferencing"
+                        :disabled="transferring"
                         :class="held
                             ? 'bg-amber-500 text-white hover:bg-amber-400'
                             : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/20'"
