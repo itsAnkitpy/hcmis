@@ -71,6 +71,10 @@ class CallResource extends Resource
                     TextEntry::make('duration')
                         ->label('Talked')
                         ->state(fn (Call $record): string => Call::asClock($record->talkedSeconds())),
+                    // hold.md H-3, the same three figures as the list.
+                    TextEntry::make('held')
+                        ->label('Held')
+                        ->state(fn (Call $record): string => Call::asClock($record->hold_seconds)),
                 ]),
             Section::make('Recording')
                 ->schema([

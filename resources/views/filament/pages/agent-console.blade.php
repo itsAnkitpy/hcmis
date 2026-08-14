@@ -424,15 +424,37 @@
                         x-text="muted ? 'Unmute' : 'Mute'"
                     ></button>
 
+                    {{-- Hold (hold.md H-10): park the caller with music on and keep this
+                         agent's own line. One toggle, next to Mute, shown only on a call.
+                         The button flips at once and is never told whether the hold
+                         landed — the agent hears the caller go quiet, which is faster
+                         than any confirmation the screen could be sent. Greyed out while
+                         a transfer or conference is ringing: the listener refuses a hold
+                         in that window, and a silent refusal is the one case the agent
+                         cannot hear (S112 review #2). --}}
+                    <button
+                        type="button"
+                        x-show="state === 'onCall'"
+                        x-on:click="toggleHold()"
+                        :disabled="transferring || conferencing"
+                        :class="held
+                            ? 'bg-amber-500 text-white hover:bg-amber-400'
+                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/20'"
+                        class="inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                        x-text="held ? 'Resume' : 'Hold'"
+                    ></button>
+
                     {{-- B2.4a cold transfer: hand the live caller to a free agent. The
                          listener rings the new agent while this agent keeps talking; on
                          success this agent's leg hangs up and the screen moves to wrap-up,
-                         on no-answer the button reverts after the ring window (TD-5). --}}
+                         on no-answer the button reverts after the ring window (TD-5).
+                         Greyed out while the caller is held (H-9): ringing a second agent
+                         needs the caller in the conversation, and a held caller is not. --}}
                     <button
                         type="button"
                         x-show="state === 'onCall'"
                         x-on:click="transfer()"
-                        :disabled="transferring"
+                        :disabled="transferring || held"
                         class="inline-flex items-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
                         x-text="transferring ? 'Transferring…' : 'Transfer'"
                     ></button>
@@ -445,7 +467,7 @@
                         type="button"
                         x-show="state === 'onCall'"
                         x-on:click="conference()"
-                        :disabled="conferencing"
+                        :disabled="conferencing || held"
                         class="inline-flex items-center rounded-lg bg-teal-600 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-500 disabled:cursor-not-allowed disabled:opacity-60"
                         x-text="conferencing ? 'Ringing…' : 'Conference'"
                     ></button>

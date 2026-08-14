@@ -162,6 +162,44 @@ it('reads the customer and our own number from opposite ends on outbound', funct
         ->and(cell($tenant, $row, 'Dial time'))->toBe('12');
 });
 
+// hold.md H-3 + H-7, on the file the client actually reads: Held is its own column and
+// Talked no longer counts it. The BPO team lead asked for the held time as its own
+// figure, not only rolled into the handle time.
+it('writes the held time as its own column and reads it out of Talked', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->create([
+        'answered_at' => now()->subSeconds(300),
+        'ended_at' => now(),
+        'hold_seconds' => 180,
+    ]));
+
+    $row = exportRows($tenant)[0];
+
+    expect(cell($tenant, $row, 'Held'))->toBe('180')
+        // Five minutes on the line, three of them music.
+        ->and(cell($tenant, $row, 'Talked'))->toBe('120');
+});
+
+// H-7's own distinction, and the same one S109 found wrong in the Wrap-up column: zero
+// is a measurement, blank is the absence of one. A call recorded before Hold shipped has
+// no hold information at all and must not read as a confident nought.
+it('leaves the held column blank on a call recorded before Hold shipped', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->create([
+        'answered_at' => now()->subSeconds(300),
+        'ended_at' => now(),
+        'hold_seconds' => null,
+    ]));
+
+    $row = exportRows($tenant)[0];
+
+    expect(cell($tenant, $row, 'Held'))->toBe('')
+        // …and its Talked figure is untouched, which is what makes shipping this safe.
+        ->and(cell($tenant, $row, 'Talked'))->toBe('300');
+});
+
 it('leaves a missed call blank where nothing happened and filled where it did', function () {
     $tenant = Tenant::factory()->create();
 

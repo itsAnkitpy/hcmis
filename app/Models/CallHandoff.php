@@ -52,6 +52,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $answered_at
  * @property Carbon|null $ended_at
  * @property CallEndedBy|null $ended_by
+ * @property int|null $hold_seconds
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
@@ -68,6 +69,10 @@ class CallHandoff extends Model
         'answered_at',
         'ended_at',
         'ended_by',
+        // hold.md H-1/H-7: a total, not a pair of moments — one call can be held three
+        // times, so there is no single pair to store. Written on every resume and at
+        // teardown; the screen copies it onto the row at the Done click.
+        'hold_seconds',
     ];
 
     /**
@@ -80,6 +85,7 @@ class CallHandoff extends Model
             'answered_at' => 'datetime',
             'ended_at' => 'datetime',
             'ended_by' => CallEndedBy::class,
+            'hold_seconds' => 'integer',
         ];
     }
 

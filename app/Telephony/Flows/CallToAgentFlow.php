@@ -207,6 +207,41 @@ class CallToAgentFlow
      */
     private bool $holdMusicOn = false;
 
+    /**
+     * Hold — the caller parked mid-conversation (hold.md H-6). Three ordinary fields on
+     * the handler, and deliberately NOT a sixth value in CallFlowState: the state is read
+     * by the wall screen's tally, by the transfer and conference guards and by the
+     * missed-call safety net, and the first thing a sixth value would break is the wall
+     * screen — a held call would drop out of "calls in progress", which is wrong. It IS
+     * in progress.
+     *
+     *   heldSince      when the current hold started; null whenever nobody is held
+     *   heldSeconds    the running total PER AGENT (H-1), keyed by their user id
+     *   heldByAgentId  whose note the current hold belongs to (H-12) — on a three-way the
+     *                  hold belongs to whoever pressed it, and the other agent's row
+     *                  carries no hold, because they did not hold anybody
+     *
+     * 🔴 Per agent, NOT per call (S112 review #1). A total kept per call and written to
+     * one agent's note is the one arrangement no contact centre uses: the second agent to
+     * press Hold would inherit the first agent's seconds, over-reporting Held and making
+     * talkedSeconds() subtract music that played during somebody else's turn. Every
+     * platform we checked stores hold against the agent leg and adds the legs up when it
+     * wants a call figure — Amazon Connect's AgentInitiatedHoldDuration, Genesys Cloud's
+     * per-segment hold, Cisco's per-leg Termination_Call_Detail. Our shape already suits
+     * it: one note per agent, and each agent's own row on the Calls list (CT-12). The
+     * whole-call total is SUM(hold_seconds) over one ticket, which is a query, not a
+     * column.
+     *
+     * Anything later that needs to tell a held call from a talking one has the answer
+     * already: `heldSince !== null`.
+     */
+    private ?Carbon $heldSince = null;
+
+    /** @var array<int, int> agent user id => their own held seconds on this call */
+    private array $heldSeconds = [];
+
+    private ?int $heldByAgentId = null;
+
     private readonly AgentRouter $router;
 
     private readonly AgentDirectory $directory;
@@ -651,7 +686,7 @@ class CallToAgentFlow
      * Best-effort, exactly like the note write itself (TH-2): a database hiccup must
      * never disturb a live call. A missed stamp costs one blank on one report row.
      *
-     * @param  array<string, Carbon|CallEndedBy>  $moments
+     * @param  array<string, Carbon|CallEndedBy|int>  $moments
      */
     private function stampHandoff(array $moments, ?int $agentUserId = null): void
     {
@@ -1103,6 +1138,107 @@ class CallToAgentFlow
     }
 
     /**
+     * Park the caller mid-conversation (hold.md H-2): take their line out of the
+     * conversation and start music on it. The agent's own line never moves, so the agent
+     * can talk to a colleague, look something up, or take a breath.
+     *
+     * It is the waiting room again, entered from the middle of the call. A caller waits
+     * on their own line with music playing on it — that is all the waiting room has ever
+     * been — so the same two verbs serve both halves of the call and nothing new is
+     * needed at the telephony layer.
+     *
+     * *Why the recording is undisturbed:* the two silent listeners sit on the CALLER's
+     * line, and that line never moves. Taking it out of the conversation leaves them
+     * exactly where they were, which is the same property the conference relies on. The
+     * recording therefore contains the music for as long as the hold lasted (H-11), and
+     * that is correct — the recording is a record of the call as it happened.
+     *
+     * Only from a connected call, and only one hold at a time: a second Hold while the
+     * caller is already held is a no-op, so the total can never be started twice.
+     */
+    public function beginHold(int $agentUserId): void
+    {
+        if ($this->state !== CallFlowState::InCall || $this->heldSince !== null) {
+            return;
+        }
+
+        $this->telephony->removeFromBridge((string) $this->conversationId, (string) $this->callerLegId);
+        $this->startHoldMusicIfSilent();
+
+        $this->heldSince = now();
+        $this->heldByAgentId = $agentUserId;
+
+        Log::info('Hold: the caller is parked with music on; the agent keeps their line.', [
+            'ticket' => $this->ticketNumber,
+            'caller' => $this->callerLegId,
+            'byAgent' => $agentUserId,
+        ]);
+    }
+
+    /**
+     * Put the caller back into the conversation (hold.md H-2): stop the music, return
+     * their line to the same conversation, and add the seconds they were held to this
+     * call's total.
+     *
+     * Any agent on the call may resume — the button is a toggle on one screen, but a
+     * three-way has two screens and stranding the caller because the wrong one clicked
+     * would be the worst possible outcome. The TOTAL still belongs to whoever pressed
+     * Hold (H-12); who ends the hold does not change whose decision it was.
+     *
+     * A no-op when nobody is held, exactly as a `transfer` signal naming an agent on no
+     * call is a no-op.
+     */
+    public function resumeHold(): void
+    {
+        if ($this->heldSince === null) {
+            return;
+        }
+
+        $this->closeHold();
+        $this->stopHoldMusicIfPlaying();
+        $this->telephony->addToBridge((string) $this->conversationId, (string) $this->callerLegId);
+
+        Log::info('Hold: the caller is back in the conversation.', [
+            'ticket' => $this->ticketNumber,
+            'caller' => $this->callerLegId,
+            'heldSecondsByAgent' => $this->heldSeconds,
+        ]);
+    }
+
+    /**
+     * Close an open hold and write the holding agent's own running total to their note
+     * (hold.md H-8). Every ending closes the hold first, and there is exactly one place
+     * to do that — dispose(), the funnel every teardown path reaches, which is where the
+     * hang-up moment is already stamped for the same reason.
+     *
+     * The total is added up against the agent who pressed Hold, so an agent who holds
+     * three times carries the sum of their three, and an agent on the same call who held
+     * once carries only their one (S112 review #1).
+     *
+     * The total is written as an ABSOLUTE number every time it changes, so nothing has
+     * to add up inside the database and a lost write costs one figure rather than
+     * corrupting a running sum.
+     *
+     * A no-op when nobody is held, which is every ordinary call.
+     */
+    private function closeHold(): void
+    {
+        if ($this->heldSince === null) {
+            return;
+        }
+
+        // Never null while a hold is open: beginHold() sets both, and the guard above
+        // only lets us past when it did.
+        $agentUserId = (int) $this->heldByAgentId;
+
+        $this->heldSeconds[$agentUserId] = ($this->heldSeconds[$agentUserId] ?? 0)
+            + (int) $this->heldSince->diffInSeconds(now());
+        $this->heldSince = null;
+
+        $this->stampHandoff(['hold_seconds' => $this->heldSeconds[$agentUserId]], $agentUserId);
+    }
+
+    /**
      * Ring a free agent (B) into a live call while the caller stays with the current
      * agent(s) — the caller is never left alone (the never-strand rule, shared by cold
      * transfer and conference). B answering arrives as their agent-leg StasisStart and
@@ -1117,6 +1253,22 @@ class CallToAgentFlow
         // conversation. Ignore a signal at any other time — a double-click while B
         // already rings (state AddingAgent), or after the call ended.
         if ($this->state !== CallFlowState::InCall) {
+            return;
+        }
+
+        // 🔴 Refused while the caller is held (hold.md H-9). Ringing a second agent needs
+        // the caller to be IN the conversation, because the whole promise of both
+        // features is that the caller is never left alone — and a held caller is already
+        // out of it. Resuming for the agent is worse than refusing: it puts the caller
+        // back into a conversation they were deliberately taken out of, at a moment the
+        // agent did not choose. Press Resume, then Transfer. The two buttons are greyed
+        // out on the screen while held, so the agent is told rather than ignored.
+        if ($this->heldSince !== null) {
+            Log::info('Add agent: refused while the caller is on hold — resume first.', [
+                'ticket' => $this->ticketNumber,
+                'intent' => $intent->name,
+            ]);
+
             return;
         }
 
@@ -1402,6 +1554,18 @@ class CallToAgentFlow
             $this->stampHandoff(['ended_at' => now(), 'ended_by' => CallEndedBy::Agent], $agent->userId);
 
             if ($this->connectedAgents() !== []) {
+                // 🔴 The agent who held the caller has gone, and somebody else is still on
+                // the call — so put the caller back rather than leave them listening to
+                // music nobody can stop. Not in hold.md, which answers what happens when
+                // the call ENDS while held (H-8) and does not reach this one: the call
+                // does not end here, it carries on without the person who parked the
+                // caller. The never-strand rule decides it. The remaining agent's own
+                // button reads "Hold", so without this the caller is stuck until they
+                // hang up.
+                if ($this->heldByAgentId === $agent->userId) {
+                    $this->resumeHold();
+                }
+
                 Log::info('An agent left the call; it continues with the remaining agent(s).', [
                     'ticket' => $this->ticketNumber,
                 ]);
@@ -1466,6 +1630,13 @@ class CallToAgentFlow
      */
     private function dispose(): void
     {
+        // hold.md H-8: any path that ends this agent's part closes the hold first. The
+        // caller hanging up while held, the agent hanging up while held, and a call torn
+        // down by an error all funnel through here, so one line answers all three. Before
+        // the stamp below, because the two write to different columns and the hold total
+        // must reach a note that the hang-up stamp is about to close.
+        $this->closeHold();
+
         // The hang-up (CT-6), onto every note on this call that has not already closed
         // — first close wins (CT-12a). Every teardown path funnels through here, so a
         // call that ends any way at all closes whoever was still talking. Deliberately
@@ -1613,5 +1784,8 @@ class CallToAgentFlow
         $this->pendingReservedTenantId = null;
         $this->pendingReservedAgentId = null;
         $this->holdMusicOn = false;
+        $this->heldSince = null;
+        $this->heldSeconds = [];
+        $this->heldByAgentId = null;
     }
 }

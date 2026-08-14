@@ -63,6 +63,13 @@ class CallsTable
                 TextColumn::make('duration')
                     ->label('Talked')
                     ->state(fn (Call $record): string => Call::asClock($record->talkedSeconds())),
+                // hold.md H-3: next to Waited and Talked, where the eye already looks.
+                // Talked stops at the moment the caller is parked and starts again when
+                // they come back; this is the gap between the two.
+                TextColumn::make('held')
+                    ->label('Held')
+                    ->state(fn (Call $record): string => Call::asClock($record->hold_seconds))
+                    ->tooltip('How long this caller spent on hold, across every hold on the call.'),
                 IconColumn::make('recording_path')->label('Rec')->boolean(),
             ])
             ->defaultSort('created_at', 'desc')

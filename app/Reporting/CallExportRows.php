@@ -165,6 +165,9 @@ final class CallExportRows
             'Waited',
             'Dial time',
             'Talked',
+            // hold.md H-3: beside Talked, because the two are read together — Talked no
+            // longer counts the held part, and this is where the rest of it went.
+            'Held',
             'Wrap-up',
             // CE-11. Their sheet calls this "Hangup reason" / "Term reason"; it is the
             // first thing a supervisor asks about a call that lasted nine seconds.
@@ -249,6 +252,9 @@ final class CallExportRows
                 ? $this->duration($this->secondsBetween($call->ringing_at, $call->answered_at))
                 : '',
             'talked' => $this->duration($call->talkedSeconds()),
+            // hold.md H-7. Blank is a real answer: a call recorded before Hold shipped
+            // carries no hold information at all, and 0 would claim we measured it.
+            'held' => $this->duration($call->hold_seconds),
             // Wrap-up is the agent's own typing time — the call ending to the Done
             // click. A call NOBODY ANSWERED has no agent and no Done click: the row is
             // written by the listener at the moment it gives up, so the two timestamps

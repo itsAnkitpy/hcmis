@@ -76,6 +76,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $answered_at
  * @property Carbon|null $ended_at
  * @property CallEndedBy|null $ended_by
+ * @property int|null $hold_seconds
  * @property int|null $duration_seconds
  * @property string|null $recording_disk
  * @property string|null $recording_path
@@ -100,6 +101,9 @@ class Call extends Model
         'answered_at',
         'ended_at',
         'ended_by',
+        // hold.md H-1/H-7: how long this caller spent on hold, as one total. The single
+        // deliberate exception to CT-1 — a call held three times has no pair of moments.
+        'hold_seconds',
         'duration_seconds',
         'recording_disk',
         'recording_path',
@@ -118,6 +122,7 @@ class Call extends Model
             'answered_at' => 'datetime',
             'ended_at' => 'datetime',
             'ended_by' => CallEndedBy::class,
+            'hold_seconds' => 'integer',
             'duration_seconds' => 'integer',
         ];
     }
@@ -147,12 +152,28 @@ class Call extends Model
      * includes however long the agent spent typing notes. On a transferred call the
      * hang-up stored here is when THIS agent's part ended, so each agent's row carries
      * their own conversation rather than the whole call (CT-12).
+     *
+     * 🔴 MINUS THE HELD TIME (hold.md H-3). A five-minute call with three minutes of
+     * music in it is two minutes of conversation, not five. Both vendors we checked do
+     * the same, and this is the whole reason Hold ships before the Agent Productivity
+     * Report — the report's Average Handle Time is talk + hold + wrap, and a talk figure
+     * that already contains the hold counts it twice.
+     *
+     * One guard in the one shared function all three readers call (the Calls list, the
+     * detail page and the export), so the number cannot mean two things on two screens.
+     * A call that was never held subtracts nothing and reads exactly as it does today.
+     *
+     * Never negative: a hold left open by a torn-down call is closed at teardown against
+     * the same clock, but a clock that steps backwards must not turn a real conversation
+     * into a negative one.
      */
     public function talkedSeconds(): ?int
     {
-        return $this->answered_at !== null && $this->ended_at !== null
-            ? (int) $this->answered_at->diffInSeconds($this->ended_at)
-            : null;
+        if ($this->answered_at === null || $this->ended_at === null) {
+            return null;
+        }
+
+        return max(0, (int) $this->answered_at->diffInSeconds($this->ended_at) - (int) $this->hold_seconds);
     }
 
     /**

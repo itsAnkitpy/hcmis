@@ -204,6 +204,11 @@ class Switchboard implements HandlerRegistry
             'conference' => $tenantId === null
                 ? null
                 : $this->guard($handler, fn () => $handler->beginConference($tenantId)),
+            // hold.md H-10: the same pipe, two more names. Neither needs the company —
+            // nothing is reserved, so there is no board to read, and requiring it would
+            // wrongly refuse a hold to our own global staff on an outbound call.
+            'hold' => $this->guard($handler, fn () => $handler->beginHold($agentUserId)),
+            'resume' => $this->guard($handler, fn () => $handler->resumeHold()),
             default => null,   // an unknown signal is harmlessly ignored
         };
     }

@@ -108,6 +108,14 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     conferenceTimer: null,
     conferenceNotice: null,
 
+    // Hold (hold.md H-10): `held` drives the one toggle button and greys out Transfer and
+    // Conference, which the listener refuses while the caller is parked (H-9). It flips
+    // the moment the agent clicks and is never told whether the hold landed — the same
+    // posture Conference already has, and safe here for a better reason: THE AGENT HEARS
+    // IT. The caller goes quiet the instant the hold takes, so a hold that failed is
+    // audible in under a second and Resume is one click away.
+    held: false,
+
     init() {
         this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
 
@@ -589,6 +597,35 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     },
 
     /**
+     * Hold — park the caller mid-conversation, or put them back (hold.md H-10). One
+     * toggle, signalled over $wire to the listener, which takes the caller's line out of
+     * the conversation and starts music on it (and the reverse on resume).
+     *
+     * The button flips immediately and there is no listener->screen confirmation: the
+     * agent hears the caller go quiet, which is faster and more certain than anything a
+     * second pipe could tell them. Only from 'onCall'.
+     *
+     * 🔴 And not while a transfer or conference is ringing (S112 review #2). The screen
+     * stays 'onCall' for that whole window, but the listener has moved on and refuses the
+     * hold — so without this guard the button would flip to "Resume" over a caller who
+     * was never parked. The "the agent hears it" safety net does not catch this one,
+     * because nothing changes and there is nothing to hear.
+     */
+    toggleHold() {
+        if (this.state !== 'onCall' || this.transferring || this.conferencing) {
+            return;
+        }
+
+        if (this.held) {
+            this.$wire.resumeCall();
+        } else {
+            this.$wire.holdCall();
+        }
+
+        this.held = ! this.held;
+    },
+
+    /**
      * B2.4a — cold-transfer the live call to a free agent. Signal the listener (over
      * $wire -> transferCall(), which POSTs the user-event); the listener reserves a
      * free agent and rings them while this agent keeps talking. On success this
@@ -598,7 +635,9 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
      * from 'onCall', and only one at a time.
      */
     transfer() {
-        if (this.state !== 'onCall' || this.transferring) {
+        // H-9: the listener refuses a transfer while the caller is held, so the screen
+        // does not fire one — the button is greyed out for the same reason.
+        if (this.state !== 'onCall' || this.transferring || this.held) {
             return;
         }
 
@@ -627,7 +666,9 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
      * Only from 'onCall', and only one ring in flight at a time.
      */
     conference() {
-        if (this.state !== 'onCall' || this.conferencing) {
+        // H-9, exactly as for a transfer: a held caller is out of the conversation, so
+        // there is nobody for a second agent to be rung in to.
+        if (this.state !== 'onCall' || this.conferencing || this.held) {
             return;
         }
 
@@ -747,6 +788,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         clearTimeout(this.conferenceTimer);
         this.conferencing = false;
         this.conferenceNotice = null;
+        this.held = false;
     },
 
     destroy() {

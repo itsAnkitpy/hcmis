@@ -763,6 +763,34 @@ class AgentConsole extends Page
     }
 
     /**
+     * Park the live caller (hold.md H-10): the caller leaves the conversation, hears
+     * music, and the agent keeps their own line. The browser calls this over $wire when
+     * the agent presses Hold; it POSTs the same kind of control signal as Transfer and
+     * Conference, only named 'hold', carrying the agent's own user id — they are on
+     * exactly one call, which is all the always-on program needs to find it.
+     *
+     * No company on this one, unlike Transfer and Conference: nothing is reserved, so
+     * there is no board to read. Requiring one would refuse a hold to our own global
+     * staff on an outbound call, who have no client in scope and are entitled to it.
+     *
+     * Renderless: it fires mid-call, so it must not morph the live console. The screen
+     * flips its own button and is not told whether the hold landed — the agent HEARS it,
+     * because the caller goes quiet the instant it does.
+     */
+    #[Renderless]
+    public function holdCall(): void
+    {
+        app(TelephonyProvider::class)->signal('hold', ['agentUserId' => (string) auth()->id()]);
+    }
+
+    /** The other half of the toggle (H-10): put the caller back into the conversation. */
+    #[Renderless]
+    public function resumeCall(): void
+    {
+        app(TelephonyProvider::class)->signal('resume', ['agentUserId' => (string) auth()->id()]);
+    }
+
+    /**
      * Whether a (normalized) number is on the agent's own client's Do-Not-Call
      * list (O1). Runs in the web request's tenant context, so BelongsToTenant +
      * RLS wall the check to this client — another client's list never blocks here.
@@ -1118,6 +1146,13 @@ class AgentConsole extends Page
             // CE-11: which side put the phone down, carried on the same note as the
             // moments and copied across the same way.
             'ended_by' => $moments?->ended_by,
+            // hold.md H-7: how long this caller was held, carried on the same note. The
+            // fallback to zero is the whole distinction the column exists for — a note
+            // means the always-on program handled this call, so "no hold on the note"
+            // means it was never held, which is a measured 0. NO note means we know
+            // nothing about this call's holds at all, and that reads as a blank. Zero is
+            // a measurement, blank is the absence of one.
+            'hold_seconds' => $moments === null ? null : (int) $moments->hold_seconds,
             // The other half of a passed-on call already has the audio (CT-15).
             'recording_disk' => $sibling?->recording_disk,
             'recording_path' => $sibling?->recording_path,
