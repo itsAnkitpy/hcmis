@@ -3,6 +3,7 @@
 use App\Enums\CallDirection;
 use App\Events\Telephony\RecordingReady;
 use App\Listeners\AttachRecordingToCall;
+use App\Models\ActivityLog;
 use App\Models\Call;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
@@ -137,6 +138,37 @@ it('still skips a genuine non-UUID callId without retrying (a stray raw-leg / la
     // A raw Asterisk leg id (no ticket was ever minted for it) — never a `calls` row to
     // attach. Inbound calls are no longer in this bucket (they now carry the ticket, TH-4).
     $listener->handle(recordingReadyFor('1718999999.42'));
+});
+
+it('writes an audit row for the recording it files, on every row (the CT-13 regression)', function () {
+    $tenant = Tenant::factory()->create();
+    $uuid = (string) Str::uuid();
+
+    // 🔴 The regression this pins. Commit 86b2cf2 swapped ->first()?->update() for a
+    // query-builder update() to reach both rows of a transferred call. That is a single
+    // SQL statement, so no Eloquent event fired, so the Spatie hook never ran and the
+    // audit row stopped being written — silently, because the recording still attached.
+    TenantContext::run($tenant->id, function () use ($uuid): void {
+        Call::factory()->count(2)->create([
+            'correlation_id' => $uuid,
+            'recording_disk' => null,
+            'recording_path' => null,
+        ]);
+    });
+
+    (new AttachRecordingToCall)->handle(recordingReadyFor($uuid));
+
+    $audited = TenantContext::run($tenant->id, fn () => ActivityLog::query()
+        ->where('log_name', 'call')
+        ->where('event', 'updated')
+        ->get());
+
+    // Automatic before/after model changes live in `attribute_changes`; `properties`
+    // is for the hand-written entries in App\Audit\Audit.
+    expect($audited)->toHaveCount(2)
+        ->and($audited->every(
+            fn (ActivityLog $row): bool => $row->attribute_changes['attributes']['recording_path'] === 'recordings/call-1.mp3',
+        ))->toBeTrue();
 });
 
 it('files the recording on BOTH rows of a passed-on call, not whichever came back first (CT-13)', function () {

@@ -111,13 +111,20 @@ class AttachRecordingToCall implements ShouldQueue
         // row does not EXIST yet when this runs (they are still typing their notes),
         // so it is the wrap-up that back-fills from its sibling — see CT-15 in
         // AgentConsole::siblingRecording().
+        //
+        // 🔴 One row at a time, THROUGH THE MODEL. A query-builder update() is a single
+        // SQL statement that fires no Eloquent events, so the activity-log hook never
+        // runs — and `recording_path` IS on Call::activityLogAttributes(), so this write
+        // used to leave an audit row and then silently stopped (commit 86b2cf2, the CT-13
+        // fix). A client disputing which recording belongs to which call needs that row.
+        // Two rows at most on a transferred call, so the loop costs nothing.
         TenantContext::run($tenantId, function () use ($event): void {
             Call::query()
                 ->where('correlation_id', $event->callId)
-                ->update([
+                ->each(fn (Call $call) => $call->update([
                     'recording_disk' => $event->disk,
                     'recording_path' => $event->path,
-                ]);
+                ]));
         });
     }
 }
