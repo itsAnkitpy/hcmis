@@ -24,6 +24,9 @@ use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\DncEntry;
 use App\Models\Lead;
+// The model, aliased: App\Support\PhoneNumber (the number formatter) already owns the
+// bare name in this file.
+use App\Models\PhoneNumber as PhoneNumberRecord;
 use App\Models\User;
 use App\Support\PhoneNumber;
 use App\Telephony\AgentDirectory;
@@ -1082,16 +1085,26 @@ class AgentConsole extends Page
     private function recordCall(?Lead $lead, ?Disposition $disposition): void
     {
         $isOutbound = $this->callDirection === CallDirection::Outbound;
-        $ourNumber = $isOutbound ? config('telephony.outbound.caller_id') : null;
         $moments = $this->handoffMoments();
         $sibling = $this->siblingRecording();
+
+        // CE-6: on inbound, OUR number is the one they rang, and the listener now says
+        // which. Before this it was simply null, so an answered inbound call exported a
+        // blank in the column the client reads as "which line did this come in on".
+        $ourNumber = $isOutbound
+            ? config('telephony.outbound.caller_id')
+            : $moments?->dialled_number;
 
         Call::create([
             'direction' => $this->callDirection,
             'from_number' => $isOutbound ? $ourNumber : $this->callPartyNumber,
             'to_number' => $isOutbound ? $this->callPartyNumber : $ourNumber,
             'lead_id' => $lead?->id,
-            'campaign_id' => $lead?->campaign_id,
+            // CE-6: the matched lead's campaign still wins — it is the more specific
+            // fact, and this only fills the gap where there is no lead at all. That gap
+            // is most inbound calls, which is why Campaign was the biggest hole in the
+            // export's menu.
+            'campaign_id' => $lead?->campaign_id ?? $this->campaignForDialledNumber($moments),
             'agent_id' => auth()->id(),
             'disposition_id' => $disposition?->id,
             'outcome' => $this->outcomeFor($disposition),
@@ -1102,10 +1115,37 @@ class AgentConsole extends Page
             'ringing_at' => $moments?->created_at,
             'answered_at' => $moments?->answered_at,
             'ended_at' => $moments?->ended_at,
+            // CE-11: which side put the phone down, carried on the same note as the
+            // moments and copied across the same way.
+            'ended_by' => $moments?->ended_by,
             // The other half of a passed-on call already has the audio (CT-15).
             'recording_disk' => $sibling?->recording_disk,
             'recording_path' => $sibling?->recording_path,
         ]);
+    }
+
+    /**
+     * The campaign that owns the number this caller rang (CE-6) — the fallback when no
+     * lead matched, which is the ordinary case for a first-time inbound caller.
+     *
+     * Scoped to this request's client, deliberately NOT reusing NumberDirectory: that
+     * lookup is company-blind on purpose, because at call-arrival time finding the
+     * owning client IS the question. Here the client is already settled, and a
+     * company-blind read could attach another client's campaign to our row — the one
+     * mistake that is worse than a blank column.
+     *
+     * `phone_numbers.campaign_id` is nullable, so a number nobody has assigned to a
+     * campaign still exports a blank. CE-6 narrows this hole; it does not close it.
+     */
+    private function campaignForDialledNumber(?CallHandoff $moments): ?int
+    {
+        if ($moments?->dialled_number === null) {
+            return null;
+        }
+
+        return PhoneNumberRecord::query()
+            ->where('number', $moments->dialled_number)
+            ->value('campaign_id');
     }
 
     /**

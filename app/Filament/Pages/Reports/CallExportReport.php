@@ -143,16 +143,55 @@ class CallExportReport extends Page
      * The count comes from CallExportRows::query() — the SAME builder the download walks
      * (CE-5a's one-builder rule), so the number promised here and the rows written can
      * never disagree. It is also the count CE-3's row cap needs, arriving one step early.
+     *
+     * CE-3's refusal lives on the route, because a web address is the guard and a screen
+     * is not. This line is the earlier, kinder half of the same rule: the supervisor is
+     * told the range is too big while they can still change it, instead of finding out by
+     * being turned around after pressing Download.
      */
     public function exportSummary(): string
     {
         $count = (new CallExportRows($this->exportFilters()))->query()->count();
-        $noun = $count === 1 ? 'call' : 'calls';
         $applied = $this->appliedFilters();
+        $where = $applied === [] ? 'no filters set, so every call you can see' : implode(' · ', $applied);
+        $limit = CallExportRows::maxRows();
 
-        return $applied === []
-            ? sprintf('Ready to export %s %s — no filters set, so every call you can see.', number_format($count), $noun)
-            : sprintf('Ready to export %s %s — %s.', number_format($count), $noun, implode(' · ', $applied));
+        if ($count > $limit) {
+            return sprintf(
+                'That is %s calls — %s — which is over the %s the export can write. Shorten the date range, or add a filter.',
+                number_format($count),
+                $where,
+                number_format($limit),
+            );
+        }
+
+        return sprintf('Ready to export %s %s — %s.', number_format($count), $count === 1 ? 'call' : 'calls', $where);
+    }
+
+    /**
+     * CE-12a. The extra customer columns appear only when the export is narrowed to one
+     * campaign, because a spreadsheet's heading row is written once and two campaigns
+     * can define two different sets of fields. Said on screen so it is a rule the
+     * supervisor can see, not a surprise they find in the file.
+     */
+    public function customFieldsNote(): ?string
+    {
+        $campaign = filled($this->filters['campaignId'] ?? null)
+            ? Campaign::find((int) $this->filters['campaignId'])
+            : null;
+
+        $fields = collect($campaign?->custom_fields ?? [])
+            ->pluck('label')
+            ->filter()
+            ->all();
+
+        if ($campaign === null) {
+            return 'Pick a single campaign to also export its own customer fields as extra columns.';
+        }
+
+        return $fields === []
+            ? sprintf('%s has no custom customer fields, so the file holds the standard columns only.', $campaign->name)
+            : sprintf('Plus %s\'s own customer fields as extra columns: %s.', $campaign->name, implode(', ', $fields));
     }
 
     /**

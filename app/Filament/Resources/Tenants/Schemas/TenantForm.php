@@ -3,8 +3,10 @@
 namespace App\Filament\Resources\Tenants\Schemas;
 
 use App\Tenancy\Settings\BusinessHoursForm;
+use DateTimeZone;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
@@ -84,6 +86,26 @@ class TenantForm
                             ->helperText('How long a caller may wait before we end the call and add them to the missed-call list. Default 180 (three minutes).'),
                     ])
                     ->columns(2)
+                    ->hiddenOn('create'),
+
+                // call-export.md CE-10. Same reasoning as the waiting-room settings
+                // above: a real column, blank means the system default, and the change
+                // reaches the audit trail — because changing this moves calls between
+                // days in every report from that moment on.
+                Section::make('Reporting')
+                    ->description('How this client\'s exported reports read. Leave blank to use the system default.')
+                    ->schema([
+                        Select::make('timezone')
+                            ->label('Report time zone')
+                            ->options(array_combine(
+                                DateTimeZone::listIdentifiers(),
+                                DateTimeZone::listIdentifiers(),
+                            ))
+                            ->searchable()
+                            ->native(false)
+                            ->placeholder('System default ('.config('app.report_timezone').')')
+                            ->helperText('Times in exported files are written in this zone, and a day starts and ends in it. The screens in the panel still show UTC.'),
+                    ])
                     ->hiddenOn('create'),
 
                 Section::make('Business hours')

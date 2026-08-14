@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Audit\LogsModelActivity;
 use App\Enums\CallDirection;
+use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\CallFactory;
@@ -74,6 +75,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $ringing_at
  * @property Carbon|null $answered_at
  * @property Carbon|null $ended_at
+ * @property CallEndedBy|null $ended_by
  * @property int|null $duration_seconds
  * @property string|null $recording_disk
  * @property string|null $recording_path
@@ -97,6 +99,7 @@ class Call extends Model
         'ringing_at',
         'answered_at',
         'ended_at',
+        'ended_by',
         'duration_seconds',
         'recording_disk',
         'recording_path',
@@ -114,6 +117,7 @@ class Call extends Model
             'ringing_at' => 'datetime',
             'answered_at' => 'datetime',
             'ended_at' => 'datetime',
+            'ended_by' => CallEndedBy::class,
             'duration_seconds' => 'integer',
         ];
     }

@@ -88,4 +88,23 @@ return [
         ['code' => 'TEA_BREAK', 'label' => 'Tea Break'],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Call export row cap
+    |--------------------------------------------------------------------------
+    |
+    | The one limit on the Call Export (call-export.md CE-3). Ask for more calls
+    | than this and the export refuses before the first byte, naming the real
+    | count — it never truncates, because a short file that looks complete is
+    | worse than no file.
+    |
+    | A setting rather than a constant for two reasons: CE-3 says outright that
+    | this number is the trigger for building the queued export (§9.3 stage 2),
+    | so it is expected to move; and a constant cannot be lowered in a test,
+    | which would leave the only refusal in this feature untested.
+    |
+    */
+
+    'call_export_max_rows' => (int) env('CALL_EXPORT_MAX_ROWS', 50000),
+
 ];

@@ -48,10 +48,16 @@ function exportHeadings(Tenant $tenant, array $filters = []): array
     return TenantContext::run($tenant->id, fn (): array => (new CallExportRows($filters))->headings());
 }
 
-/** The value under a named heading, for one row. */
-function cell(Tenant $tenant, array $row, string $heading): string|int|null
+/**
+ * The value under a named heading, for one row. Takes the same filters the row was
+ * produced with, because CE-12's custom columns exist only under a campaign filter — a
+ * heading list built without them would not contain the column being asked for.
+ *
+ * @param  array<string, mixed>  $filters
+ */
+function cell(Tenant $tenant, array $row, string $heading, array $filters = []): string|int|null
 {
-    $index = array_search($heading, exportHeadings($tenant), strict: true);
+    $index = array_search($heading, exportHeadings($tenant, $filters), strict: true);
 
     expect($index)->not->toBeFalse("No column named {$heading}");
 
@@ -233,9 +239,11 @@ it('links a recording only when there is one', function () {
 // ---------------------------------------------------------------- the date boundary
 
 // CE-4a. The half-open end is the whole reason this test exists: `<= endDate` reads as
-// midnight and would drop nearly the entire final day.
+// midnight and would drop nearly the entire final day. Run for a UTC client so the two
+// boundaries under test are CE-4a's and not CE-10a's — the client-zone cut has its own
+// tests below.
 it('includes a call late on the last day and excludes one early the next', function () {
-    $tenant = Tenant::factory()->create();
+    $tenant = Tenant::factory()->create(['timezone' => 'UTC']);
 
     [$inside, $outside] = TenantContext::run($tenant->id, fn (): array => [
         Call::factory()->create(['created_at' => '2026-08-13 23:50:00']),
@@ -281,10 +289,11 @@ it('keeps outbound calls in a date range even though they have no start moment',
 });
 
 // §8's parity test: the export and the Calls list must agree on WHICH calls fall in a
-// range. Run in UTC so both sides mean the same instants — CE-10a deliberately moves the
-// export's boundary into the client's zone later, and that divergence is its own test.
+// range. Run for a UTC client so both sides mean the same instants — CE-10a deliberately
+// moves the export's boundary into the client's zone, and that divergence is its own
+// test below. **This test proves the two agree on which calls, not on which zone.**
 it('returns the same calls as the Calls list for the same date range', function () {
-    $tenant = Tenant::factory()->create();
+    $tenant = Tenant::factory()->create(['timezone' => 'UTC']);
 
     TenantContext::run($tenant->id, function () {
         Call::factory()->create(['created_at' => '2026-08-12 09:00:00']);
@@ -305,6 +314,67 @@ it('returns the same calls as the Calls list for the same date range', function 
         ->all());
 
     expect($exported)->toBe($listed);
+});
+
+// ------------------------------------------------------------------ the client's zone
+
+// CE-10. The heading names the zone because a bare timestamp in a file that leaves the
+// building will be read as local time by somebody, eventually.
+it('writes timestamps in the client\'s own zone and names it in the heading', function () {
+    $tenant = Tenant::factory()->create(['timezone' => 'Asia/Kolkata']);
+
+    TenantContext::run($tenant->id, fn (): Call => Call::factory()->create([
+        'created_at' => '2026-08-13 09:00:00',
+        'started_at' => '2026-08-13 09:00:00',
+    ]));
+
+    $row = exportRows($tenant)[0];
+
+    // 09:00 UTC is 14:30 on an India-time floor.
+    expect(exportHeadings($tenant))->toContain('Started (IST)')
+        ->and(cell($tenant, $row, 'Started (IST)'))->toBe('2026-08-13 14:30:00');
+});
+
+it('falls back to the system default zone when the client has set none', function () {
+    config(['app.report_timezone' => 'Asia/Dubai']);
+
+    $tenant = Tenant::factory()->create(['timezone' => null]);
+
+    TenantContext::run($tenant->id, fn (): Call => Call::factory()->create([
+        'created_at' => '2026-08-13 09:00:00',
+        'started_at' => '2026-08-13 09:00:00',
+    ]));
+
+    // Dubai has no abbreviation of its own, so PHP names the offset — still a named
+    // thing rather than a bare timestamp, which is the whole point of the heading.
+    expect(cell($tenant, exportRows($tenant)[0], 'Started (+04)'))->toBe('2026-08-13 13:00:00');
+});
+
+// CE-10a — the half of CE-10 that is easy to miss. Printing India time while cutting the
+// day at UTC midnight produces a file that contradicts its own heading: the first four
+// and a half hours of the shift are missing and the last four and a half belong to the
+// next day.
+it('cuts the day in the client\'s zone, not ours', function () {
+    $tenant = Tenant::factory()->create(['timezone' => 'Asia/Kolkata']);
+
+    [$before, $first, $last, $after] = TenantContext::run($tenant->id, fn (): array => [
+        // 18:29 UTC on the 12th is 23:59 on the 12th in India — the day before.
+        Call::factory()->create(['created_at' => '2026-08-12 18:29:00']),
+        // 18:30 UTC on the 12th is midnight on the 13th in India — the first moment.
+        Call::factory()->create(['created_at' => '2026-08-12 18:30:00']),
+        // 18:29 UTC on the 13th is 23:59 on the 13th — the last moment.
+        Call::factory()->create(['created_at' => '2026-08-13 18:29:00']),
+        // 18:30 UTC on the 13th is already the 14th in India.
+        Call::factory()->create(['created_at' => '2026-08-13 18:30:00']),
+    ]);
+
+    $ids = collect(exportRows($tenant, ['startDate' => '2026-08-13', 'endDate' => '2026-08-13']))
+        ->map(fn (array $r): int => (int) cell($tenant, $r, 'Call ID'))
+        ->all();
+
+    expect($ids)->toEqualCanonicalizing([$first->id, $last->id])
+        ->not->toContain($before->id)
+        ->not->toContain($after->id);
 });
 
 // ---------------------------------------------------------------- the other filters
@@ -440,4 +510,75 @@ it('adds a populated Client column for global staff and hides it for everyone el
 
     expect($clientIndex)->not->toBeFalse()
         ->and(collect($rows)->pluck($clientIndex)->sort()->values()->all())->toBe(['Acme', 'Beta']);
+});
+
+// ------------------------------------------------------------------- CE-12 custom fields
+
+// CE-12. About a third of their sheet's columns are a CUSTOMER record, not a call
+// record, and every client's customer looks different — so the campaign's own defined
+// fields become the columns rather than fifteen of somebody else's.
+it('appends the selected campaign\'s own customer fields as extra columns', function () {
+    $tenant = Tenant::factory()->create();
+
+    [$campaign, $call] = TenantContext::run($tenant->id, function (): array {
+        $campaign = Campaign::factory()->create([
+            'custom_fields' => [
+                ['key' => 'policy_number', 'label' => 'Policy Number', 'type' => 'text'],
+                ['key' => 'postcode', 'label' => 'Postcode', 'type' => 'text'],
+            ],
+        ]);
+        $lead = Lead::factory()->create([
+            'campaign_id' => $campaign->id,
+            'custom_fields' => ['policy_number' => 'PN-9931', 'postcode' => 'HP1 2AB'],
+        ]);
+
+        return [$campaign, Call::factory()->create(['campaign_id' => $campaign->id, 'lead_id' => $lead->id])];
+    });
+
+    $filters = ['campaignId' => $campaign->id];
+    $row = exportRows($tenant, $filters)[0];
+
+    expect(exportHeadings($tenant, $filters))->toContain('Policy Number')->toContain('Postcode')
+        ->and(cell($tenant, $row, 'Policy Number', $filters))->toBe('PN-9931')
+        ->and(cell($tenant, $row, 'Postcode', $filters))->toBe('HP1 2AB');
+});
+
+// CE-12a — the restriction, and the reason for it: a CSV writes its headings once,
+// before any row, so an export spanning two campaigns cannot know its own shape in time.
+it('writes no custom columns at all when no campaign is selected', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $campaign = Campaign::factory()->create([
+            'custom_fields' => [['key' => 'policy_number', 'label' => 'Policy Number', 'type' => 'text']],
+        ]);
+        $lead = Lead::factory()->create([
+            'campaign_id' => $campaign->id,
+            'custom_fields' => ['policy_number' => 'PN-9931'],
+        ]);
+        Call::factory()->create(['campaign_id' => $campaign->id, 'lead_id' => $lead->id]);
+    });
+
+    expect(exportHeadings($tenant))->not->toContain('Policy Number')
+        ->and(exportRows($tenant)[0])->toHaveCount(count(exportHeadings($tenant)));
+});
+
+// A call with no lead has no customer record, so those columns are blank — and, more
+// importantly, still PRESENT, or the row would be shorter than its own heading.
+it('keeps the row and the heading the same width when the call has no lead', function () {
+    $tenant = Tenant::factory()->create();
+
+    $campaign = TenantContext::run($tenant->id, function (): Campaign {
+        $campaign = Campaign::factory()->create([
+            'custom_fields' => [['key' => 'policy_number', 'label' => 'Policy Number', 'type' => 'text']],
+        ]);
+        Call::factory()->create(['campaign_id' => $campaign->id, 'lead_id' => null]);
+
+        return $campaign;
+    });
+
+    $filters = ['campaignId' => $campaign->id];
+
+    expect(exportRows($tenant, $filters)[0])->toHaveCount(count(exportHeadings($tenant, $filters)))
+        ->and(cell($tenant, exportRows($tenant, $filters)[0], 'Policy Number', $filters))->toBe('');
 });

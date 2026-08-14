@@ -4,6 +4,7 @@ use App\Enums\CallDirection;
 use App\Enums\RoleName;
 use App\Filament\Pages\Reports\CallExportReport;
 use App\Models\Call;
+use App\Models\Campaign;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Tenancy\TenantContext;
@@ -70,6 +71,24 @@ it('names a leftover agent filter in the line, not just the smaller number', fun
         expect(summaryPage($tenant, ['agentId' => $agent->id])->exportSummary())
             ->toContain('agent Abhikesh');
     });
+});
+
+// CE-3's earlier half. The route is the guard, but the screen is where the supervisor
+// can still do something about it — so the warning has to arrive before the click, and
+// it has to carry both numbers, exactly as the refusal does.
+it('warns on screen when the filters would produce more rows than the cap', function () {
+    config(['hcims.call_export_max_rows' => 2]);
+
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $this->actingAs($tl);
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->count(3)->create());
+
+    TenantContext::run($tenant->id, fn () => expect(summaryPage($tenant, [])->exportSummary())
+        ->toContain('3 calls')
+        ->toContain('over the 2')
+        ->not->toContain('Ready to export'));
 });
 
 it('says plainly when nothing is filtered', function () {
@@ -165,4 +184,38 @@ it('keeps the summary and the download link telling the same story', function ()
         expect($page->exportSummary())->toContain('2 calls')
             ->and($page->downloadUrl())->toContain('agentId='.$agent->id);
     });
+});
+
+// CE-12a on screen. The extra customer columns follow the campaign filter, and a rule
+// the supervisor can see beats one they discover in the file.
+it('says on screen which campaign\'s customer fields will be added', function () {
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $this->actingAs($tl);
+
+    $campaign = TenantContext::run($tenant->id, fn (): Campaign => Campaign::factory()->create([
+        'name' => 'Renewals',
+        'custom_fields' => [['key' => 'policy_number', 'label' => 'Policy Number', 'type' => 'text']],
+    ]));
+
+    TenantContext::run($tenant->id, function () use ($tenant, $campaign) {
+        expect(summaryPage($tenant, [])->customFieldsNote())
+            ->toContain('Pick a single campaign')
+            ->and(summaryPage($tenant, ['campaignId' => $campaign->id])->customFieldsNote())
+            ->toContain('Renewals')
+            ->toContain('Policy Number');
+    });
+});
+
+it('says plainly when the chosen campaign has no customer fields of its own', function () {
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    $this->actingAs($tl);
+
+    $campaign = TenantContext::run($tenant->id, fn (): Campaign => Campaign::factory()
+        ->create(['name' => 'Renewals', 'custom_fields' => []]));
+
+    TenantContext::run($tenant->id, fn () => expect(
+        summaryPage($tenant, ['campaignId' => $campaign->id])->customFieldsNote()
+    )->toContain('no custom customer fields'));
 });

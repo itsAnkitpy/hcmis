@@ -7,6 +7,8 @@ namespace App\Reporting;
 use App\Enums\CallDirection;
 use App\Filament\Support\ClientColumn;
 use App\Models\Call;
+use App\Models\Campaign;
+use App\Tenancy\TenantContext;
 use Carbon\CarbonImmutable;
 use DateTimeInterface;
 use Generator;
@@ -38,10 +40,32 @@ final class CallExportRows
     /** How many rows one database round trip fetches while walking the range. */
     private const CHUNK = 1000;
 
+    /** The client's report zone (CE-10), resolved once and reused by every row. */
+    private ?string $zone = null;
+
+    /**
+     * The selected campaign's custom-field columns (CE-12), resolved once. Null means
+     * "not looked up yet"; an empty array means "looked up, there are none" — the
+     * distinction is what stops a campaign with no custom fields being re-queried on
+     * every one of 50,000 rows.
+     *
+     * @var array<int, array{key: string, label: string}>|null
+     */
+    private ?array $customFields = null;
+
     /**
      * @param  array<string, mixed>  $filters  The validated query parameters (CE-5d).
      */
     public function __construct(private readonly array $filters) {}
+
+    /**
+     * CE-3's cap — the most rows one export may write. Read through one method so the
+     * controller's refusal and the screen's warning can never be told different numbers.
+     */
+    public static function maxRows(): int
+    {
+        return (int) config('hcims.call_export_max_rows', 50000);
+    }
 
     /**
      * The one query. Every filter, the date boundary, and the relations each row reads.
@@ -77,8 +101,12 @@ final class CallExportRows
             // alone means midnight and drops nearly the whole final day; the Calls list
             // uses whereDate, which means the whole of it. This form matches the list
             // and has no "how many decimal places does a timestamp have" question in it.
-            ->when($this->date('endDate'), fn (Builder $q, CarbonImmutable $until): Builder => $q
-                ->where('calls.created_at', '<', $until->addDay()))
+            //
+            // The extra day is added IN THE CLIENT'S ZONE, before the conversion to UTC
+            // (CE-10a) — adding 24 UTC hours instead would land an hour out on the two
+            // days a year a zone with daylight saving changes.
+            ->when($this->date('endDate', 1), fn (Builder $q, CarbonImmutable $until): Builder => $q
+                ->where('calls.created_at', '<', $until))
             ->when($this->id('agentId'), fn (Builder $q, int $id): Builder => $q->where('agent_id', $id))
             ->when($this->id('campaignId'), fn (Builder $q, int $id): Builder => $q->where('campaign_id', $id))
             ->when($this->id('dispositionId'), fn (Builder $q, int $id): Builder => $q->where('disposition_id', $id))
@@ -99,11 +127,24 @@ final class CallExportRows
      */
     public function headings(): array
     {
+        return array_merge($this->fixedHeadings(), array_column($this->customFields(), 'label'));
+    }
+
+    /**
+     * The columns we always write. Kept separate from headings() so CE-12's extra
+     * columns are appended AFTER the blank-dropping filter below — a custom field whose
+     * label happened to be empty would otherwise shorten the heading row and leave every
+     * row after it one column out of step with its own header.
+     *
+     * @return array<int, string>
+     */
+    private function fixedHeadings(): array
+    {
         return array_values(array_filter([
             'Call ID',
             'Ticket',
             $this->showsClient() ? 'Client' : null,
-            'Started ('.$this->zone().')',
+            'Started ('.$this->zoneLabel().')',
             'Direction',
             'Customer number',
             'Our number',
@@ -111,7 +152,7 @@ final class CallExportRows
             'Campaign',
             'Lead ID',
             'Lead name',
-            'Lead entered ('.$this->zone().')',
+            'Lead entered ('.$this->zoneLabel().')',
             'Disposition',
             'Sale',
             'Contact',
@@ -125,6 +166,9 @@ final class CallExportRows
             'Dial time',
             'Talked',
             'Wrap-up',
+            // CE-11. Their sheet calls this "Hangup reason" / "Term reason"; it is the
+            // first thing a supervisor asks about a call that lasted nine seconds.
+            'Ended by',
             'Recording',
             'Recording link',
             'Passed on',
@@ -153,6 +197,14 @@ final class CallExportRows
      * @return array<int, string|int|null>
      */
     private function row(Call $call): array
+    {
+        return array_merge($this->fixedRow($call), $this->customValues($call));
+    }
+
+    /**
+     * @return array<int, string|int|null>
+     */
+    private function fixedRow(Call $call): array
     {
         $outbound = $call->direction === CallDirection::Outbound;
 
@@ -198,12 +250,88 @@ final class CallExportRows
                 : '',
             'talked' => $this->duration($call->talkedSeconds()),
             'wrap' => $this->duration($this->secondsBetween($call->ended_at, $call->created_at)),
+            // CE-11. Blank is a real answer here, not a gap: a call torn down by an
+            // error, and every row written before CE-11 shipped, has no side that hung up.
+            'ended_by' => $call->ended_by?->label() ?? '',
             'recording' => $this->flag(filled($call->recording_path)),
             // Safe to hand out: recordings are served through a login-gated,
             // audit-logged route, never a public URL.
             'recording_link' => filled($call->recording_path) ? route('calls.recording', $call) : '',
             'passed_on' => $this->flag((bool) $call->was_passed_on),
         ], fn (string|int|null $value): bool => $value !== null));
+    }
+
+    /**
+     * CE-12 + CE-12a — the campaign's own customer fields, as extra columns.
+     *
+     * About a third of the columns on their sheet are not about the call at all: title,
+     * first/middle/last name, three address lines, city, state, postcode, gender,
+     * alternative number, email. That is a CUSTOMER record, and every client's is a
+     * different shape — so we export the campaign's own defined fields rather than
+     * modelling fifteen of somebody else's and giving most clients fifteen blanks.
+     *
+     * 🔴 ONLY WHEN ONE CAMPAIGN IS SELECTED (CE-12a). A CSV writes its heading row once,
+     * before any row, and the campaign filter is optional — so an unfiltered export can
+     * span five campaigns with five different field shapes, and by the time the second
+     * shape appears the heading is long gone down the wire. No campaign filter means no
+     * custom columns and the fixed menu alone. The Download screen says so.
+     *
+     * The definitions live on the CAMPAIGN (`campaigns.custom_fields` — a list of field
+     * descriptions) and the values on the LEAD (`leads.custom_fields` — one map per
+     * customer). The campaign says which columns exist; the lead fills them.
+     *
+     * @return array<int, array{key: string, label: string}>
+     */
+    private function customFields(): array
+    {
+        if ($this->customFields !== null) {
+            return $this->customFields;
+        }
+
+        $campaignId = $this->id('campaignId');
+
+        // Tenant-scoped find: a hand-edited id belonging to another client resolves to
+        // null and yields no columns, exactly like the wall's answer for its rows.
+        $campaign = $campaignId === null ? null : Campaign::find($campaignId);
+
+        return $this->customFields = collect($campaign?->custom_fields ?? [])
+            ->filter(fn (array $definition): bool => filled($definition['key'] ?? null))
+            ->map(fn (array $definition): array => [
+                'key' => (string) $definition['key'],
+                'label' => (string) ($definition['label'] ?? $definition['key']),
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * This call's lead's answers, in the same order as the headings.
+     *
+     * A call with no lead — an unmatched inbound caller — gets blanks, which is honest:
+     * the customer record those columns describe does not exist for them.
+     *
+     * @return array<int, string>
+     */
+    private function customValues(Call $call): array
+    {
+        $fields = $this->customFields();
+
+        if ($fields === []) {
+            return [];
+        }
+
+        $values = $call->lead?->custom_fields ?? [];
+
+        return array_map(function (array $field) use ($values): string {
+            $value = $values[$field['key']] ?? null;
+
+            return match (true) {
+                $value === null || $value === '' => '',
+                is_bool($value) => $value ? 'Yes' : 'No',
+                is_array($value) => implode(', ', array_map(strval(...), $value)),
+                default => (string) $value,
+            };
+        }, $fields);
     }
 
     /**
@@ -227,12 +355,32 @@ final class CallExportRows
     }
 
     /**
-     * The zone the timestamps are written in. One method, because CE-10 replaces its
-     * body with the client's own zone and nothing else has to move.
+     * The zone the timestamps are written in, and the zone the DAY IS CUT IN (CE-10a) —
+     * one method feeding both, because a file that prints India time but starts at UTC
+     * midnight contradicts its own heading.
+     *
+     * Resolved once per export, not per row: it is one database read, and `moment()`
+     * asks for it on every timestamp of every row.
+     *
+     * 🔴 The cross-client posture has no single client to ask. Global staff exporting
+     * across five clients could be given five zones and one heading, so they get the
+     * system default and the heading names it — the honest answer, and the same one a
+     * client with no zone set gets.
      */
     private function zone(): string
     {
-        return 'UTC';
+        return $this->zone ??= TenantContext::current()?->reportTimezone()
+            ?? (string) config('app.report_timezone');
+    }
+
+    /**
+     * What the heading calls that zone — `Started (IST)`. PHP gives an abbreviation
+     * where one exists and a UTC offset where it does not (`+04` for Dubai), which is
+     * still a named thing rather than a bare timestamp.
+     */
+    private function zoneLabel(): string
+    {
+        return CarbonImmutable::now($this->zone())->format('T');
     }
 
     private function moment(?DateTimeInterface $at): string
@@ -273,15 +421,18 @@ final class CallExportRows
             : null;
     }
 
-    private function date(string $key): ?CarbonImmutable
+    private function date(string $key, int $addDays = 0): ?CarbonImmutable
     {
         $value = $this->filters[$key] ?? null;
 
-        // Interpreted in the export's zone, then compared against created_at, which
-        // Postgres stores in UTC. Today those are the same thing; CE-10a is the day
-        // this line starts doing real work.
+        // CE-10a, and this is the line that does it. The picked date is a DAY IN THE
+        // CLIENT'S ZONE — "13 August" on an India-time floor starts at 18:30 UTC on the
+        // 12th — converted to UTC because that is what Postgres compares created_at
+        // against. Miss this and the file prints India time while starting at UTC
+        // midnight: the first four and a half hours of their shift are missing and the
+        // last four and a half belong to the next day.
         return filled($value)
-            ? CarbonImmutable::parse((string) $value, $this->zone())->startOfDay()->utc()
+            ? CarbonImmutable::parse((string) $value, $this->zone())->startOfDay()->addDays($addDays)->utc()
             : null;
     }
 

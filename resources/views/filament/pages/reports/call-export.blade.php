@@ -16,6 +16,12 @@
             {{ $this->exportSummary() }}
         </p>
 
+        {{-- CE-12a: the extra customer columns follow the campaign filter, and that is
+             a rule worth seeing before you download rather than after. --}}
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            {{ $this->customFieldsNote() }}
+        </p>
+
         <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
             The file starts arriving as it is written, so a large range takes a while to
             finish downloading. Only one export runs at a time per person — if nothing

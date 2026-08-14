@@ -6,12 +6,15 @@ namespace App\Http\Controllers;
 
 use App\Enums\CallDirection;
 use App\Enums\CallOutcome;
+use App\Filament\Pages\Reports\CallExportReport;
 use App\Models\Call;
 use App\Reporting\CallExportRows;
 use App\Reporting\CallReportCsv;
 use App\Tenancy\TenantContext;
+use Filament\Notifications\Notification;
 use Generator;
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Gate;
@@ -40,17 +43,29 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  *     in a web address they are strings anyone can edit. Not a leak — the wall still
  *     refuses another client's rows, so an edited clientId yields an EMPTY file — but
  *     `?startDate=nonsense` would reach a date comparison and 500 on a download link.
- *  3. one export at a time per user (CE-3a). Prevents the supervisor who presses
+ *  3. the row cap (CE-3). Counted before the first byte, so the export refuses rather
+ *     than truncating — a short file that looks complete is worse than no file.
+ *  4. one export at a time per user (CE-3a). Prevents the supervisor who presses
  *     Download twice because nothing visibly happened. Someone else's export is
  *     unaffected — a global cap is the stage-2 companion (§9.3), not this.
- *  4. a time limit on THIS route only. A generous limit application-wide hides real
+ *  5. a time limit on THIS route only. A generous limit application-wide hides real
  *     problems everywhere else; this route is the only one that knows it is allowed to
  *     take minutes.
  *
- * BUILD STATE (steps 1-2 of the CE build order): guards, streaming, the real menu and
- * the one filtered query (CE-4/CE-5a, in CallExportRows). Still to come: the 50,000-row
- * refusal (CE-3), the Excel-safety rules (CE-7), and the client-zone day boundary
- * (CE-10/CE-10a), which today is cut in UTC and labelled as such in the headers.
+ * Guards 3 and 4 send the user back to the export screen with the reason on it, rather
+ * than aborting. WHY (S108): `abort(409, 'Your previous export is still downloading')`
+ * shows that sentence only while APP_DEBUG is on. With debug off — which is every real
+ * deployment — Laravel has no view for 409 or 422, falls back to Symfony's renderer, and
+ * the supervisor gets "An Error Occurred: Conflict" with our message thrown away. CE-3
+ * requires the refusal to name the real count and a next step, so the message has to
+ * travel somewhere it will actually be rendered: a Filament notification on the page
+ * they came from.
+ *
+ * BUILD STATE: all eight CE steps are built (S108) — guards, streaming, the real menu
+ * and the one filtered query (CE-4/CE-5a, in CallExportRows), both refusals, the
+ * spreadsheet-safety rules (CE-7, in CallReportCsv), the client's own zone for both the
+ * printed time and the day boundary (CE-10/CE-10a), and the campaign's custom fields
+ * (CE-12). What remains is the queued export for ranges over the cap (§9.3 stage 2).
  */
 class CallExportController extends Controller
 {
@@ -61,29 +76,69 @@ class CallExportController extends Controller
      */
     private const MAX_SECONDS = 900;
 
-    public function __invoke(Request $request): StreamedResponse
+    public function __invoke(Request $request): RedirectResponse|StreamedResponse
     {
         Gate::authorize('viewAny', Call::class);
 
-        $filters = $this->validatedFilters($request);
+        $rows = new CallExportRows($this->validatedFilters($request));
+
+        // Raised BEFORE the count, not after. The count below is itself a full scan of
+        // the filtered range, and on the very export CE-3 exists to refuse it is the
+        // slowest query this route runs — under php-fpm's ordinary 30s it is the count,
+        // not the writing, that hits the wall first. That would 500 the request and lose
+        // the refusal message, which is the exact S108 failure this whole guard was
+        // rewritten to avoid.
+        set_time_limit(self::MAX_SECONDS);
+
+        // CE-3. Counting the SAME builder the writer walks (CE-5a's one-builder rule) is
+        // what makes the number in the message the number in the file. Counted before the
+        // lock is taken, so a refused export never locks the supervisor out of the retry
+        // it just told them to make.
+        $count = $rows->query()->count();
+        $limit = CallExportRows::maxRows();
+
+        if ($count > $limit) {
+            return $this->refuse(
+                sprintf('That is %s calls. The limit is %s.', number_format($count), number_format($limit)),
+                'Try a shorter date range, or add a filter to narrow it down.',
+            );
+        }
 
         $lock = Cache::lock("call-export:{$request->user()->id}", self::MAX_SECONDS);
 
-        abort_if(
-            ! $lock->get(),
-            409,
-            'Your previous export is still downloading. Wait for it to finish, or cancel it.',
-        );
-
-        set_time_limit(self::MAX_SECONDS);
-
-        $rows = new CallExportRows($filters);
+        // CE-3a. The message says what is happening, not that something failed.
+        if (! $lock->get()) {
+            return $this->refuse(
+                'Your previous export is still downloading.',
+                'Wait for it to finish, or cancel it in your browser\'s downloads, then try again.',
+            );
+        }
 
         return CallReportCsv::stream(
             'calls-'.now()->format('Y-m-d').'.csv',
             $rows->headings(),
             $this->rows($rows, $lock, TenantContext::id(), TenantContext::isCrossTenant()),
         );
+    }
+
+    /**
+     * Turn the user around at the export screen with the reason in front of them.
+     *
+     * Filament flashes the notification to the session and the panel renders it on the
+     * next page load, which is exactly what a plain redirect gives us. The destination is
+     * named rather than `back()`: the link can be bookmarked or hand-edited, and a
+     * refusal that lands on the site root explains nothing.
+     */
+    private function refuse(string $title, string $body): RedirectResponse
+    {
+        Notification::make()
+            ->danger()
+            ->title($title)
+            ->body($body)
+            ->persistent()
+            ->send();
+
+        return redirect()->to(CallExportReport::getUrl());
     }
 
     /**

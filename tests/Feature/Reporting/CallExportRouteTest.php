@@ -31,6 +31,19 @@ function exportBody(TestResponse $response): string
 }
 
 /**
+ * The refusal the supervisor actually reads. Both refusals redirect to the export screen
+ * and leave a Filament notification in the session, which the panel renders on arrival —
+ * asserting the redirect alone would pass against an empty message (S108: `abort()` with
+ * a message renders as a bare "An Error Occurred" once APP_DEBUG is off).
+ */
+function refusalMessage(): string
+{
+    return collect(session('filament.notifications', []))
+        ->map(fn (array $notification): string => ($notification['title'] ?? '').' '.($notification['body'] ?? ''))
+        ->implode(' ');
+}
+
+/**
  * The call ids in the file, in the order written. Parsed from the first column rather
  * than searched for as text: a bare `expect($body)->toContain('5')` matches the 5 in a
  * timestamp and passes or fails by luck of the ids.
@@ -42,19 +55,41 @@ function exportedIds(TestResponse $response): array
     return collect(explode("\n", trim(exportBody($response))))
         ->skip(1)
         ->filter()
-        ->map(fn (string $line): int => (int) str_getcsv($line)[0])
+        ->map(fn (string $line): int => (int) str_getcsv($line, escape: '')[0])
         ->values()
         ->all();
 }
 
+/**
+ * One exported row as heading => cell, keyed off the file's OWN heading line — a column
+ * moving cannot then make a test quietly assert about its neighbour. Cells arrive
+ * exactly as written, CE-7's guard tab included.
+ *
+ * @return array<string, string>
+ */
+function exportedRow(TestResponse $response, int $index = 0): array
+{
+    $lines = collect(explode("\n", trim(exportBody($response))))->filter()->values();
+
+    return array_combine(
+        str_getcsv(ltrim($lines->first(), "\xEF\xBB\xBF"), escape: ''),
+        str_getcsv($lines->get($index + 1), escape: ''),
+    );
+}
+
 it('streams a CSV to a permitted reader of the owning client', function () {
-    $tenant = Tenant::factory()->create();
+    // Pinned to UTC so this test is about the file's opening bytes, not about which
+    // zone the heading names — CE-10's own tests cover that.
+    $tenant = Tenant::factory()->create(['timezone' => 'UTC']);
     $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
     TenantContext::run($tenant->id, fn () => Call::factory()->count(3)->create());
 
     $response = $this->actingAs($tl)->get(route('calls.export'))->assertOk();
 
-    expect(exportBody($response))->toStartWith('"Call ID",Ticket,"Started (UTC)",Direction');
+    // CE-7 point 2: the three bytes that tell Excel on Windows this is UTF-8. Asserted
+    // here rather than in its own test because it is the first thing in the file, and
+    // its absence is invisible until an accented name reaches a client's screen.
+    expect(exportBody($response))->toStartWith("\xEF\xBB\xBF".'"Call ID",Ticket,"Started (UTC)",Direction');
 });
 
 // CE-5c — the guard that could not be copied from the recording route. An agent passes
@@ -118,7 +153,97 @@ it('refuses a second export while the user\'s first is still writing', function 
 
     Cache::lock("call-export:{$tl->id}", 900)->get();
 
-    $this->actingAs($tl)->get(route('calls.export'))->assertStatus(409);
+    $this->actingAs($tl)
+        ->get(route('calls.export'))
+        ->assertRedirect(CallExportReport::getUrl());
+
+    expect(refusalMessage())->toContain('still downloading');
+});
+
+// CE-7 points 1 and 4. The guard is a leading tab, which does not print and makes the
+// cell text — so the number both survives the round trip and is never evaluated as a
+// formula or rounded into scientific notation.
+it('guards numbers a spreadsheet would otherwise mangle', function (string $stored) {
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->inbound()->create(['from_number' => $stored]));
+
+    $cell = exportedRow($this->actingAs($tl)->get(route('calls.export'))->assertOk())['Customer number'];
+
+    expect($cell)->toStartWith("\t")->and(ltrim($cell, "\t"))->toBe($stored);
+})->with([
+    'a number beginning + is not run as a formula' => ['+919876543210'],
+    'a leading zero is not eaten' => ['01772345678'],
+    'a long run of digits is not rounded into scientific notation' => ['919876543210'],
+]);
+
+// The other half of the same rule: the guard is applied by shape, so it must NOT reach
+// the columns a supervisor totals in a spreadsheet. A tab here turns Talked into text
+// and =SUM() silently returns zero.
+it('leaves durations and ids as plain numbers a spreadsheet can add up', function () {
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->inbound()->create([
+        'answered_at' => '2026-08-13 09:00:00',
+        'ended_at' => '2026-08-13 09:02:05',
+    ]));
+
+    $row = exportedRow($this->actingAs($tl)->get(route('calls.export'))->assertOk());
+
+    expect($row['Talked'])->toBe('125')->and($row['Call ID'])->not->toStartWith("\t");
+});
+
+// CE-3 — the row cap. It refuses rather than truncating, and the message carries the
+// real count and the real limit, because "too many rows" is a dead end. The cap is
+// lowered here rather than seeding 50,001 calls; the code path is identical.
+it('refuses a result over the row cap, naming the real count and the limit', function () {
+    config(['hcims.call_export_max_rows' => 2]);
+
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    TenantContext::run($tenant->id, fn () => Call::factory()->count(3)->create());
+
+    $this->actingAs($tl)
+        ->get(route('calls.export'))
+        ->assertRedirect(CallExportReport::getUrl());
+
+    expect(refusalMessage())->toContain('3 calls')->toContain('limit is 2');
+});
+
+// The refusal must not be a lockout: the supervisor is told to narrow the range and try
+// again, so the per-user lock cannot still be held when they do.
+it('leaves the export lock free after refusing an oversized result', function () {
+    config(['hcims.call_export_max_rows' => 1]);
+
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+    TenantContext::run($tenant->id, fn () => Call::factory()->count(2)->create());
+
+    $this->actingAs($tl)->get(route('calls.export'));
+
+    expect(Cache::lock("call-export:{$tl->id}", 900)->get())->toBeTrue();
+});
+
+// CE-3 deleted the 7-day cap in S105: a range is refused for being BIG, never for being
+// WIDE. This test exists so nobody reinstates the day limit as a "sensible default".
+it('accepts a range far wider than seven days when it returns few enough rows', function () {
+    $tenant = Tenant::factory()->create();
+    $tl = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+
+    $calls = TenantContext::run($tenant->id, fn () => collect([
+        Call::factory()->create(['created_at' => '2026-06-02 09:00:00']),
+        Call::factory()->create(['created_at' => '2026-07-15 09:00:00']),
+        Call::factory()->create(['created_at' => '2026-08-13 09:00:00']),
+    ]));
+
+    $ids = exportedIds($this->actingAs($tl)->get(route('calls.export', [
+        'startDate' => '2026-06-01',
+        'endDate' => '2026-08-13',
+    ]))->assertOk());
+
+    expect($ids)->toHaveCount(3)->toEqualCanonicalizing($calls->pluck('id')->all());
 });
 
 it('does not refuse a different user\'s export', function () {

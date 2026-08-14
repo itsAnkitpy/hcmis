@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CallEndedBy;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\CallHandoffFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -46,9 +47,11 @@ use Illuminate\Support\Carbon;
  * @property int $tenant_id
  * @property int $agent_user_id
  * @property string $ticket
+ * @property string|null $dialled_number
  * @property Carbon|null $arrived_at
  * @property Carbon|null $answered_at
  * @property Carbon|null $ended_at
+ * @property CallEndedBy|null $ended_by
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
@@ -60,9 +63,11 @@ class CallHandoff extends Model
     protected $fillable = [
         'agent_user_id',
         'ticket',
+        'dialled_number',
         'arrived_at',
         'answered_at',
         'ended_at',
+        'ended_by',
     ];
 
     /**
@@ -74,6 +79,7 @@ class CallHandoff extends Model
             'arrived_at' => 'datetime',
             'answered_at' => 'datetime',
             'ended_at' => 'datetime',
+            'ended_by' => CallEndedBy::class,
         ];
     }
 

@@ -69,6 +69,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Report Timezone
+    |--------------------------------------------------------------------------
+    |
+    | The zone a client's exported reports are read in when that client has set
+    | none of their own (call-export.md CE-10). Deliberately NOT the same as the
+    | application timezone above: the app stores and shows UTC, while the floor
+    | lives on India time, and a spreadsheet is the one artefact that leaves the
+    | building and gets read beside the client's own figures.
+    |
+    | A client's own `tenants.timezone` always wins over this.
+    |
+    */
+
+    'report_timezone' => env('APP_REPORT_TIMEZONE', 'Asia/Kolkata'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Locale Configuration
     |--------------------------------------------------------------------------
     |

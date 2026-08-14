@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Telephony\Flows;
 
 use App\Enums\CallDirection;
+use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Models\Call;
 use App\Models\CallHandoff;
@@ -609,6 +610,12 @@ class CallToAgentFlow
                 CallHandoff::query()->create([
                     'agent_user_id' => $agentUserId,
                     'ticket' => $this->ticketNumber,
+                    // CE-6: which of our numbers the caller rang. We know it here and
+                    // nowhere downstream — it is read off the arrival event and would
+                    // otherwise die with the call, which is why most inbound rows
+                    // currently export with a blank Campaign. Null on outbound, where
+                    // nobody dialled in to us at all.
+                    'dialled_number' => $this->dialledNumber,
                     'arrived_at' => $arrivedAt,
                 ]);
             }),
@@ -643,7 +650,7 @@ class CallToAgentFlow
      * Best-effort, exactly like the note write itself (TH-2): a database hiccup must
      * never disturb a live call. A missed stamp costs one blank on one report row.
      *
-     * @param  array<string, Carbon>  $moments
+     * @param  array<string, Carbon|CallEndedBy>  $moments
      */
     private function stampHandoff(array $moments, ?int $agentUserId = null): void
     {
@@ -865,6 +872,14 @@ class CallToAgentFlow
                 'to_number' => $this->dialledNumber,
                 'outcome' => $outcome,
                 'correlation_id' => $this->ticketNumber,
+                // CE-11, and this row is the one place we can say it without a note:
+                // `abandoned` means the caller gave up, `no_answer` means we stopped
+                // waiting on their behalf when the hold ran out (QD-6's mapping). The
+                // two are the whole reason `System` exists as a value — "nobody hung
+                // up, we ended it" is a different fact from "we do not know".
+                'ended_by' => $outcome === CallOutcome::Abandoned
+                    ? CallEndedBy::Customer
+                    : CallEndedBy::System,
                 'started_at' => $startedAt,
                 // Both moments, no duration (CT-1/CT-4). `duration_seconds` used to be
                 // written here and shown as "Waited for" on Missed Calls while the same
@@ -1335,6 +1350,12 @@ class CallToAgentFlow
             // added agent, Fold B), then end, hanging up everyone still held.
             if ($legId === $this->callerLegId) {
                 $this->releaseAllReservations();
+                // CE-11: the customer put the phone down. Stamped HERE rather than left
+                // to dispose()'s teardown stamp, because by then the branch that knows
+                // which side went is behind us — dispose() closes whoever is still open
+                // and cannot say why. First close wins (CT-12a), so this reaches every
+                // agent still on the call and no agent who already left.
+                $this->stampHandoff(['ended_at' => now(), 'ended_by' => CallEndedBy::Customer]);
                 $this->endCall($legId);
 
                 return;
@@ -1370,7 +1391,8 @@ class CallToAgentFlow
             // others carry on for as long as they like, and the teardown stamp will not
             // reach this agent because first close wins — so without this line, an agent
             // who leaves a three-way early carries the whole call's length as talk time.
-            $this->stampHandoff(['ended_at' => now()], $agent->userId);
+            // The side that hung up rides along on the same stamp (CE-11).
+            $this->stampHandoff(['ended_at' => now(), 'ended_by' => CallEndedBy::Agent], $agent->userId);
 
             if ($this->connectedAgents() !== []) {
                 Log::info('An agent left the call; it continues with the remaining agent(s).', [

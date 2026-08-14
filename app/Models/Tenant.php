@@ -31,6 +31,7 @@ use Spatie\Permission\Models\Role;
  * @property string|null $status_reason
  * @property int|null $ring_seconds
  * @property int|null $max_hold_seconds
+ * @property string|null $timezone
  * @property TenantSettings $settings
  */
 #[ObservedBy([TenantObserver::class])]
@@ -48,6 +49,7 @@ class Tenant extends Model
         'status_reason',
         'ring_seconds',
         'max_hold_seconds',
+        'timezone',
         'settings',
     ];
 
@@ -84,6 +86,21 @@ class Tenant extends Model
     public function maxHoldSeconds(): int
     {
         return $this->max_hold_seconds ?? (int) config('telephony.queue.max_hold_seconds');
+    }
+
+    /**
+     * The zone this client's reports are read in (call-export.md CE-10). Falls back to
+     * the system default when the client has set nothing, exactly as the two queue
+     * settings above do — the fallback lives here in PHP, not as a database default, so
+     * "a client with no zone set" stays a real and testable state.
+     *
+     * Used for BOTH halves of a date: the moment printed in a cell, and where the day
+     * itself is cut (CE-10a). A file that prints India time but starts at UTC midnight
+     * contradicts its own heading.
+     */
+    public function reportTimezone(): string
+    {
+        return $this->timezone ?? (string) config('app.report_timezone');
     }
 
     /**
@@ -156,7 +173,7 @@ class Tenant extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds'];
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone'];
     }
 
     protected function activityLogName(): string
