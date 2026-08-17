@@ -208,6 +208,12 @@ class Call extends Model
      * matters more than it looks: `i:s` alone renders an hour-long wait as `00:00`,
      * which reads as somebody who hung up instantly — the opposite of what happened.
      * A client can set their maximum hold as high as an hour, so it is reachable.
+     *
+     * 🔴 THE HOURS ARE BUILT BY HAND, NOT BY gmdate('H:i:s'), WHICH WRAPS AT 24 (S117).
+     * Every caller used to pass a single call span, which cannot reach a day. The Agent
+     * Productivity Report passes a SHIFT TOTAL across a date range, and a 40-hour week
+     * printed as `16:00:00` while the same figure read `144000` in its own CSV and
+     * `40h 0m` on Agent Detail. Below 24 hours this returns exactly what gmdate did.
      */
     public static function asClock(?int $seconds): string
     {
@@ -215,7 +221,9 @@ class Call extends Model
             return '—';
         }
 
-        return gmdate($seconds >= 3600 ? 'H:i:s' : 'i:s', $seconds);
+        return $seconds >= 3600
+            ? sprintf('%02d:%02d:%02d', intdiv($seconds, 3600), intdiv($seconds % 3600, 60), $seconds % 60)
+            : gmdate('i:s', $seconds);
     }
 
     /**

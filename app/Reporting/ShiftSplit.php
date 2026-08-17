@@ -44,6 +44,12 @@ final class ShiftSplit
      * stint (RecordStatusStint returns early for it), so the four tracked statuses
      * always add up to it.
      *
+     * `clientId` is the global-staff narrowing (RP-4), and it is optional because only
+     * a cross-tenant reader can ever set it — a per-client caller is pinned by RLS and
+     * passes nothing. An agent may belong to SEVERAL clients through the pivot, so
+     * without it a rollup narrowed to one client still sums that agent's stints from
+     * the others into their logged-in total (S117).
+     *
      * @param  array<int, int|null>  $agentIds
      * @return array<int, array{
      *     seconds: array{ready: int, on_call: int, on_break: int, wrapping_up: int},
@@ -53,7 +59,7 @@ final class ShiftSplit
      *     stints: array<int, array{stint: AgentStatusHistory, startedAt: Carbon, endedAt: ?Carbon, durationSeconds: int}>
      * }>
      */
-    public function forAgents(array $agentIds, Carbon $from, Carbon $to): array
+    public function forAgents(array $agentIds, Carbon $from, Carbon $to, ?int $clientId = null): array
     {
         // AP-2a: the Unassigned row is not a person, so it has no shift — a null id is
         // dropped here rather than being looked up and coming back empty.
@@ -77,9 +83,13 @@ final class ShiftSplit
 
         // The board rows, for the dead-session rule. Only a still-open stint needs one,
         // but they are one read for the whole set either way.
-        $presences = AgentPresence::query()->whereIn('user_id', $ids)->get()->keyBy('user_id');
+        $presences = AgentPresence::query()
+            ->whereIn('user_id', $ids)
+            ->when($clientId, fn (Builder $query, int $id) => $query->where('tenant_id', $id))
+            ->get()
+            ->keyBy('user_id');
 
-        $stints = $this->stintsInRange($from, $to)
+        $stints = $this->stintsInRange($from, $to, $clientId)
             ->whereIn('user_id', $ids)
             ->orderBy('started_at')
             ->get();
@@ -131,11 +141,17 @@ final class ShiftSplit
      * One read, and a bounded one: AP-12 guarantees the caller always hands over a real
      * range, so this is never the unbounded scan the export screen runs.
      *
+     * 🔴 THE NULL GUARD IS NOT DEFENSIVE PADDING (S117). `user_id` is nullable ON
+     * PURPOSE — the table orphans a deleted user's stints rather than erasing the
+     * evidence (the create migration says so) — so a real delete leaves rows this pluck
+     * would otherwise hand back as null, and the whole report threw a TypeError.
+     *
      * @return array<int, int>
      */
-    public function agentIdsIn(Carbon $from, Carbon $to): array
+    public function agentIdsIn(Carbon $from, Carbon $to, ?int $clientId = null): array
     {
-        return $this->stintsInRange($from, $to)
+        return $this->stintsInRange($from, $to, $clientId)
+            ->whereNotNull('user_id')
             ->distinct()
             ->pluck('user_id')
             ->map(fn (int|string $id): int => (int) $id)
@@ -146,13 +162,18 @@ final class ShiftSplit
      * Every stint that overlaps the range: it started at or before the end, and it
      * either never closed or closed at or after the start. Named once so the row list
      * and the seconds behind it can never read two different sets of stints.
+     *
+     * The client narrowing layers ON TOP of the TenantScope/RLS wall, never around it,
+     * the CallReportService posture — a per-client caller stays pinned to their own
+     * client whatever this value holds.
      */
-    private function stintsInRange(Carbon $from, Carbon $to): Builder
+    private function stintsInRange(Carbon $from, Carbon $to, ?int $clientId = null): Builder
     {
         return AgentStatusHistory::query()
             ->where('started_at', '<=', $to)
             ->where(function (Builder $query) use ($from): void {
                 $query->whereNull('ended_at')->orWhere('ended_at', '>=', $from);
-            });
+            })
+            ->when($clientId, fn (Builder $query, int $id) => $query->where('tenant_id', $id));
     }
 }

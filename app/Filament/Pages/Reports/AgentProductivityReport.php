@@ -146,13 +146,17 @@ class AgentProductivityReport extends Page
             array_column($rows, 'agent_id'),
             fn (?int $id): bool => $id !== null,
         ));
-        $stintIds = $split->agentIdsIn($from, $to);
+        // 🔴 THE CLIENT NARROWING GOES TO THE SHIFT SIDE TOO (S117). The counting layer
+        // applies it to the calls; without it here, a global reader who picks ONE client
+        // still gets every other client's agents as shift-only rows. RLS hides the fault
+        // from a per-client Team Leader, who is the only reader the wall test covers.
+        $stintIds = $split->agentIdsIn($from, $to, $parsed->clientId);
 
         foreach ($this->agentNames(array_values(array_diff($stintIds, $calledIds))) as $id => $name) {
             $rows[] = $this->shiftOnlyRow((int) $id, $name);
         }
 
-        $shifts = $split->forAgents([...$calledIds, ...$stintIds], $from, $to);
+        $shifts = $split->forAgents([...$calledIds, ...$stintIds], $from, $to, $parsed->clientId);
 
         $rows = array_map(fn (array $row): array => $row + $this->shiftColumns(
             $row['agent_id'] === null ? null : ($shifts[$row['agent_id']] ?? null),

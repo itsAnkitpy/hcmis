@@ -433,3 +433,87 @@ it('exports the shift columns and the handling time alongside the counts', funct
     // supervisor can total the column in a spreadsheet.
     expect($csv)->toContain('"Busy Bea",3600,3600,0,0,0,25,1,1,0,1,0,0,0,0,0,600,100,200,900');
 });
+
+// ---------------------------------------------------------------------------
+// S117 — the three defects the slice 2 review found, each with the reader the
+// staging test does not cover. All three passed CP-APR-1's steps while broken.
+// ---------------------------------------------------------------------------
+
+it('survives a stint whose agent was deleted', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create(['name' => 'Gone Gary']);
+        reportStint($agent, PresenceStatus::Ready, Carbon::today()->setTime(9, 0), Carbon::today()->setTime(17, 0));
+
+        // The stint table orphans a deleted user rather than erasing the evidence
+        // (nullOnDelete, by design). The row stays; its user_id goes null.
+        $agent->delete();
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    // The whole page threw a TypeError on the null, not just this one row.
+    expect(productivityRows())->toBe([]);
+});
+
+it('prints a shift longer than a day at its real length', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create(['name' => 'Weekly Wanda']);
+
+        foreach (range(1, 5) as $day) {
+            reportStint(
+                $agent,
+                PresenceStatus::Ready,
+                Carbon::today()->subDays($day)->setTime(9, 0),
+                Carbon::today()->subDays($day)->setTime(17, 0),
+            );
+        }
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $filters = [
+        'startDate' => Carbon::today()->subDays(7)->toDateString(),
+        'endDate' => Carbon::today()->toDateString(),
+    ];
+
+    // Five eight-hour days. gmdate('H:i:s') wrapped this to 16:00:00 on screen while
+    // the CSV read 144000 and Agent Detail read 40h 0m — three answers, one number.
+    expect(productivityRows($filters)['Weekly Wanda']['active_seconds'])->toBe(144000)
+        ->and(Call::asClock(144000))->toBe('40:00:00')
+        ->and(Call::asClock(86400))->toBe('24:00:00')
+        // Everything below a day still reads exactly as it always did.
+        ->and(Call::asClock(3600))->toBe('01:00:00')
+        ->and(Call::asClock(270))->toBe('04:30')
+        ->and(Call::asClock(null))->toBe('—');
+
+    Livewire::test(AgentProductivityReport::class)
+        ->set('filters', $filters)
+        ->assertSee('40:00:00');
+});
+
+it('narrows the shift rows to the chosen client, not only the calls', function () {
+    $clientA = Tenant::factory()->create(['name' => 'Client A']);
+    $clientB = Tenant::factory()->create(['name' => 'Client B']);
+
+    foreach ([$clientA->id => 'Alice A', $clientB->id => 'Bob B'] as $tenantId => $name) {
+        TenantContext::run($tenantId, function () use ($name): void {
+            $agent = User::factory()->create(['name' => $name]);
+            reportStint($agent, PresenceStatus::Ready, Carbon::today()->setTime(9, 0), Carbon::today()->setTime(17, 0));
+        });
+    }
+
+    // The Client box is visible to a GLOBAL reader only. A per-client Team Leader is
+    // pinned by RLS, so the wall test never exercised this path.
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $names = array_keys(productivityRows(['clientId' => (string) $clientA->id]));
+
+    expect($names)->toBe(['Alice A']);
+});
