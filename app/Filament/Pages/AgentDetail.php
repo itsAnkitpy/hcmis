@@ -104,7 +104,7 @@ class AgentDetail extends Page
         // ?date in the URL the property is null and the native date input renders
         // blank though the page shows today — pre-fill it so the control isn't empty.
         if ($this->date === null) {
-            $this->date = now()->toDateString();
+            $this->date = CallReportFilters::clientToday()->toDateString();
         }
     }
 
@@ -137,14 +137,19 @@ class AgentDetail extends Page
     public function daySummary(): array
     {
         $day = $this->chosenDate();
+        $zone = TenantContext::reportTimezone();
 
         // AP-3/AP-4: the day-clip, the dead-session rule and the per-status sums all
         // live in ShiftSplit now, so this page and the Agent Productivity Report add
         // the same seconds up the same way.
+        //
+        // 🔴 S118: the chosen day is a day on the CLIENT'S clock, converted to UTC for
+        // the query. The stint table holds plain UTC timestamps, and a boundary object
+        // that still carries India time reaches Postgres as its wall-clock text.
         $split = app(ShiftSplit::class)->forAgents(
             [$this->agentId],
-            $day->copy()->startOfDay(),
-            $day->copy()->endOfDay(),
+            $day->copy()->startOfDay()->utc(),
+            $day->copy()->endOfDay()->utc(),
         )[$this->agentId];
 
         // The timeline is drawn from the very stints those seconds were counted from
@@ -153,14 +158,18 @@ class AgentDetail extends Page
         // break names and must not pay for them.
         (new EloquentCollection(array_column($split['stints'], 'stint')))->loadMissing('breakCategory');
 
+        // 🔴 EVERY CLOCK TIME THIS PAGE PRINTS IS MOVED TO THE CLIENT'S ZONE (S118).
+        // The stint table stores UTC, so an agent who sat down at 14:55 India time read
+        // "First login 09:25" here until now. The seconds are untouched — a duration is
+        // the same length in every zone; only the instants move.
         $timeline = array_map(fn (array $counted): array => [
             'statusLabel' => $counted['stint']->status->label(),
             'statusColor' => $this->statusColor($counted['stint']->status),
             'breakCategory' => $counted['stint']->status === PresenceStatus::OnBreak
                 ? ($counted['stint']->breakCategory?->label ?? 'Break')
                 : null,
-            'startedAt' => $counted['startedAt'],
-            'endedAt' => $counted['endedAt'],
+            'startedAt' => $counted['startedAt']->timezone($zone),
+            'endedAt' => $counted['endedAt']?->timezone($zone),
             'durationSeconds' => $counted['durationSeconds'],
             'endedVia' => $counted['stint']->ended_via,
         ], $split['stints']);
@@ -169,8 +178,8 @@ class AgentDetail extends Page
             'seconds' => $split['seconds'],
             'active' => $split['active'],
             'totalCalls' => app(CallReportService::class)->totals($this->dayFilters())['total'],
-            'firstLogin' => $split['firstLogin'],
-            'lastActivity' => $split['lastActivity'],
+            'firstLogin' => $split['firstLogin']?->timezone($zone),
+            'lastActivity' => $split['lastActivity']?->timezone($zone),
             'timeline' => $timeline,
         ];
     }
@@ -210,16 +219,21 @@ class AgentDetail extends Page
      * The chosen day (AD-4): the query-param date parsed defensively — a garbage or
      * future value falls back to today (the CallReportFilters parse posture). Never
      * throws, never lets the picker point past today.
+     *
+     * 🔴 THE DAY IS THE CLIENT'S DAY (S118, CE-10a), so "today" is their today and the
+     * picked date starts at their midnight. On UTC it let a leader open the page at 4am
+     * India time and be shown the previous day with no sign anything had been chosen.
      */
     private function chosenDate(): Carbon
     {
-        $today = Carbon::today();
+        $zone = TenantContext::reportTimezone();
+        $today = CallReportFilters::clientToday();
 
         if (! is_string($this->date) || trim($this->date) === '') {
             return $today;
         }
 
-        $parsed = rescue(fn (): Carbon => Carbon::parse($this->date)->startOfDay(), null, report: false);
+        $parsed = rescue(fn (): Carbon => Carbon::parse($this->date, $zone)->startOfDay(), null, report: false);
 
         if ($parsed === null || $parsed->greaterThan($today)) {
             return $today;
@@ -229,8 +243,9 @@ class AgentDetail extends Page
     }
 
     /**
-     * This agent, the chosen day (midnight → end of day), for the counting layer —
-     * the same immutable filter object the reports take.
+     * This agent, the chosen day (midnight → end of day) ON THE CLIENT'S CLOCK, for the
+     * counting layer — the same immutable filter object the reports take, which converts
+     * both boundaries to UTC for the query itself.
      */
     private function dayFilters(): CallReportFilters
     {

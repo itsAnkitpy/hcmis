@@ -13,6 +13,7 @@ use App\Models\Callback;
 use App\Models\Disposition;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Reporting\CallReportFilters;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Spatie\Permission\Models\Role;
@@ -268,16 +269,26 @@ it('shows the same minutes before and after the lazy close makes the cutoff phys
 });
 
 it('clips a break spanning midnight to today\'s part and ignores yesterday\'s breaks', function () {
-    $this->travelTo(now()->startOfDay()->addHours(14));
+    // 🔴 S118: "today" on this page is the CLIENT'S day, so the clock is moved to their
+    // afternoon and the straddle is written across THEIR midnight. Across UTC midnight
+    // the same break sits wholly inside the Indian day and all 20 minutes count.
+    //
+    // 🔴 THE FROZEN MOMENT IS HANDED OVER AS UTC. Carbon's test clock lends its own zone
+    // to dates read back out of the database, so freezing on an India-time object makes
+    // every stored timestamp read five and a half hours early — a test artefact with no
+    // production counterpart, and an afternoon lost hunting it.
+    $this->travelTo(CallReportFilters::clientToday()->addHours(14)->utc());
 
     $tenant = Tenant::factory()->create();
     $agent = clientUserWithRole($tenant, RoleName::Agent->value);
 
     TenantContext::run($tenant->id, function () use ($agent): void {
+        $midnight = CallReportFilters::clientToday();
+
         // Straddles midnight: 23:50 -> 00:10 — only the 10 minutes today count.
         AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::OnBreak)->create([
-            'started_at' => now()->startOfDay()->subMinutes(10),
-            'ended_at' => now()->startOfDay()->addMinutes(10),
+            'started_at' => $midnight->copy()->subMinutes(10)->utc(),
+            'ended_at' => $midnight->copy()->addMinutes(10)->utc(),
             'ended_via' => StintEndedVia::Changed,
         ]);
 

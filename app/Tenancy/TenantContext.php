@@ -4,6 +4,7 @@ namespace App\Tenancy;
 
 use App\Models\Tenant;
 use Closure;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -122,6 +123,31 @@ class TenantContext
     public static function current(): ?Tenant
     {
         return self::$tenantId === null ? null : Tenant::find(self::$tenantId);
+    }
+
+    /**
+     * The zone the active client reads times in (CE-10), and the zone every report
+     * cuts its DAY in (CE-10a). One method, because the two halves must agree: a
+     * screen that prints India time while cutting the day at UTC midnight contradicts
+     * its own heading.
+     *
+     * 🔴 The cross-client posture has no single client to ask. Global staff reading
+     * across five clients could be given five zones and one heading, so they get the
+     * system default — the same answer a client with no zone set gets.
+     */
+    public static function reportTimezone(): string
+    {
+        return self::current()?->reportTimezone() ?? (string) config('app.report_timezone');
+    }
+
+    /**
+     * What a heading calls that zone — `IST`. PHP gives an abbreviation where one
+     * exists and a UTC offset where it does not (`+04` for Dubai), which is still a
+     * named thing rather than a bare timestamp.
+     */
+    public static function reportTimezoneLabel(): string
+    {
+        return Carbon::now(self::reportTimezone())->format('T');
     }
 
     /**

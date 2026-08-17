@@ -64,15 +64,21 @@ class TodayVsYesterdayChart extends ChartWidget
 
         // Today runs to now, not to end of day: a bar drawn to midnight would claim
         // hours that have not happened yet. Yesterday is the whole closed day.
+        //
+        // 🔴 BOTH DAYS ARE THE CLIENT'S DAYS (S118, CE-10a). On UTC midnight the two
+        // bars swapped meaning at 05:30 India time: the whole early shift counted as
+        // yesterday, and "Today" started the morning with nothing in it.
+        $dayStart = CallReportFilters::clientToday();
+
         $today = $service->totals(new CallReportFilters(
-            from: now()->startOfDay(),
+            from: $dayStart->copy(),
             to: now(),
             clientId: $clientId,
         ));
 
         $yesterday = $service->totals(new CallReportFilters(
-            from: now()->subDay()->startOfDay(),
-            to: now()->subDay()->endOfDay(),
+            from: $dayStart->copy()->subDay(),
+            to: $dayStart->copy()->subDay()->endOfDay(),
             clientId: $clientId,
         ));
 

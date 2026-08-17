@@ -9,6 +9,7 @@ use App\Enums\CallOutcome;
 use App\Enums\RoleName;
 use App\Models\Call;
 use App\Models\User;
+use App\Tenancy\TenantContext;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
@@ -60,6 +61,9 @@ class MissedCalls extends Page
     protected static ?int $navigationSort = 5;
 
     protected string $view = 'filament.pages.missed-calls';
+
+    /** The client's reading zone, resolved on the first row and reused for the rest. */
+    private ?string $zone = null;
 
     public static function canAccess(): bool
     {
@@ -113,5 +117,21 @@ class MissedCalls extends Page
         return $call->outcome === CallOutcome::Abandoned
             ? 'They gave up waiting'
             : 'We stopped waiting';
+    }
+
+    /**
+     * When the call came in, on the CLIENT'S clock (S118, CE-10). This page writes its
+     * own times in the blade, so Filament's panel-wide reading zone never reaches them
+     * and the conversion happens here instead.
+     *
+     * The zone is resolved once per render, not once per row: it is a client record
+     * read, and this list can hold a whole shift's worth of missed calls.
+     */
+    public function whenFor(Call $call): string
+    {
+        return $call->created_at
+            ->copy()
+            ->timezone($this->zone ??= TenantContext::reportTimezone())
+            ->format('d M, H:i');
     }
 }

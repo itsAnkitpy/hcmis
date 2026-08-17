@@ -6,6 +6,7 @@ use App\Enums\CallDirection;
 use App\Enums\CallOutcome;
 use App\Filament\Support\ClientColumn;
 use App\Models\Call;
+use App\Reporting\CallReportFilters;
 use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\DatePicker;
@@ -17,6 +18,7 @@ use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Carbon;
 
 /**
  * The Call Review list (CR-4): read-only, filterable by agent / client / campaign
@@ -91,14 +93,22 @@ class CallsTable
                         false: fn (Builder $q): Builder => $q->whereNull('recording_path'),
                         blank: fn (Builder $q): Builder => $q,
                     ),
+                // 🔴 THE DAY IS CUT ON THE CLIENT'S CLOCK (S118, CE-10a), the same as the
+                // Call Export and the reports. `whereDate` compared the raw UTC date, so
+                // this list and the export named two different sets of calls for one
+                // chosen day — five and a half hours apart at each edge on an India floor.
+                //
+                // The end boundary is half-open — the day AFTER, exclusive (CE-4a) — and
+                // the extra day is added IN THE CLIENT'S ZONE before the conversion, so a
+                // zone with daylight saving does not land an hour out twice a year.
                 Filter::make('date')
                     ->schema([
                         DatePicker::make('from')->label('From'),
                         DatePicker::make('until')->label('Until'),
                     ])
                     ->query(fn (Builder $query, array $data): Builder => $query
-                        ->when($data['from'] ?? null, fn (Builder $q, $date): Builder => $q->whereDate('created_at', '>=', $date))
-                        ->when($data['until'] ?? null, fn (Builder $q, $date): Builder => $q->whereDate('created_at', '<=', $date))),
+                        ->when(CallReportFilters::clientDayStart($data['from'] ?? null), fn (Builder $q, Carbon $from): Builder => $q->where('created_at', '>=', $from))
+                        ->when(CallReportFilters::clientDayStart($data['until'] ?? null, 1), fn (Builder $q, Carbon $until): Builder => $q->where('created_at', '<', $until))),
             ])
             ->recordActions([
                 ViewAction::make(),

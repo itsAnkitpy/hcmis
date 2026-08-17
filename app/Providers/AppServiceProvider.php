@@ -7,6 +7,8 @@ use App\Listeners\LogAuthenticationActivity;
 use App\Models\User;
 use App\Telephony\AsteriskAriProvider;
 use App\Telephony\TelephonyProvider;
+use App\Tenancy\TenantContext;
+use Filament\Support\Facades\FilamentTimezone;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
@@ -14,6 +16,19 @@ use InvalidArgumentException;
 
 class AppServiceProvider extends ServiceProvider
 {
+    /**
+     * The panel's reading zone per client, for the lifetime of this request only.
+     *
+     * 🔴 IT IS CACHED BECAUSE FILAMENT ASKS ONCE PER CELL. Reading the client record
+     * inside the closure below would be one database query for every date on every row
+     * of every table — the unbounded-per-render shape the export screen already has and
+     * that nothing should copy. The provider is built fresh per request, and the key is
+     * the client id, so switching client in the topbar cannot serve the wrong zone.
+     *
+     * @var array<int|string, string>
+     */
+    private array $panelTimezones = [];
+
     /**
      * Register any application services.
      */
@@ -33,6 +48,20 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // 🔴 S118 (CE-10a). Every date-AND-time value the panel prints is shown on the
+        // CLIENT'S clock. The database keeps UTC and nothing about storage changes; this
+        // is the reading end only. A closure, not a string, because the answer depends on
+        // which client the request is bound to, and that is not known at boot.
+        //
+        // Date-ONLY fields are deliberately untouched: Filament reads this setting only
+        // where a field carries a time, so the report filter pickers still hand over a
+        // plain date, which each report then cuts in the client's zone itself.
+        //
+        // The one WRITE this moves is the DNC entry expiry (the panel's only
+        // date-and-time picker): a typed expiry now means the client's clock. That is
+        // the correction, not a side effect.
+        FilamentTimezone::set(fn (): string => $this->panelTimezone());
+
         // Audit the auth events (M7 D-M7-2): login / logout / failed / reset.
         Event::subscribe(LogAuthenticationActivity::class);
 
@@ -63,5 +92,16 @@ class AppServiceProvider extends ServiceProvider
             'dial-adhoc',
             fn (User $user): bool => $user->operatesGlobally() || $user->hasRole(RoleName::Agent->value),
         );
+    }
+
+    /**
+     * The active client's reading zone, read once per client per request.
+     *
+     * Global staff hold no single client to ask, so they key on 'global' and get the
+     * system default — the same answer the Call Export gives them.
+     */
+    private function panelTimezone(): string
+    {
+        return $this->panelTimezones[TenantContext::id() ?? 'global'] ??= TenantContext::reportTimezone();
     }
 }

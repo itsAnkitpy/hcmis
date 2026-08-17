@@ -50,14 +50,24 @@ class BusinessHoursForm
                         ->label('Open')
                         ->default(in_array($key, self::OPEN_BY_DEFAULT, strict: true))
                         ->live(),
+                    // 🔴 THESE TWO ARE NOT INSTANTS, SO THEY ARE NOT CONVERTED (S118).
+                    // "Opens at 09:30" is a wall-clock time already written on the
+                    // client's own clock, stored as the text `09:30`. S118 set a
+                    // panel-wide reading zone for date-AND-time values, which Filament
+                    // also applies to a time-only field — it turned 09:30 into 04:00 on
+                    // save. Pinning both ends to the application clock makes the
+                    // conversion an identity, which is the honest answer for a field
+                    // that carries no date to convert from.
                     TimePicker::make("hours.{$key}.open")
                         ->label('Opens at')
                         ->seconds(false)
+                        ->timezone(config('app.timezone'))
                         ->default('09:30')
                         ->visible(fn (callable $get) => (bool) $get("hours.{$key}.is_open")),
                     TimePicker::make("hours.{$key}.close")
                         ->label('Closes at')
                         ->seconds(false)
+                        ->timezone(config('app.timezone'))
                         ->default('18:30')
                         ->visible(fn (callable $get) => (bool) $get("hours.{$key}.is_open")),
                 ])

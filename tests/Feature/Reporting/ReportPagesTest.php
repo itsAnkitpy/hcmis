@@ -406,7 +406,7 @@ it('renders the shift columns, the two-word labels and the notes', function () {
         ->assertSee('per call')               // AP-13, on the Wrap column
         ->assertSee('status')                 // AP-13, on the Wrapping-up column
         ->assertSee('counts as Talk for the agent who did not press Hold') // AP-8 note
-        ->assertSee('These dates use the application clock')               // AP-11 note
+        ->assertSee('A day runs from midnight to midnight')                // AP-11 note, rebuilt S118
         ->assertSee('we hold no shift record for those dates');            // AP-13 note 3
 });
 

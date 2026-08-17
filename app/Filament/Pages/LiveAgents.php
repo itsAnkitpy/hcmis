@@ -437,10 +437,13 @@ class LiveAgents extends Page
     /**
      * All agents, today (midnight → now) — the filter the calls-today column reads
      * through. Built directly: the board has no filter form by design (LB).
+     *
+     * 🔴 MIDNIGHT ON THE CLIENT'S CLOCK (S118, CE-10a). On UTC midnight the board's
+     * calls-today column reset five and a half hours into the Indian working day.
      */
     private function todayFilters(): CallReportFilters
     {
-        return new CallReportFilters(from: now()->startOfDay(), to: now());
+        return new CallReportFilters(from: CallReportFilters::clientToday(), to: now());
     }
 
     /**

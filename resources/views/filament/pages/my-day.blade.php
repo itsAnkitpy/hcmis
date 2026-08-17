@@ -106,7 +106,7 @@
                 <tbody>
                     @forelse ($this->myCalls() as $call)
                         <tr class="border-b border-gray-100 dark:border-white/5">
-                            <td class="px-3 py-2" style="text-align:left">{{ $call->created_at->format('H:i') }}</td>
+                            <td class="px-3 py-2" style="text-align:left">{{ $this->clockAt($call->created_at) }}</td>
                             <td class="px-3 py-2" style="text-align:left">{{ $call->direction->label() }}</td>
                             <td class="px-3 py-2" style="text-align:left">
                                 <span class="font-medium">{{ $call->lead?->name ?? '—' }}</span>

@@ -14,10 +14,12 @@ use App\Models\Callback;
 use App\Models\User;
 use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
+use App\Tenancy\TenantContext;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 
 /**
@@ -51,6 +53,9 @@ class MyDay extends Page
 
     protected string $view = 'filament.pages.my-day';
 
+    /** The client's reading zone, resolved on the first row and reused for the rest. */
+    private ?string $zone = null;
+
     public static function canAccess(): bool
     {
         $user = auth()->user();
@@ -64,7 +69,7 @@ class MyDay extends Page
 
     public function getSubheading(): ?string
     {
-        return now()->format('l, j F Y').' — midnight to now.';
+        return $this->dayStart()->format('l, j F Y').' — midnight to now.';
     }
 
     /**
@@ -108,7 +113,7 @@ class MyDay extends Page
      */
     public function breakMinutes(): int
     {
-        $dayStart = now()->startOfDay();
+        $dayStart = $this->dayStart()->utc();
 
         $presence = AgentPresence::query()->where('user_id', Auth::id())->first();
 
@@ -138,7 +143,7 @@ class MyDay extends Page
         return Callback::query()
             ->where('owner_agent_id', Auth::id())
             ->where('status', CallbackStatus::Pending)
-            ->where('scheduled_at', '<=', now()->endOfDay())
+            ->where('scheduled_at', '<=', $this->dayStart()->endOfDay()->utc())
             ->count();
     }
 
@@ -153,7 +158,7 @@ class MyDay extends Page
         return Call::query()
             ->with(['lead', 'campaign'])
             ->where('agent_id', Auth::id())
-            ->where('created_at', '>=', now()->startOfDay())
+            ->where('created_at', '>=', $this->dayStart()->utc())
             ->orderByDesc('created_at')
             ->get();
     }
@@ -166,9 +171,34 @@ class MyDay extends Page
     private function todayFilters(): CallReportFilters
     {
         return new CallReportFilters(
-            from: now()->startOfDay(),
+            from: $this->dayStart(),
             to: now(),
             agentId: Auth::id(),
         );
+    }
+
+    /**
+     * When one of my calls happened, on the CLIENT'S clock (S118, CE-10). The list below
+     * writes its times in the blade, so Filament's panel-wide reading zone never reaches
+     * them. Resolved once per render, not once per row.
+     */
+    public function clockAt(Carbon $at): string
+    {
+        return $at->copy()->timezone($this->zone ??= TenantContext::reportTimezone())->format('H:i');
+    }
+
+    /**
+     * 🔴 MIDNIGHT ON THE CLIENT'S CLOCK, NOT OURS (S118, CE-10a). Every number on this
+     * page is "today", and today ran from UTC midnight until now — so an agent on an
+     * early shift in India saw an empty page until 05:30 and then watched yesterday's
+     * calls appear in "my calls today".
+     *
+     * Returned in the client's zone so the heading reads their date. Each caller that
+     * puts it into a query converts it to UTC first, because a boundary object carrying
+     * India time reaches Postgres as its wall-clock text.
+     */
+    private function dayStart(): Carbon
+    {
+        return CallReportFilters::clientToday();
     }
 }

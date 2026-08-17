@@ -20,7 +20,7 @@
                     @forelse ($this->missedCalls() as $call)
                         <tr class="border-b border-gray-100 dark:border-white/5">
                             <td class="px-3 py-2" style="text-align:left">
-                                {{ $call->created_at->format('d M, H:i') }}
+                                {{ $this->whenFor($call) }}
                                 <span class="block text-xs text-gray-500 dark:text-gray-400">
                                     {{ $call->created_at->diffForHumans() }}
                                 </span>

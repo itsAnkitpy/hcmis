@@ -21,7 +21,6 @@ use Filament\Pages\Dashboard\Concerns\HasFiltersForm;
 use Filament\Pages\Page;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Gate;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use UnitEnum;
@@ -127,8 +126,14 @@ class AgentProductivityReport extends Page
         // manager who CLEARS the boxes would otherwise drop straight back to every
         // record ever. The call side rides an index and survives that; the stint walk
         // happens in PHP and would not, on a real floor after a year.
-        $from = $parsed->from ?? Carbon::today()->startOfDay();
-        $to = $parsed->to ?? Carbon::today()->endOfDay();
+        //
+        // 🔴 TODAY MEANS THE CLIENT'S TODAY (S118, CE-10a). It read UTC today until
+        // then, so a leader opening this report at 4am India time was shown yesterday.
+        // Converted to UTC on the way out because the stint reads below take these two
+        // straight into a query.
+        $today = CallReportFilters::clientToday();
+        $from = ($parsed->from ?? $today)->copy()->utc();
+        $to = ($parsed->to ?? $today->copy()->endOfDay())->copy()->utc();
 
         $filters = new CallReportFilters(
             from: $from,

@@ -93,7 +93,7 @@ class TenantForm
                 // reaches the audit trail — because changing this moves calls between
                 // days in every report from that moment on.
                 Section::make('Reporting')
-                    ->description('How this client\'s exported reports read. Leave blank to use the system default.')
+                    ->description('How this client\'s reports and exported files read. Leave blank to use the system default.')
                     ->schema([
                         Select::make('timezone')
                             ->label('Report time zone')
@@ -104,7 +104,9 @@ class TenantForm
                             ->searchable()
                             ->native(false)
                             ->placeholder('System default ('.config('app.report_timezone').')')
-                            ->helperText('Times in exported files are written in this zone, and a day starts and ends in it. The screens in the panel still show UTC.'),
+                            // 🔴 S118 made the second sentence true. The panel showed UTC
+                            // until then, and this field said so.
+                            ->helperText('Every time this client reads — on screen and in an exported file — is written in this zone, and a day starts and ends in it. Business hours above are not affected: they are already written on this clock.'),
                     ])
                     ->hiddenOn('create'),
 

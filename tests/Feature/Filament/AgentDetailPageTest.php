@@ -60,12 +60,15 @@ it('sums time per status for a chosen past day', function () {
     $summary = TenantContext::run($tenant->id, function () use ($tenant): array {
         $agent = User::factory()->create();
         $agent->tenants()->attach($tenant);
-        $day = Carbon::today()->subDays(3);
+        // 🔴 S118: the page reads the day on the CLIENT'S clock, so the fixture is
+        // written on that clock too and converted to the UTC instants the table holds.
+        // Written as bare UTC, "09:00" would arrive on screen as 14:30.
+        $day = CallReportFilters::clientToday()->subDays(3);
 
-        stint($agent, PresenceStatus::Ready, $day->copy()->setTimeFromTimeString('09:00:00'), $day->copy()->setTimeFromTimeString('10:00:00'));      // 3600
-        stint($agent, PresenceStatus::OnCall, $day->copy()->setTimeFromTimeString('10:00:00'), $day->copy()->setTimeFromTimeString('10:30:00'));     // 1800
-        stint($agent, PresenceStatus::OnBreak, $day->copy()->setTimeFromTimeString('10:30:00'), $day->copy()->setTimeFromTimeString('11:00:00'));    // 1800
-        stint($agent, PresenceStatus::WrappingUp, $day->copy()->setTimeFromTimeString('11:00:00'), $day->copy()->setTimeFromTimeString('11:15:00')); // 900
+        stint($agent, PresenceStatus::Ready, $day->copy()->setTimeFromTimeString('09:00:00')->utc(), $day->copy()->setTimeFromTimeString('10:00:00')->utc());      // 3600
+        stint($agent, PresenceStatus::OnCall, $day->copy()->setTimeFromTimeString('10:00:00')->utc(), $day->copy()->setTimeFromTimeString('10:30:00')->utc());     // 1800
+        stint($agent, PresenceStatus::OnBreak, $day->copy()->setTimeFromTimeString('10:30:00')->utc(), $day->copy()->setTimeFromTimeString('11:00:00')->utc());    // 1800
+        stint($agent, PresenceStatus::WrappingUp, $day->copy()->setTimeFromTimeString('11:00:00')->utc(), $day->copy()->setTimeFromTimeString('11:15:00')->utc()); // 900
 
         return agentDetailFor($agent, $day->toDateString())->daySummary();
     });
@@ -107,14 +110,16 @@ it('clips a stint that spans midnight to the chosen day', function () {
     $summary = TenantContext::run($tenant->id, function () use ($tenant): array {
         $agent = User::factory()->create();
         $agent->tenants()->attach($tenant);
-        $day = Carbon::today()->subDays(3);
+        // The midnight being clipped to is the CLIENT'S midnight (S118), so the stint is
+        // written on their clock and stored as UTC.
+        $day = CallReportFilters::clientToday()->subDays(3);
 
         // 20:00 the day before → 06:00 the chosen day: only 00:00→06:00 belongs to the day.
         stint(
             $agent,
             PresenceStatus::Ready,
-            $day->copy()->subDay()->setTimeFromTimeString('20:00:00'),
-            $day->copy()->setTimeFromTimeString('06:00:00'),
+            $day->copy()->subDay()->setTimeFromTimeString('20:00:00')->utc(),
+            $day->copy()->setTimeFromTimeString('06:00:00')->utc(),
         );
 
         return agentDetailFor($agent, $day->toDateString())->daySummary();

@@ -5,6 +5,7 @@ namespace App\Filament\Resources\ActivityLogs\Tables;
 use App\Filament\Support\ClientColumn;
 use App\Models\ActivityLog;
 use App\Models\User;
+use App\Reporting\CallReportFilters;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\DatePicker;
 use Filament\Tables\Columns\TextColumn;
@@ -12,6 +13,7 @@ use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Carbon;
 
 /**
  * The audit-log list (D-M7-4). Read-only: a single ViewAction, no edit/delete,
@@ -52,14 +54,18 @@ class ActivityLogsTable
                 SelectFilter::make('causer_id')
                     ->label('User')
                     ->options(fn (): array => User::query()->orderBy('name')->pluck('name', 'id')->all()),
+                // 🔴 THE DAY IS CUT ON THE CLIENT'S CLOCK (S118, CE-10a), the same as the
+                // Calls list, the reports and the Call Export. The When column above now
+                // prints on that clock, and a filter still cutting on the raw stored date
+                // would hide rows the reader can see the timestamps of.
                 Filter::make('date')
                     ->schema([
                         DatePicker::make('from')->label('From'),
                         DatePicker::make('until')->label('Until'),
                     ])
                     ->query(fn (Builder $query, array $data): Builder => $query
-                        ->when($data['from'] ?? null, fn (Builder $q, $date): Builder => $q->whereDate('created_at', '>=', $date))
-                        ->when($data['until'] ?? null, fn (Builder $q, $date): Builder => $q->whereDate('created_at', '<=', $date))),
+                        ->when(CallReportFilters::clientDayStart($data['from'] ?? null), fn (Builder $q, Carbon $from): Builder => $q->where('created_at', '>=', $from))
+                        ->when(CallReportFilters::clientDayStart($data['until'] ?? null, 1), fn (Builder $q, Carbon $until): Builder => $q->where('created_at', '<', $until))),
             ])
             ->recordActions([
                 ViewAction::make(),

@@ -7,6 +7,7 @@ namespace App\Reporting;
 use App\Enums\CallDirection;
 use App\Models\Call;
 use App\Models\User;
+use App\Tenancy\TenantContext;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 
@@ -146,12 +147,21 @@ class CallReportService
      * Report 2, view A (RP-5) — the call mix per calendar day, oldest first. Buckets
      * on `created_at::date` (the indexed column; = the coarse wrap-up instant in v1).
      *
+     * 🔴 THE BUCKET IS THE CLIENT'S CALENDAR DAY, NOT OURS (S118, CE-10a). `created_at`
+     * is a plain timestamp holding UTC, so it is read as UTC and then moved into the
+     * client's zone before the date is taken. Bucketing on the raw UTC date while the
+     * RANGE is cut in India time splits one Indian day across two bars, and the first
+     * and last bars of every chart read half-empty.
+     *
      * @return array<int, array{date: string, total: int, inbound: int, outbound: int, contacts: int, sales: int}>
      */
     public function callsByDay(CallReportFilters $filters): array
     {
         return $this->baseQuery($filters)
-            ->selectRaw('CAST(calls.created_at AS date) as day')
+            ->selectRaw(
+                "CAST(calls.created_at AT TIME ZONE 'UTC' AT TIME ZONE ? AS date) as day",
+                [TenantContext::reportTimezone()],
+            )
             ->selectRaw('COUNT(*) as total')
             ->selectRaw("COUNT(*) FILTER (WHERE calls.direction = 'inbound') as inbound")
             ->selectRaw("COUNT(*) FILTER (WHERE calls.direction = 'outbound') as outbound")

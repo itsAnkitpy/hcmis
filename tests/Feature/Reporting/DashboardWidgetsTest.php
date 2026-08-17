@@ -18,6 +18,7 @@ use App\Models\Disposition;
 use App\Models\Lead;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Reporting\CallReportFilters;
 use App\Reporting\ChartPalette;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -399,14 +400,20 @@ it('ignores the date range — the strip is inventory, not history', function ()
 function seedTwoDayFixture(Tenant $tenant): void
 {
     TenantContext::run($tenant->id, function (): void {
+        // 🔴 S118: the two bars are the CLIENT'S days, so yesterday's calls are placed on
+        // the client's clock and stored as the UTC instants the table holds. Placed as
+        // bare UTC, the 23:00 call lands at 04:30 the next morning in India and the bars
+        // no longer mean what this fixture says they mean.
+        $today = CallReportFilters::clientToday();
+
         Call::factory()->count(2)->inbound()->create(['created_at' => now()]);
         Call::factory()->create(['created_at' => now()]);
 
-        Call::factory()->inbound()->create(['created_at' => now()->subDay()->setTime(12, 0)]);
-        Call::factory()->count(2)->create(['created_at' => now()->subDay()->setTime(12, 0)]);
-        Call::factory()->create(['created_at' => now()->subDay()->setTime(23, 0)]);
+        Call::factory()->inbound()->create(['created_at' => $today->copy()->subDay()->addHours(12)->utc()]);
+        Call::factory()->count(2)->create(['created_at' => $today->copy()->subDay()->addHours(12)->utc()]);
+        Call::factory()->create(['created_at' => $today->copy()->subDay()->addHours(23)->utc()]);
 
-        Call::factory()->create(['created_at' => now()->subDays(2)->setTime(12, 0)]);
+        Call::factory()->create(['created_at' => $today->copy()->subDays(2)->addHours(12)->utc()]);
     });
 }
 

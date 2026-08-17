@@ -146,10 +146,10 @@
                  agent who pressed Hold, so the other agent's Talk still counts those
                  seconds as conversation. --}}
             <p>On a three-way call, time spent talking to a colleague while the caller is on hold counts as Talk for the agent who did not press Hold.</p>
-            {{-- AP-11. The export builds its dates on the client's own clock and these
-                 reports build theirs on the application clock, so two "13 August"
-                 figures can differ. The shared fix is its own piece of work. --}}
-            <p>These dates use the application clock ({{ config('app.timezone') }}). The Call Export uses the client's own clock, so the two can disagree at a day boundary.</p>
+            {{-- AP-11, rebuilt S118. The reports now cut their days on the client's own
+                 clock, the same as the Call Export and the Calls list. The old warning
+                 that the two disagreed is no longer true and has been removed. --}}
+            <p>A day runs from midnight to midnight on the client's own clock ({{ \App\Tenancy\TenantContext::reportTimezoneLabel() }}), the same as the Call Export and the Calls list.</p>
             {{-- AP-13 point 3. Shown only when a row actually has a blank shift beside
                  real call numbers — the moment the reader would otherwise wonder
                  whether the report is broken. --}}

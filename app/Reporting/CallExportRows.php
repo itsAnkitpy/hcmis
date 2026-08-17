@@ -365,32 +365,28 @@ final class CallExportRows
     }
 
     /**
-     * The zone the timestamps are written in, and the zone the DAY IS CUT IN (CE-10a) —
-     * one method feeding both, because a file that prints India time but starts at UTC
-     * midnight contradicts its own heading.
+     * The zone the timestamps are written in, and the zone the DAY IS CUT IN (CE-10a).
+     *
+     * 🔴 S118: the rule itself moved to TenantContext::reportTimezone(), because the
+     * report screens now cut their days in the same zone. Two copies of "which client,
+     * else the system default" is how the export and the screens drift apart again.
      *
      * Resolved once per export, not per row: it is one database read, and `moment()`
      * asks for it on every timestamp of every row.
-     *
-     * 🔴 The cross-client posture has no single client to ask. Global staff exporting
-     * across five clients could be given five zones and one heading, so they get the
-     * system default and the heading names it — the honest answer, and the same one a
-     * client with no zone set gets.
      */
     private function zone(): string
     {
-        return $this->zone ??= TenantContext::current()?->reportTimezone()
-            ?? (string) config('app.report_timezone');
+        return $this->zone ??= TenantContext::reportTimezone();
     }
 
     /**
-     * What the heading calls that zone — `Started (IST)`. PHP gives an abbreviation
-     * where one exists and a UTC offset where it does not (`+04` for Dubai), which is
-     * still a named thing rather than a bare timestamp.
+     * What the heading calls that zone — `Started (IST)`. Shared with the report
+     * screens since S118, so one file and one screen can never name the zone
+     * differently for the same client.
      */
     private function zoneLabel(): string
     {
-        return CarbonImmutable::now($this->zone())->format('T');
+        return TenantContext::reportTimezoneLabel();
     }
 
     private function moment(?DateTimeInterface $at): string
