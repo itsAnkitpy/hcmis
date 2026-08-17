@@ -22,11 +22,14 @@ use Illuminate\Support\Carbon;
  * numbers, with no extra where-clause here. (Global HC staff run cross-tenant, the
  * same posture as Call Review, so their totals roll up every client they can see.)
  *
- * v1 is COUNT-BASED (RP-2): calls, direction split, contacts, sales, no-answer,
- * recording coverage — every column maps to a populated v1 field (see the honesty
- * table in reporting.md). Talk time / occupancy / true connect rate are deferred
- * (NULL timing, no presence history); they light up additively when the real line
- * + a presence log land, without changing this service's signature.
+ * 🔴 RP-2 IS OUT OF DATE AND apr.md AP-10 CORRECTS IT. This class used to say talk
+ * time, occupancy and a true connect rate were deferred for want of real timing and a
+ * presence log. Both of RP-2's own reopen triggers have since fired: the real line
+ * landed and stamps the timing moments (call-timing.md, S103), and the presence-event
+ * log exists (`agent_status_history`, S74). agentProductivity() therefore returns talk,
+ * hold, wrap and Average Handle Time as of the APR build. What is still true from RP-2:
+ * the connect rate remains provisional (the outcome is agent-reported), and there is no
+ * shift history at all before S74 — those days read blank, never zero.
  *
  * WHY the LEFT JOIN to dispositions: contacts / sales / disposition labels live on
  * `dispositions`, not `calls`. One join reads them in a single grouped query; an
@@ -38,11 +41,52 @@ use Illuminate\Support\Carbon;
 class CallReportService
 {
     /**
-     * Report 1 (RP-5) — one row per agent with their call counts + outcome mix.
-     * Sorted by busiest agent first. contact_rate is reliable (from `is_contact`);
-     * no_answer is the one provisional column (agent-reported `outcome`).
+     * A call this agent actually handled (apr.md AP-6): somebody picked it up and it
+     * ended. It is the condition behind all three time sums AND the divisor of the
+     * Average Handle Time, named once so the four can never be told different things.
      *
-     * @return array<int, array{agent_id: int|null, agent: string, total: int, inbound: int, outbound: int, contacts: int, sales: int, no_answer: int, with_recording: int, contact_rate: float}>
+     * 🔴 THE AHT DIVISOR IS ANSWERED CALLS, NOT THE TOTAL COLUMN. A call nobody
+     * answered has no talk, no hold and a blank wrap; counting it on the bottom would
+     * drag every average down for an agent who caught a lot of no-answers. Amazon
+     * Connect and Five9 both average over interactions handled.
+     */
+    private const HANDLED = 'calls.answered_at IS NOT NULL AND calls.ended_at IS NOT NULL';
+
+    /**
+     * Talk time, in the database (AP-6) — pickup to hang-up MINUS the held total, the
+     * exact rule Call::talkedSeconds() applies in PHP, floored at zero the same way.
+     *
+     * 🔴 The COALESCE is not decoration: talkedSeconds() casts a null hold to 0, and a
+     * database that did not would return NULL for every call recorded before Hold
+     * shipped, poisoning the whole SUM. The TRUNC matches PHP's (int) cast so the two
+     * engines round identically; the ::bigint keeps the sum an integer rather than a
+     * float that prints in scientific notation.
+     */
+    private const TALK_SECONDS = 'GREATEST(0, TRUNC(EXTRACT(EPOCH FROM (calls.ended_at - calls.answered_at)))::bigint - COALESCE(calls.hold_seconds, 0))';
+
+    /** Held time (hold.md H-1): one stored total per call, a null reading as none. */
+    private const HELD_SECONDS = 'COALESCE(calls.hold_seconds, 0)';
+
+    /** Wrap-up (CT-6, AP-6) — hang-up to the Done click, Call::wrappedSeconds() in SQL. */
+    private const WRAP_SECONDS = 'TRUNC(EXTRACT(EPOCH FROM (calls.created_at - calls.ended_at)))::bigint';
+
+    /**
+     * Report 1 (RP-5, extended by apr.md AP-6) — one row per agent with their call
+     * counts, outcome mix and handling time for the chosen dates. Sorted by busiest
+     * agent first. contact_rate is reliable (from `is_contact`); no_answer is the one
+     * provisional column (agent-reported `outcome`).
+     *
+     * 🔴 THE TIME SUMS RUN IN THE DATABASE, NOT IN PHP. They are expressions on the
+     * one grouped query that was already being run, so a month costs one read instead
+     * of a hundred thousand rows pulled into memory to produce three numbers. That
+     * makes the SQL above the ONE accepted second copy of an arithmetic rule in this
+     * build (AP-3), and CallReportServiceTest welds it to the PHP accessors with a
+     * test that fails the moment either side is edited alone.
+     *
+     * `aht_seconds` is null, never 0, when the agent answered nothing in range — zero
+     * would claim an instant handle time for somebody who handled no calls (CE-4).
+     *
+     * @return array<int, array{agent_id: int|null, agent: string, total: int, inbound: int, outbound: int, contacts: int, sales: int, no_answer: int, with_recording: int, contact_rate: float, answered: int, talk_seconds: int, hold_seconds: int, wrap_seconds: int, aht_seconds: int|null}>
      */
     public function agentProductivity(CallReportFilters $filters): array
     {
@@ -55,6 +99,10 @@ class CallReportService
             ->selectRaw('COUNT(*) FILTER (WHERE dispositions.is_sale) as sales')
             ->selectRaw("COUNT(*) FILTER (WHERE calls.outcome = 'no_answer') as no_answer")
             ->selectRaw('COUNT(*) FILTER (WHERE calls.recording_path IS NOT NULL) as with_recording')
+            ->selectRaw('COUNT(*) FILTER (WHERE '.self::HANDLED.') as answered')
+            ->selectRaw('COALESCE(SUM('.self::TALK_SECONDS.') FILTER (WHERE '.self::HANDLED.'), 0) as talk_seconds')
+            ->selectRaw('COALESCE(SUM('.self::HELD_SECONDS.') FILTER (WHERE '.self::HANDLED.'), 0) as hold_seconds')
+            ->selectRaw('COALESCE(SUM('.self::WRAP_SECONDS.') FILTER (WHERE '.self::HANDLED.'), 0) as wrap_seconds')
             ->groupBy('calls.agent_id')
             ->toBase()
             ->get();
@@ -66,6 +114,10 @@ class CallReportService
                 $agentId = $row->agent_id === null ? null : (int) $row->agent_id;
                 $total = (int) $row->total;
                 $contacts = (int) $row->contacts;
+                $answered = (int) $row->answered;
+                $talk = (int) $row->talk_seconds;
+                $hold = (int) $row->hold_seconds;
+                $wrap = (int) $row->wrap_seconds;
 
                 return [
                     'agent_id' => $agentId,
@@ -78,6 +130,11 @@ class CallReportService
                     'no_answer' => (int) $row->no_answer,
                     'with_recording' => (int) $row->with_recording,
                     'contact_rate' => $this->rate($contacts, $total),
+                    'answered' => $answered,
+                    'talk_seconds' => $talk,
+                    'hold_seconds' => $hold,
+                    'wrap_seconds' => $wrap,
+                    'aht_seconds' => $answered > 0 ? (int) round(($talk + $hold + $wrap) / $answered) : null,
                 ];
             })
             ->sortByDesc('total')

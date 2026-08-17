@@ -95,7 +95,7 @@ class AgentProductivityReport extends Page
      * The rendered rows — the counting layer read with the (guard-parsed) filters.
      * The blade renders these; the CSV export streams the exact same array (RP-5).
      *
-     * @return array<int, array{agent_id: int|null, agent: string, total: int, inbound: int, outbound: int, contacts: int, sales: int, no_answer: int, with_recording: int, contact_rate: float}>
+     * @return array<int, array{agent_id: int|null, agent: string, total: int, inbound: int, outbound: int, contacts: int, sales: int, no_answer: int, with_recording: int, contact_rate: float, answered: int, talk_seconds: int, hold_seconds: int, wrap_seconds: int, aht_seconds: int|null}>
      */
     public function rows(): array
     {

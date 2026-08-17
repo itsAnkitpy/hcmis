@@ -256,14 +256,10 @@ final class CallExportRows
             // carries no hold information at all, and 0 would claim we measured it.
             'held' => $this->duration($call->hold_seconds),
             // Wrap-up is the agent's own typing time — the call ending to the Done
-            // click. A call NOBODY ANSWERED has no agent and no Done click: the row is
-            // written by the listener at the moment it gives up, so the two timestamps
-            // are the same instant and the span came out as a truthful-looking `0`.
-            // Zero says "the agent wrapped up instantly"; blank says "there was no
-            // agent", which is what happened (CE-4's honesty rule).
-            'wrap' => $this->duration($call->answered_at === null
-                ? null
-                : $this->secondsBetween($call->ended_at, $call->created_at)),
+            // click, including CE-4's blank-when-nobody-answered rule. The sum itself
+            // moved onto the model (apr.md AP-3) so the Agent Productivity Report reads
+            // the SAME arithmetic; this column and that report cannot disagree.
+            'wrap' => $this->duration($call->wrappedSeconds()),
             // CE-11. Blank is a real answer here, not a gap: a call torn down by an
             // error, and every row written before CE-11 shipped, has no side that hung up.
             'ended_by' => $call->ended_by?->label() ?? '',

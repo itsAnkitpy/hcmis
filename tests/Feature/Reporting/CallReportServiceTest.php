@@ -61,6 +61,123 @@ it('computes per-agent productivity rows, busiest first', function () {
         ]);
 });
 
+// --- apr.md AP-6: talk, hold, wrap and Average Handle Time ---
+
+/**
+ * A handled call with known moments: answered now, hung up after $talk + $hold
+ * seconds of line time, Done clicked $wrap seconds later.
+ */
+function handledCall(User $agent, int $talk, int $hold, int $wrap): Call
+{
+    $answeredAt = now()->subMinutes(30);
+
+    return Call::factory()->forAgent($agent)->create([
+        'answered_at' => $answeredAt,
+        'ended_at' => $answeredAt->copy()->addSeconds($talk + $hold),
+        'hold_seconds' => $hold,
+        'created_at' => $answeredAt->copy()->addSeconds($talk + $hold + $wrap),
+    ]);
+}
+
+it('sums talk, hold and wrap and divides the handle time by answered calls', function () {
+    $tenant = Tenant::factory()->create();
+
+    $rows = TenantContext::run($tenant->id, function (): array {
+        $agent = User::factory()->create(['name' => 'Alice']);
+
+        handledCall($agent, talk: 100, hold: 20, wrap: 30);  // handled: 150
+        handledCall($agent, talk: 200, hold: 0, wrap: 10);   // handled: 210
+
+        // Nobody answered this one: no talk, no hold, no Done click of its own. It
+        // counts on the Total column and NOWHERE in the handle time (AP-6).
+        Call::factory()->forAgent($agent)->create(['answered_at' => null, 'created_at' => now()]);
+
+        return (new CallReportService)->agentProductivity(new CallReportFilters);
+    });
+
+    expect($rows[0])->toMatchArray([
+        'agent' => 'Alice',
+        'total' => 3,
+        'answered' => 2,
+        'talk_seconds' => 300,
+        'hold_seconds' => 20,
+        'wrap_seconds' => 40,
+        // (300 + 20 + 40) / 2 answered = 180. Over all 3 calls it would read 120.
+        'aht_seconds' => 180,
+    ]);
+});
+
+it('counts a held call once: talk drops the hold, the handle time keeps it', function () {
+    $tenant = Tenant::factory()->create();
+
+    $rows = TenantContext::run($tenant->id, function (): array {
+        $agent = User::factory()->create();
+
+        // 10 minutes on the line, 4 of them music. Talk is the 6 minutes of
+        // conversation; the handle time is the whole 10 plus the wrap (hold.md H-3).
+        handledCall($agent, talk: 360, hold: 240, wrap: 60);
+
+        return (new CallReportService)->agentProductivity(new CallReportFilters);
+    });
+
+    expect($rows[0])->toMatchArray([
+        'talk_seconds' => 360,
+        'hold_seconds' => 240,
+        'wrap_seconds' => 60,
+        'aht_seconds' => 660,
+    ]);
+});
+
+it('leaves the handle time blank, never zero, for an agent who answered nothing', function () {
+    $tenant = Tenant::factory()->create();
+
+    $rows = TenantContext::run($tenant->id, function (): array {
+        $agent = User::factory()->create();
+
+        Call::factory()->forAgent($agent)->create(['answered_at' => null, 'created_at' => now()]);
+
+        return (new CallReportService)->agentProductivity(new CallReportFilters);
+    });
+
+    expect($rows[0]['answered'])->toBe(0)
+        ->and($rows[0]['talk_seconds'])->toBe(0)
+        ->and($rows[0]['aht_seconds'])->toBeNull();
+});
+
+/**
+ * 🔴 THE WELD (AP-3/AP-6). The time sums run in the database for speed, which is the
+ * ONE second copy of an arithmetic rule this build accepts. This test runs both
+ * engines over the same calls and fails the moment either side is edited alone —
+ * without it the two versions drift, which is exactly how `duration_seconds` came to
+ * mean two things on two screens and had to be retired (CT-4).
+ */
+it('welds the database time sums to the PHP accessors', function () {
+    $tenant = Tenant::factory()->create();
+
+    [$rows, $calls] = TenantContext::run($tenant->id, function (): array {
+        $agent = User::factory()->create();
+
+        handledCall($agent, talk: 137, hold: 43, wrap: 29);
+        handledCall($agent, talk: 512, hold: 7, wrap: 300);
+
+        // A call recorded BEFORE Hold shipped carries no hold information at all. This
+        // is the row that catches a missing COALESCE: without it the database returns
+        // NULL for this call and the whole SUM goes null.
+        $preHold = handledCall($agent, talk: 90, hold: 0, wrap: 15);
+        $preHold->forceFill(['hold_seconds' => null])->save();
+
+        return [
+            (new CallReportService)->agentProductivity(new CallReportFilters),
+            Call::query()->get(),
+        ];
+    });
+
+    expect($rows[0]['talk_seconds'])->toBe((int) $calls->sum(fn (Call $call): int => $call->talkedSeconds() ?? 0))
+        ->and($rows[0]['wrap_seconds'])->toBe((int) $calls->sum(fn (Call $call): int => $call->wrappedSeconds() ?? 0))
+        ->and($rows[0]['hold_seconds'])->toBe((int) $calls->sum(fn (Call $call): int => (int) $call->hold_seconds))
+        ->and($rows[0]['talk_seconds'])->toBe(739);
+});
+
 it('breaks calls down by disposition as a share of all calls in range', function () {
     $tenant = Tenant::factory()->create();
     seedCallReportFixture($tenant);

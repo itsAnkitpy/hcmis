@@ -177,6 +177,31 @@ class Call extends Model
     }
 
     /**
+     * How long the agent spent typing notes after the caller hung up (CT-6) — the
+     * hang-up to the Done click, which is this row's own created_at.
+     *
+     * Moved here from CallExportRows' private method (apr.md AP-3) so the export and
+     * the Agent Productivity Report can never print two different wrap-up numbers.
+     * The Average Handle Time is talk + hold + wrap, so a second copy of this rule
+     * would be a second answer to one question — the failure that retired
+     * `duration_seconds` (CT-4).
+     *
+     * BLANK, NOT ZERO, WHEN NOBODY ANSWERED (call-export.md CE-4). A call nobody
+     * picked up has no agent and no Done click: the listener writes the row at the
+     * moment it gives up, so both moments are the same instant and the span comes out
+     * as a truthful-looking 0. Zero says "the agent wrapped up instantly"; blank says
+     * "there was no agent", which is what happened.
+     */
+    public function wrappedSeconds(): ?int
+    {
+        if ($this->answered_at === null || $this->ended_at === null || $this->created_at === null) {
+            return null;
+        }
+
+        return (int) $this->ended_at->diffInSeconds($this->created_at);
+    }
+
+    /**
      * A span of seconds as a clock, or a dash when we do not have it.
      *
      * Hours appear only when there are some, so an ordinary row stays short. That

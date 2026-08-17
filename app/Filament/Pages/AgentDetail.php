@@ -6,18 +6,18 @@ namespace App\Filament\Pages;
 
 use App\Enums\PresenceStatus;
 use App\Enums\StintEndedVia;
-use App\Models\AgentPresence;
-use App\Models\AgentStatusHistory;
 use App\Models\Call;
 use App\Models\User;
 use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
+use App\Reporting\ShiftSplit;
 use App\Tenancy\TenantContext;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Panel;
 use Filament\Support\Icons\Heroicon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Attributes\Url;
@@ -31,8 +31,9 @@ use Livewire\Attributes\Url;
  * The whole page is assembly of pieces already built and tested, so an agent's
  * numbers can never drift from the reports a manager already sees (the coherence
  * rule that kept the Live Agent Board honest):
- *  - the Time Sheet is MyDay::breakMinutes() generalised from "On-break only" to
- *    every status — the same day-clip + effectiveEndedAt dead-session arithmetic;
+ *  - the Time Sheet is ShiftSplit, the shared per-status arithmetic the Agent
+ *    Productivity Report reads too (apr.md AP-3/AP-4) — the same day-clip +
+ *    effectiveEndedAt dead-session rule, asked here for one agent and one day;
  *  - Outcomes + total calls read the shared counting layer (CallReportService),
  *    scoped by agentId + the chosen day.
  *
@@ -136,68 +137,40 @@ class AgentDetail extends Page
     public function daySummary(): array
     {
         $day = $this->chosenDate();
-        $dayStart = $day->copy()->startOfDay();
-        $dayEnd = $day->copy()->endOfDay();
 
-        // Only today's still-open stint can need the dead-session rule; a past day's
-        // stints are all closed. The board row is the evidence effectiveEndedAt reads.
-        $presence = AgentPresence::query()->where('user_id', $this->agentId)->first();
+        // AP-3/AP-4: the day-clip, the dead-session rule and the per-status sums all
+        // live in ShiftSplit now, so this page and the Agent Productivity Report add
+        // the same seconds up the same way.
+        $split = app(ShiftSplit::class)->forAgents(
+            [$this->agentId],
+            $day->copy()->startOfDay(),
+            $day->copy()->endOfDay(),
+        )[$this->agentId];
 
-        $stints = AgentStatusHistory::query()
-            ->where('user_id', $this->agentId)
-            ->where('started_at', '<=', $dayEnd)
-            ->where(function (Builder $query) use ($dayStart): void {
-                $query->whereNull('ended_at')->orWhere('ended_at', '>=', $dayStart);
-            })
-            ->with('breakCategory')
-            ->orderBy('started_at')
-            ->get();
+        // The timeline is drawn from the very stints those seconds were counted from
+        // (AP-4), so the total above can never disagree with the rows below. Break
+        // names are loaded HERE, in one query on those stints — the report renders no
+        // break names and must not pay for them.
+        (new EloquentCollection(array_column($split['stints'], 'stint')))->loadMissing('breakCategory');
 
-        $seconds = ['ready' => 0, 'on_call' => 0, 'on_break' => 0, 'wrapping_up' => 0];
-        $timeline = [];
-        $firstLogin = null;
-        $lastActivity = null;
-
-        foreach ($stints as $stint) {
-            $effectiveEnd = $stint->effectiveEndedAt($presence);
-            $ongoing = $effectiveEnd === null; // genuinely still running (only today)
-
-            $rawEnd = $effectiveEnd ?? now();
-            $start = $stint->started_at->greaterThan($dayStart) ? $stint->started_at->copy() : $dayStart->copy();
-            $end = $rawEnd->lessThan($dayEnd) ? $rawEnd->copy() : $dayEnd->copy();
-            $duration = $start->lt($end) ? (int) $start->diffInSeconds($end) : 0;
-
-            if (array_key_exists($stint->status->value, $seconds)) {
-                $seconds[$stint->status->value] += $duration;
-            }
-
-            if ($firstLogin === null || $start->lt($firstLogin)) {
-                $firstLogin = $start->copy();
-            }
-
-            if ($lastActivity === null || $end->gt($lastActivity)) {
-                $lastActivity = $end->copy();
-            }
-
-            $timeline[] = [
-                'statusLabel' => $stint->status->label(),
-                'statusColor' => $this->statusColor($stint->status),
-                'breakCategory' => $stint->status === PresenceStatus::OnBreak
-                    ? ($stint->breakCategory?->label ?? 'Break')
-                    : null,
-                'startedAt' => $start,
-                'endedAt' => $ongoing ? null : $end,
-                'durationSeconds' => $duration,
-                'endedVia' => $stint->ended_via,
-            ];
-        }
+        $timeline = array_map(fn (array $counted): array => [
+            'statusLabel' => $counted['stint']->status->label(),
+            'statusColor' => $this->statusColor($counted['stint']->status),
+            'breakCategory' => $counted['stint']->status === PresenceStatus::OnBreak
+                ? ($counted['stint']->breakCategory?->label ?? 'Break')
+                : null,
+            'startedAt' => $counted['startedAt'],
+            'endedAt' => $counted['endedAt'],
+            'durationSeconds' => $counted['durationSeconds'],
+            'endedVia' => $counted['stint']->ended_via,
+        ], $split['stints']);
 
         return [
-            'seconds' => $seconds,
-            'active' => array_sum($seconds),
+            'seconds' => $split['seconds'],
+            'active' => $split['active'],
             'totalCalls' => app(CallReportService::class)->totals($this->dayFilters())['total'],
-            'firstLogin' => $firstLogin,
-            'lastActivity' => $lastActivity,
+            'firstLogin' => $split['firstLogin'],
+            'lastActivity' => $split['lastActivity'],
             'timeline' => $timeline,
         ];
     }
