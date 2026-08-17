@@ -98,9 +98,13 @@ final class ShiftSplit
             $agentId = (int) $stint->user_id;
 
             $effectiveEnd = $stint->effectiveEndedAt($presences->get($agentId));
-            $ongoing = $effectiveEnd === null; // genuinely still running (only today)
 
             $rawEnd = $effectiveEnd ?? now();
+            // 🔴 STILL RUNNING *AND* THE RANGE HAS NOT CLOSED (S118). A stint that is open
+            // right now reaches back into every earlier day it touches, and those days are
+            // over — "ongoing" on a finished day is a claim about the future. The seconds
+            // were always clipped to the range; this word was not.
+            $ongoing = $effectiveEnd === null && $rawEnd->lessThan($to);
             $start = $stint->started_at->greaterThan($from) ? $stint->started_at->copy() : $from->copy();
             $end = $rawEnd->lessThan($to) ? $rawEnd->copy() : $to->copy();
             $duration = $start->lt($end) ? (int) $start->diffInSeconds($end) : 0;

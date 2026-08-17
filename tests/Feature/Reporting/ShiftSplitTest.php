@@ -162,6 +162,37 @@ it('leaves a live stint open and counts it up to now', function () {
         ->and($split[$agentId]['stints'][0]['endedAt'])->toBeNull();
 });
 
+it('closes a live stint at the edge of a day that is already over', function () {
+    $tenant = Tenant::factory()->create();
+
+    $yesterday = Carbon::yesterday();
+
+    [$split, $agentId] = TenantContext::run($tenant->id, function () use ($yesterday): array {
+        $agent = User::factory()->create();
+
+        // Open on disk, heartbeat fresh — the agent is at their desk right now, and has
+        // been since yesterday morning without one status change.
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::Ready)->create();
+        AgentStatusHistory::factory()->forUser($agent)->status(PresenceStatus::Ready)
+            ->create(['started_at' => $yesterday->copy()->setTime(9, 0)]);
+
+        return [
+            (new ShiftSplit)->forAgents([$agent->id], $yesterday->copy()->startOfDay(), $yesterday->copy()->endOfDay()),
+            $agent->id,
+        ];
+    });
+
+    // Yesterday is over, so Agent Detail must print an end time rather than "ongoing".
+    // The seconds were always clipped to the day; only the word was not.
+    //
+    // 09:00 to the last moment of the day is 53,999 seconds, not 54,000: the range ends
+    // at 23:59:59, one second short of midnight. That is how every range on this screen
+    // has always been cut, and this fix does not change it.
+    expect($split[$agentId]['stints'][0]['endedAt'])->not->toBeNull()
+        ->and($split[$agentId]['stints'][0]['endedAt']->toDateString())->toBe($yesterday->toDateString())
+        ->and($split[$agentId]['seconds']['ready'])->toBe(53999);
+});
+
 // --- AP-2: an agent who never logged in still gets a row, and it reads zero ---
 
 it('gives every requested agent a row, even one with no stints at all', function () {
