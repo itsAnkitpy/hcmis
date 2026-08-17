@@ -1,12 +1,17 @@
 <?php
 
+use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
+use App\Enums\StintEndedVia;
 use App\Filament\Pages\Reports\AgentProductivityReport;
 use App\Filament\Pages\Reports\CallSummaryReport;
+use App\Models\AgentStatusHistory;
+use App\Models\Call;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
@@ -147,9 +152,12 @@ it('exports a CSV matching the on-screen agent table', function () {
     $response->sendContent();
     $csv = ob_get_clean();
 
-    expect($csv)->toContain('Agent,"Total calls"')     // the header row (quoted where spaced)
-        ->and($csv)->toContain('Alice,3,1,2,2,1,1,1')   // Alice's counts, in table order
-        ->and($csv)->toContain('Bob,2,1,1,1,0,1,0');    // Bob's counts
+    // The six Shift cells are EMPTY, not 0: this fixture has calls and no stints, so
+    // there is no shift record to report (AP-2a/AP-7a). Then the call counts, with
+    // Answered second — these fixture calls carry no answered_at, so it reads 0.
+    expect($csv)->toContain('Agent,"Logged-in (s)"')            // the header row (quoted where spaced)
+        ->and($csv)->toContain('Alice,,,,,,,3,0,1,2,2,1,1,1,66.7')
+        ->and($csv)->toContain('Bob,,,,,,,2,0,1,1,1,0,1,0,50');
 });
 
 it('wires the export header action to a file download', function () {
@@ -162,4 +170,266 @@ it('wires the export header action to a file download', function () {
     Livewire::test(AgentProductivityReport::class)
         ->callAction('export')
         ->assertFileDownloaded('agent-productivity.csv');
+});
+
+// ---------------------------------------------------------------------------
+// apr.md slice 2 — the shift columns, the row merge and the today fallback
+// ---------------------------------------------------------------------------
+
+/** A closed stint on the chosen day, in the report's own tenant context. */
+function reportStint(User $user, PresenceStatus $status, Carbon $from, Carbon $to): void
+{
+    AgentStatusHistory::factory()->forUser($user)->create([
+        'status' => $status,
+        'started_at' => $from,
+        'ended_at' => $to,
+        'ended_via' => StintEndedVia::Changed,
+    ]);
+}
+
+/** A call this agent handled, with known talk / hold / wrap seconds. */
+function reportCall(User $agent, int $talk, int $hold, int $wrap): void
+{
+    $answeredAt = Carbon::today()->setTime(10, 0);
+
+    Call::factory()->forAgent($agent)->create([
+        'answered_at' => $answeredAt,
+        'ended_at' => $answeredAt->copy()->addSeconds($talk + $hold),
+        'hold_seconds' => $hold,
+        'created_at' => $answeredAt->copy()->addSeconds($talk + $hold + $wrap),
+    ]);
+}
+
+/** Run the report as a global reader and return its rows, keyed by agent name. */
+function productivityRows(array $filters = []): array
+{
+    $component = Livewire::test(AgentProductivityReport::class);
+
+    if ($filters !== []) {
+        $component->set('filters', $filters);
+    }
+
+    return collect($component->instance()->rows())->keyBy('agent')->all();
+}
+
+// --- AP-2: the row list is the union, not the grouped call query alone ---
+
+it('gives an agent who logged in and took no call a row with their shift on it', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $idle = User::factory()->create(['name' => 'Idle Ivy']);
+        reportStint($idle, PresenceStatus::Ready, Carbon::today()->setTime(9, 0), Carbon::today()->setTime(17, 0));
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $rows = productivityRows();
+
+    // Eight hours on the floor, no calls. The grouped call query cannot see her at
+    // all, which is why the row list is a union.
+    expect($rows)->toHaveKey('Idle Ivy')
+        ->and($rows['Idle Ivy']['active_seconds'])->toBe(28800)
+        ->and($rows['Idle Ivy']['ready_seconds'])->toBe(28800)
+        ->and($rows['Idle Ivy']['total'])->toBe(0)
+        ->and($rows['Idle Ivy']['answered'])->toBe(0)
+        ->and($rows['Idle Ivy']['aht_seconds'])->toBeNull()
+        // A real 0%, not a blank: we know her logged-in time and we know she handled
+        // nothing. AP-7a blanks occupancy only when the BOTTOM of the division is zero.
+        ->and($rows['Idle Ivy']['occupancy'])->toBe(0.0);
+});
+
+// --- AP-7a: occupancy, and the two ways it misbehaves ---
+
+it('divides handling time by logged-in time for occupancy', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create(['name' => 'Busy Bea']);
+
+        // One hour on the floor, fifteen minutes of it handling one call.
+        reportStint($agent, PresenceStatus::Ready, Carbon::today()->setTime(9, 0), Carbon::today()->setTime(10, 0));
+        reportCall($agent, talk: 600, hold: 100, wrap: 200);
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $row = productivityRows()['Busy Bea'];
+
+    expect($row['active_seconds'])->toBe(3600)
+        ->and($row['talk_seconds'])->toBe(600)
+        ->and($row['hold_seconds'])->toBe(100)
+        ->and($row['wrap_seconds'])->toBe(200)
+        ->and($row['aht_seconds'])->toBe(900)
+        // (600 + 100 + 200) / 3600 = 25%.
+        ->and($row['occupancy'])->toBe(25.0);
+});
+
+it('leaves the shift blank, never zero, for an agent with calls but no shift record', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create(['name' => 'Ghost Gus']);
+        reportCall($agent, talk: 300, hold: 0, wrap: 60);
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $row = productivityRows()['Ghost Gus'];
+
+    // 🔴 AP-7a. A hard 0% would read as "this agent did nothing" about somebody who
+    // handled a call. Blank says we hold no shift record, which is what happened.
+    expect($row['total'])->toBe(1)
+        ->and($row['occupancy'])->toBeNull()
+        ->and($row['active_seconds'])->toBeNull()
+        ->and($row['ready_seconds'])->toBeNull();
+});
+
+it('leaves the Unassigned row without a shift — it is not a person', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        Call::factory()->create(['agent_id' => null, 'created_at' => now()]);
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $row = productivityRows()['Unassigned'];
+
+    expect($row['total'])->toBe(1)
+        ->and($row['active_seconds'])->toBeNull()
+        ->and($row['occupancy'])->toBeNull();
+});
+
+// --- AP-2a: busiest first, then by name, and the same order twice ---
+
+it('sorts busiest first and breaks a tie by name, the same way every read', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $busy = User::factory()->create(['name' => 'Busy Bea']);
+        reportCall($busy, talk: 60, hold: 0, wrap: 10);
+
+        // Two agents tied on zero calls. Without a tiebreak they reshuffle between
+        // two reads of the same screen.
+        foreach (['Zoe Zephyr', 'Adam Ash'] as $name) {
+            $idle = User::factory()->create(['name' => $name]);
+            reportStint($idle, PresenceStatus::Ready, Carbon::today()->setTime(9, 0), Carbon::today()->setTime(10, 0));
+        }
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    $order = fn (): array => array_column(
+        Livewire::test(AgentProductivityReport::class)->instance()->rows(),
+        'agent',
+    );
+
+    expect($order())->toBe(['Busy Bea', 'Adam Ash', 'Zoe Zephyr'])
+        ->and($order())->toBe(['Busy Bea', 'Adam Ash', 'Zoe Zephyr']);
+});
+
+// --- AP-12: a blank or cleared filter reads today, never every record ever ---
+
+it('reads today when both date boxes are cleared', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create(['name' => 'Busy Bea']);
+
+        reportCall($agent, talk: 60, hold: 0, wrap: 10);
+        Call::factory()->forAgent($agent)->create(['created_at' => Carbon::today()->subMonth()]);
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    // Empty strings are what a CLEARED date box sends — the case a form default would
+    // miss, because a form default only fires on first load.
+    expect(productivityRows(['startDate' => '', 'endDate' => ''])['Busy Bea']['total'])->toBe(1)
+        ->and(productivityRows()['Busy Bea']['total'])->toBe(1);
+
+    // The month-old call is real, and an explicit range still finds it.
+    $wide = productivityRows([
+        'startDate' => Carbon::today()->subYear()->toDateString(),
+        'endDate' => Carbon::today()->toDateString(),
+    ]);
+
+    expect($wide['Busy Bea']['total'])->toBe(2);
+});
+
+it('reads today when the shift has no calls beside it', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create(['name' => 'Idle Ivy']);
+
+        // Yesterday's shift must not appear in today's default view.
+        reportStint($agent, PresenceStatus::Ready, Carbon::yesterday()->setTime(9, 0), Carbon::yesterday()->setTime(17, 0));
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    expect(productivityRows())->toBe([]);
+});
+
+// --- AP-13: the labels and the notes the decisions above owe the manager ---
+
+it('renders the shift columns, the two-word labels and the notes', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $worked = User::factory()->create(['name' => 'Busy Bea']);
+        reportStint($worked, PresenceStatus::Ready, Carbon::today()->setTime(9, 0), Carbon::today()->setTime(10, 0));
+        reportCall($worked, talk: 600, hold: 100, wrap: 200);
+
+        // Calls but no shift record — the row that earns the third note under the table.
+        reportCall(User::factory()->create(['name' => 'Ghost Gus']), talk: 300, hold: 0, wrap: 60);
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(AgentProductivityReport::class)
+        ->assertOk()
+        ->assertSee('Shift')
+        ->assertSee('Occupancy')
+        ->assertSee('25.0%')          // AP-7a, on the row that has a shift
+        ->assertSee('01:00:00')       // the logged-in hour, in the house clock
+        ->assertSee('includes ring and hold') // AP-13, on the On-a-call column
+        ->assertSee('per call')               // AP-13, on the Wrap column
+        ->assertSee('status')                 // AP-13, on the Wrapping-up column
+        ->assertSee('counts as Talk for the agent who did not press Hold') // AP-8 note
+        ->assertSee('These dates use the application clock')               // AP-11 note
+        ->assertSee('we hold no shift record for those dates');            // AP-13 note 3
+});
+
+// --- RP-5: the CSV carries every new column, in the table's order ---
+
+it('exports the shift columns and the handling time alongside the counts', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $agent = User::factory()->create(['name' => 'Busy Bea']);
+        reportStint($agent, PresenceStatus::Ready, Carbon::today()->setTime(9, 0), Carbon::today()->setTime(10, 0));
+        reportCall($agent, talk: 600, hold: 100, wrap: 200);
+    });
+
+    $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    ob_start();
+    Livewire::test(AgentProductivityReport::class)->instance()->exportCsv()->sendContent();
+    $csv = ob_get_clean();
+
+    // Shift (logged-in, ready, on-call, wrapping up, break, occupancy), then the
+    // counts, then talk / hold / wrap / AHT. Durations go out as SECONDS so a
+    // supervisor can total the column in a spreadsheet.
+    expect($csv)->toContain('"Busy Bea",3600,3600,0,0,0,25,1,1,0,1,0,0,0,0,0,600,100,200,900');
 });

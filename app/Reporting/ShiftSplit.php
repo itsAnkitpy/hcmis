@@ -79,12 +79,8 @@ final class ShiftSplit
         // but they are one read for the whole set either way.
         $presences = AgentPresence::query()->whereIn('user_id', $ids)->get()->keyBy('user_id');
 
-        $stints = AgentStatusHistory::query()
+        $stints = $this->stintsInRange($from, $to)
             ->whereIn('user_id', $ids)
-            ->where('started_at', '<=', $to)
-            ->where(function (Builder $query) use ($from): void {
-                $query->whereNull('ended_at')->orWhere('ended_at', '>=', $from);
-            })
             ->orderBy('started_at')
             ->get();
 
@@ -124,5 +120,39 @@ final class ShiftSplit
         }
 
         return $split;
+    }
+
+    /**
+     * Which agents hold any stint that touches the range (apr.md AP-2) — the other half
+     * of the Agent Productivity Report's row list. An agent who logged in for eight
+     * hours and took no call is exactly the agent a manager wants to see, and the
+     * grouped call query cannot know they exist.
+     *
+     * One read, and a bounded one: AP-12 guarantees the caller always hands over a real
+     * range, so this is never the unbounded scan the export screen runs.
+     *
+     * @return array<int, int>
+     */
+    public function agentIdsIn(Carbon $from, Carbon $to): array
+    {
+        return $this->stintsInRange($from, $to)
+            ->distinct()
+            ->pluck('user_id')
+            ->map(fn (int|string $id): int => (int) $id)
+            ->all();
+    }
+
+    /**
+     * Every stint that overlaps the range: it started at or before the end, and it
+     * either never closed or closed at or after the start. Named once so the row list
+     * and the seconds behind it can never read two different sets of stints.
+     */
+    private function stintsInRange(Carbon $from, Carbon $to): Builder
+    {
+        return AgentStatusHistory::query()
+            ->where('started_at', '<=', $to)
+            ->where(function (Builder $query) use ($from): void {
+                $query->whereNull('ended_at')->orWhere('ended_at', '>=', $from);
+            });
     }
 }
