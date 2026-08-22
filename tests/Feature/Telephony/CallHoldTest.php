@@ -328,6 +328,36 @@ it('puts the caller back when the agent who held them leaves a three-way that ca
     $flow->handle(channelDestroyed('caller-leg'));
 });
 
+// 🔴 H-10 through the door the BUTTON really uses (S119 A2). Every other hold test in this
+// file calls beginHold() on the flow object, which proves the parking works but never proves
+// the signal reaches it: the agent lookup in Switchboard::onUserEvent(), and the backstop in
+// Switchboard::guard() that tears a call DOWN when anything inside it throws. A routing slip
+// between the two would leave all of them green and, live, END the call the agent tried to
+// park — no error on screen, the customer simply gone. The negative twin is the test below.
+it('parks and returns the caller when the Hold signal arrives the way the console sends it', function () {
+    [$tenant, $agentId] = heldCallTenant();
+
+    $telephony = telephonyOnACall();
+    $telephony->shouldReceive('removeFromBridge')->once()->with('conv-1', 'caller-leg');
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-1', 'caller-leg');
+
+    // Driven through the switchboard, not the flow: this is the object the live listener
+    // holds, and the only one that reads a user-event off the pipe.
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-leg', [], null, (string) $tenant->id));
+    $switchboard->handle(stasisStart('agent-leg', ['agent']));
+
+    // Byte for byte what AgentConsole::holdCall() and resumeCall() put on the wire: the
+    // agent's own user id and nothing else — no company, because a hold reserves nothing.
+    $switchboard->handle(channelUserevent('hold', ['agentUserId' => (string) $agentId]));
+    $this->travel(40)->seconds();
+    $switchboard->handle(channelUserevent('resume', ['agentUserId' => (string) $agentId]));
+
+    // Named, not counted: the seconds prove it was THIS hold that landed, and the two
+    // bridge expectations above prove the caller actually left the conversation and came back.
+    expect(holdNoteFor($tenant, $agentId)->hold_seconds)->toBe(40);
+});
+
 // The same posture every other signal has: a message about an agent who is on no call
 // names nothing to act on, so it is dropped.
 it('ignores a hold message naming an agent who is on no call', function () {

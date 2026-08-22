@@ -84,11 +84,22 @@ class TelephonyListen extends Command
      */
     private const PUBLISH_EVERY_SECONDS = 5.0;
 
+    /**
+     * How often this process leaves a mark saying it is still turning (S119 A1). Read from
+     * outside by deploy/telephony-watchdog.sh, which restarts a listener whose mark has gone
+     * stale. Gated for the same reason the two above are: on a busy line the loop turns per
+     * event, and a file's timestamp only has a second to give anyway.
+     */
+    private const BEAT_EVERY_SECONDS = 5.0;
+
     /** When the waiting room was last swept (a monotonic-enough clock for a 1s gate). */
     private float $lastSweptAt = 0.0;
 
     /** When the call counts were last published (the same kind of clock, same job). */
     private float $lastPublishedAt = 0.0;
+
+    /** When the heartbeat file was last touched (the same kind of clock, same job). */
+    private float $lastBeatAt = 0.0;
 
     public function __construct(
         private readonly TelephonyProvider $telephony,
@@ -105,6 +116,10 @@ class TelephonyListen extends Command
         $switchboard = new Switchboard($this->telephony);
 
         while (true) {
+            // Beat here as well as in listen(): a process sitting out a reconnect backoff is
+            // healthy, and restarting it would throw away every live call the switchboard holds.
+            $this->beat();
+
             $pipe = $this->makePipe();
 
             try {
@@ -151,6 +166,7 @@ class TelephonyListen extends Command
         while (true) {
             $event = $pipe->readEvent(self::READ_TIMEOUT_SECONDS);
 
+            $this->beat();
             $this->sweepWaitingCallers($switchboard);
             $this->publishCallCounts($switchboard);
 
@@ -202,6 +218,36 @@ class TelephonyListen extends Command
         rescue(
             fn () => $this->counts->publish($switchboard->tallyByTenant()),
             fn (Throwable $exception) => Log::warning('Live call counts were not published — the board will say the phone service is not reporting.', [
+                'error' => $exception->getMessage(),
+            ]),
+        );
+    }
+
+    /**
+     * Leave a mark saying this process is still turning (S119 A1).
+     *
+     * systemd restarts the listener if it DIES (Restart=always). Nothing notices it FREEZING
+     * while still alive — the process is in the process list, the pipe may even be open, but
+     * the loop has stopped and calls go unanswered in silence. An outside check reads the age
+     * of this file and restarts a stale one; see deploy/telephony-watchdog.sh.
+     *
+     * Best-effort, the shape publishCallCounts() already uses: a full disk must never take the
+     * listener — and every live call with it — down with it. The cost of a missed touch is at
+     * worst one restart of a healthy process, which the 120s staleness limit leaves room for.
+     */
+    private function beat(): void
+    {
+        $now = microtime(true);
+
+        if ($now - $this->lastBeatAt < self::BEAT_EVERY_SECONDS) {
+            return;
+        }
+
+        $this->lastBeatAt = $now;
+
+        rescue(
+            fn () => touch(storage_path('app/telephony-heartbeat')),
+            fn (Throwable $exception) => Log::warning('The listener could not leave its heartbeat — the freeze watchdog is blind until this clears.', [
                 'error' => $exception->getMessage(),
             ]),
         );
