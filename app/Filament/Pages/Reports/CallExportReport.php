@@ -12,6 +12,7 @@ use App\Models\Disposition;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Reporting\CallExportRows;
+use App\Tenancy\TenantContext;
 use BackedEnum;
 use Carbon\CarbonImmutable;
 use Filament\Actions\Action;
@@ -21,6 +22,7 @@ use Filament\Pages\Dashboard\Concerns\HasFiltersForm;
 use Filament\Pages\Page;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Gate;
 use UnitEnum;
 
@@ -255,25 +257,45 @@ class CallExportReport extends Page
      * The agents present in this client's calls — the tenant wall scopes the source
      * query, so a per-client user only ever sees their own agents.
      *
+     * 🔴 CACHED (S119 N3), because the inner walk is a DISTINCT over every call this
+     * client has ever made and it ran on EVERY render of the filter form — each keystroke
+     * in a date box, each other dropdown touched, on a table that only grows.
+     *
+     * The cheaper-looking fix does not exist. `users` carries no tenant column — membership
+     * is the `user_tenant` pivot — so reading that table directly would hand a per-client
+     * reader every other client's staff names. Deriving the id set from the WALLED calls
+     * query is what keeps the two apart, which is why the key below is the tenant, and why
+     * global staff (who legitimately read across clients) get their own key.
+     *
+     * ponytail: five minutes of staleness — an agent's very FIRST call may not name them
+     * here for up to five minutes; every later call is unaffected. Shorten the window, or
+     * key on the chosen date range as well, if a floor ever notices.
+     *
      * @return array<int, string>
      */
     protected function agentOptions(): array
     {
-        $agentIds = Call::query()
-            ->whereNotNull('agent_id')
-            ->distinct()
-            ->pluck('agent_id')
-            ->all();
+        return Cache::remember(
+            'call-export:agent-options:'.(TenantContext::id() ?? 'global'),
+            now()->addMinutes(5),
+            function (): array {
+                $agentIds = Call::query()
+                    ->whereNotNull('agent_id')
+                    ->distinct()
+                    ->pluck('agent_id')
+                    ->all();
 
-        if ($agentIds === []) {
-            return [];
-        }
+                if ($agentIds === []) {
+                    return [];
+                }
 
-        return User::query()
-            ->whereIn('id', $agentIds)
-            ->orderBy('name')
-            ->pluck('name', 'id')
-            ->all();
+                return User::query()
+                    ->whereIn('id', $agentIds)
+                    ->orderBy('name')
+                    ->pluck('name', 'id')
+                    ->all();
+            },
+        );
     }
 
     /**
