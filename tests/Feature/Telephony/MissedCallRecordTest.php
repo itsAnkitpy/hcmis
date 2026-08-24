@@ -263,3 +263,33 @@ it('never lets a failed record write disturb the call itself', function () {
     expect(allCalls())->toHaveCount(0)                  // no row, as forced
         ->and($switchboard->activeCallCount())->toBe(0);   // and the call still ended cleanly
 });
+
+// CH-T5 (customer-history-panel.md CH-5). This flow is the ONE writer that took the
+// caller's number straight off the switch event, while the console normalizes its side
+// and the `calls` migration already promises the column holds a normalized value. So an
+// unanswered caller was filed under `(0181) 123 4567` while every lookup — the lead match
+// and now the history panel — asks for `01811234567` and found nothing. These are exactly
+// the calls a supervisor most wants to see on a repeat caller.
+it('stores the caller number normalized, so the history panel can find the call (CH-5)', function () {
+    $tenant = Tenant::factory()->create();
+    fakeAgentRouter(null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('startHoldMusic')->once();
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+    $flow->handle(stasisStart('caller-leg', [], '(0181) 123-4567', (string) $tenant->id));
+    $flow->handle(channelDestroyed('caller-leg'));
+
+    $call = allCalls()->sole();
+
+    expect($call->from_number)->toBe('01811234567');
+
+    // The point of the fix, not just the column: the panel keyed on the clean number
+    // finds this call. Read in the client's own context, like the console does.
+    TenantContext::run($tenant->id, function (): void {
+        expect(Call::query()->forCustomerNumber('01811234567')->count())->toBe(1);
+    });
+});

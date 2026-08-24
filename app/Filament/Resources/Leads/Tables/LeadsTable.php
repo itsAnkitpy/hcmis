@@ -4,7 +4,9 @@ namespace App\Filament\Resources\Leads\Tables;
 
 use App\Enums\DncSource;
 use App\Enums\LeadStatus;
+use App\Filament\Resources\Calls\Pages\ListCalls;
 use App\Filament\Support\ClientColumn;
+use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\DncEntry;
 use App\Models\Lead;
@@ -156,6 +158,20 @@ class LeadsTable
                     ->action(function (Lead $record): void {
                         self::addLeadsToDnc(collect([$record]));
                     }),
+                // CH-3: this customer's whole history, on Call Review with the number
+                // filter already applied. Keyed on the NUMBER rather than the lead, so it
+                // also surfaces the calls that were never matched to this record — an
+                // ad-hoc dial to the same number, or an inbound call taken before the
+                // lead existed. Gated on Call's own viewAny, the audience Call Review has:
+                // a lead editor is not automatically allowed to hear calls.
+                Action::make('callHistory')
+                    ->label('History')
+                    ->icon(Heroicon::OutlinedClock)
+                    ->color('gray')
+                    ->visible(fn (): bool => auth()->user()?->can('viewAny', Call::class) ?? false)
+                    ->url(fn (Lead $record): string => ListCalls::getUrl([
+                        'tableFilters' => ['number' => ['value' => $record->phone]],
+                    ])),
                 EditAction::make(),
             ])
             ->toolbarActions([

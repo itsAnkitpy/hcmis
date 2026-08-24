@@ -60,6 +60,13 @@ class AgentConsole extends Page
     protected string $view = 'filament.pages.agent-console';
 
     /**
+     * CH-2 — how many past calls the ring-time panel shows. Three, because an agent
+     * reading a long table while a phone rings is reading nothing; the full history is
+     * a supervisor's tool and lives on Call Review (CH-3).
+     */
+    private const HISTORY_CALLS = 3;
+
+    /**
      * The matched lead + its campaign, held SERVER-SIDE across the call (B4 CP3
      * decision C). #[Locked] so the browser cannot tamper them: the wrap-up write
      * keys off these, never a browser-supplied id. Set in lookupLead() on a match,
@@ -324,6 +331,69 @@ class AgentConsole extends Page
         $this->matchedCampaignId = $lead->campaign_id;
 
         return $this->presentLead($lead);
+    }
+
+    /**
+     * CH-2 — "have we dealt with this number before, and how did it go?", answered
+     * beside the live call: any callback we still owe this person, then the last three
+     * calls to or from their number.
+     *
+     * 🔴 Reads the SERVER-HELD number, never one the browser sends. `callPartyNumber`
+     * is already set on every call path — the normalized caller-ID on an inbound ring
+     * (lookupLead) and the normalized dialled number on every outbound dial (served
+     * lead, callback and ad-hoc all route through originateAgentLeg) — and cleared
+     * between calls by resetMatch, so this panel can no more inherit the previous
+     * caller's history than the lead match can (decision C, extended). A number posted
+     * from the browser would be a lookup taking dictation from the client.
+     *
+     * Keyed on the number rather than the matched lead (CH-1), which is the whole point
+     * of the slice: an ad-hoc dial to a stranger leaves a calls row today, so the SECOND
+     * call to that number has a history even though nobody ever created a customer for
+     * them. Walled to the agent's client by RLS, like every other read here.
+     *
+     * Callbacks are lead-keyed and stay that way (CH-4): `callbacks.lead_id` is NOT NULL,
+     * so a number nobody has saved has no callback to show — by construction, not by
+     * omission. No match, no callback block at all.
+     *
+     * The blade calls this on every render; a call with no number yet (page load, or an
+     * anonymous caller) short-circuits before touching the database. Times ride out as
+     * UTC ISO strings so the browser prints them in the AGENT's own clock, the same way
+     * the callback lists already do.
+     *
+     * @return array{calls: array<int, array{whenIso: string, direction: string, talked: string, outcome: ?string, agent: ?string}>, callbacks: array<int, array{scheduledAtIso: string, notes: ?string}>}
+     */
+    public function callHistory(): array
+    {
+        if ($this->callPartyNumber === null) {
+            return ['calls' => [], 'callbacks' => []];
+        }
+
+        $calls = Call::query()
+            ->forCustomerNumber($this->callPartyNumber)
+            ->with('agent')
+            ->limit(self::HISTORY_CALLS)
+            ->get()
+            ->map(fn (Call $call): array => [
+                'whenIso' => $call->created_at->toIso8601String(),
+                'direction' => $call->direction->label(),
+                'talked' => Call::asClock($call->talkedSeconds()),
+                'outcome' => $call->outcome?->label(),
+                'agent' => $call->agent?->name,
+            ])
+            ->all();
+
+        $callbacks = $this->matchedLeadId === null ? [] : Callback::query()
+            ->where('lead_id', $this->matchedLeadId)
+            ->where('status', CallbackStatus::Pending)
+            ->orderBy('scheduled_at')
+            ->get()
+            ->map(fn (Callback $callback): array => [
+                'scheduledAtIso' => $callback->scheduled_at->toIso8601String(),
+                'notes' => $callback->notes,
+            ])
+            ->all();
+
+        return ['calls' => $calls, 'callbacks' => $callbacks];
     }
 
     /**

@@ -9,8 +9,11 @@ use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Models\Call;
 use App\Models\CallHandoff;
-use App\Models\PhoneNumber;
+// The model, aliased: App\Support\PhoneNumber (the number formatter) already owns the
+// plain name across the codebase (AgentConsole).
+use App\Models\PhoneNumber as PhoneNumberRecord;
 use App\Models\Tenant;
+use App\Support\PhoneNumber;
 use App\Telephony\AgentDirectory;
 use App\Telephony\AgentRouter;
 use App\Telephony\AriConnectionLost;
@@ -444,7 +447,14 @@ class CallToAgentFlow
     {
         $this->callerLegId = $callerLegId;
         $this->ticketNumber = (string) Str::uuid();   // inbound mints a fresh ticket (FD-3)
-        $this->callerNumber = $callerNumber;
+        // CH-5: normalized HERE, at the one place the caller's number enters this object,
+        // so every later reader gets the clean value — the agent leg's caller-ID, the
+        // handoff note, and the `from_number` this flow writes for a caller nobody
+        // answered. The console normalizes its side (lookupLead / dialAdhoc) and the
+        // calls migration already promises the column holds a normalized value; this
+        // writer was the one that did not, so an unanswered inbound call stored `(0181)
+        // 123 4567` where every lookup asks for `01811234567` and finds nothing.
+        $this->callerNumber = PhoneNumber::normalize($callerNumber);
         $this->dialledNumber = $this->dialledNumber($event);
         $this->startedAt = now();
 
@@ -911,7 +921,7 @@ class CallToAgentFlow
                 // the question these rows exist to answer — so leaving Campaign blank
                 // emptied the column on exactly the rows a supervisor groups by. Inside
                 // the tenant run below, so the lookup is scoped to this client.
-                'campaign_id' => PhoneNumber::campaignIdFor($this->dialledNumber),
+                'campaign_id' => PhoneNumberRecord::campaignIdFor($this->dialledNumber),
                 'outcome' => $outcome,
                 'correlation_id' => $this->ticketNumber,
                 // CE-11, and this row is the one place we can say it without a note:

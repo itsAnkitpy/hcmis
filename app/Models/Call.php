@@ -6,8 +6,10 @@ use App\Audit\LogsModelActivity;
 use App\Enums\CallDirection;
 use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
+use App\Support\PhoneNumber;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\CallFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -224,6 +226,56 @@ class Call extends Model
         return $seconds >= 3600
             ? sprintf('%02d:%02d:%02d', intdiv($seconds, 3600), intdiv($seconds % 3600, 60), $seconds % 60)
             : gmdate('i:s', $seconds);
+    }
+
+    /**
+     * CH-1 — every call to or from one customer's number, newest first. The ONE
+     * definition of "this number's history", shared by the agent console's ring-time
+     * panel (CH-2) and the Call Review number filter (CH-3), so the two screens can
+     * never disagree about what a number's history is.
+     *
+     * Keyed on the NUMBER, not on `lead_id`, because the number is the only key that
+     * works on all four call paths — matched inbound, matched outbound, unmatched
+     * inbound and ad-hoc manual dial. A call that HAS a lead carries the number too,
+     * so the number alone loses nothing, and an unknown caller finally has a history
+     * without anybody having to create a customer record for them first.
+     *
+     * 🔴 The direction is paired with the column deliberately. On an outbound call
+     * `from_number` is OUR OWN caller-ID and on an inbound call `to_number` is OUR OWN
+     * line, so a plain `to_number = ? OR from_number = ?` would read a client's own
+     * calls back as that number's customer history the moment one of our own numbers
+     * is dialled.
+     *
+     * Normalized here rather than at each call site, for the same reason CH-5 fixes
+     * the listener at its single write: one place to get right. A number that
+     * normalizes to nothing — an anonymous caller has none at all — matches no rows
+     * rather than every row.
+     *
+     * Tenant-walled by RLS + BelongsToTenant like every other read. 🔴 Worth naming:
+     * this query starts from a phone number, which is not a tenant-scoped value on its
+     * own, so the wall is doing all the work here alone (proved by CH-T1).
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
+     */
+    public function scopeForCustomerNumber(Builder $query, ?string $phone): Builder
+    {
+        $phone = PhoneNumber::normalize($phone);
+
+        if ($phone === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query
+            ->where(function (Builder $q) use ($phone): void {
+                $q->where(fn (Builder $outbound): Builder => $outbound
+                    ->where('direction', CallDirection::Outbound)
+                    ->where('to_number', $phone))
+                    ->orWhere(fn (Builder $inbound): Builder => $inbound
+                        ->where('direction', CallDirection::Inbound)
+                        ->where('from_number', $phone));
+            })
+            ->latest('created_at');
     }
 
     /**

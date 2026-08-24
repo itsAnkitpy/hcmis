@@ -481,6 +481,56 @@
                 </div>
             </div>
 
+            {{-- CH-2 (customer-history-panel.md): "have we dealt with this number
+                 before, and how did it go?" — any callback we still owe them, then the
+                 last three calls to or from their number. Keyed on the number the SERVER
+                 is holding, so an ad-hoc dial to a stranger still builds a history nobody
+                 had to create a customer record for. Rendered server-side: lookupLead()
+                 and dial() both re-render, so it fills in as the call starts and clears
+                 with resetMatch when the wrap-up is saved.
+
+                 Times ride out as UTC and print through the existing formatDue(), so a
+                 past call reads in the AGENT's own clock exactly like a due callback. --}}
+            @if ($this->callPartyNumber !== null)
+                @php($history = $this->callHistory())
+
+                <div class="mt-4 border-t border-gray-100 pt-4 dark:border-white/10">
+                    {{-- CH-4: lead-keyed, so this block is simply absent for a number
+                         nobody has saved — never an empty row claiming "no callbacks". --}}
+                    @foreach ($history['callbacks'] as $callback)
+                        <p class="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                            <span class="font-semibold">Callback still owed</span> — due
+                            <span x-text="formatDue(@js($callback['scheduledAtIso']))"></span>@if ($callback['notes']) · “{{ $callback['notes'] }}”@endif
+                        </p>
+                    @endforeach
+
+                    @if ($history['calls'])
+                        <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Previous calls</p>
+                        <ul class="mt-1 space-y-1 text-sm text-gray-600 dark:text-gray-300">
+                            @foreach ($history['calls'] as $call)
+                                <li class="flex flex-wrap items-center gap-x-2">
+                                    <span x-text="formatDue(@js($call['whenIso']))"></span>
+                                    <span class="text-gray-300 dark:text-gray-600">·</span>
+                                    <span>{{ $call['direction'] }}</span>
+                                    <span class="text-gray-300 dark:text-gray-600">·</span>
+                                    <span>{{ $call['talked'] }}</span>
+                                    @if ($call['outcome'])
+                                        <span class="text-gray-300 dark:text-gray-600">·</span>
+                                        <span class="font-medium text-gray-800 dark:text-gray-100">{{ $call['outcome'] }}</span>
+                                    @endif
+                                    @if ($call['agent'])
+                                        <span class="text-gray-300 dark:text-gray-600">·</span>
+                                        <span>{{ $call['agent'] }}</span>
+                                    @endif
+                                </li>
+                            @endforeach
+                        </ul>
+                    @elseif (! $history['callbacks'])
+                        <p class="text-sm text-gray-500 dark:text-gray-400">First time we are speaking to this number.</p>
+                    @endif
+                </div>
+            @endif
+
             {{-- B2.4a (TD-5): the screen-side transfer feedback. A failed transfer
                  (no-answer / nobody-free) reverts here with a neutral note, since there
                  is no listener->screen signal to tell the two apart. --}}

@@ -7,9 +7,11 @@ use App\Enums\CallOutcome;
 use App\Filament\Support\ClientColumn;
 use App\Models\Call;
 use App\Reporting\CallReportFilters;
+use App\Support\PhoneNumber;
 use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\DatePicker;
+use Filament\Forms\Components\TextInput;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
@@ -76,6 +78,31 @@ class CallsTable
             ])
             ->defaultSort('created_at', 'desc')
             ->filters([
+                // CH-3 (customer-history-panel.md): one customer's whole history, on the
+                // screen that already has the filters, the client's-clock date cut, the
+                // View page and the gated recording player. A dedicated customer page
+                // would re-implement all four.
+                //
+                // Runs through the SAME Call::forCustomerNumber() scope the agent's
+                // ring-time panel reads (CH-1), so a supervisor and an agent can never be
+                // shown different histories for one number. The scope normalizes, so a
+                // number typed with spaces or brackets still finds its calls.
+                Filter::make('number')
+                    ->schema([
+                        TextInput::make('value')
+                            ->label('Customer number')
+                            ->tel()
+                            ->placeholder('Any number'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->when(
+                        filled($data['value'] ?? null),
+                        fn (Builder $q): Builder => $q->forCustomerNumber($data['value']),
+                    ))
+                    // Without this, arriving from the Leads list's History action lands on
+                    // a filtered list with nothing on screen saying why it is short.
+                    ->indicateUsing(fn (array $data): ?string => filled($data['value'] ?? null)
+                        ? 'Number: '.PhoneNumber::normalize($data['value'])
+                        : null),
                 SelectFilter::make('agent_id')->label('Agent')->relationship('agent', 'name'),
                 SelectFilter::make('campaign_id')->label('Campaign')->relationship('campaign', 'name'),
                 SelectFilter::make('tenant')->label('Client')->relationship('tenant', 'name'),
