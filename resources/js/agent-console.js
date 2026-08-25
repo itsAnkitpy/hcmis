@@ -35,6 +35,13 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     callerNumber: null,
     lead: null,
     leadResolved: false,
+    // CH-2: this caller's recent history, held CLIENT-SIDE like `lead` above and for
+    // the same reason. Livewire BATCHES the $wire calls made in one tick, and a
+    // #[Renderless] method anywhere in the batch drops the HTML for the whole request
+    // — dialAdhoc() ships with setPresence(), so a server-rendered panel never
+    // reaches the DOM. Reading the return value is immune to that, and is how the
+    // lead card has always worked.
+    history: { calls: [], callbacks: [] },
     muted: false,
     answered: false,
     dispositions: {},
@@ -190,6 +197,11 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
             } finally {
                 this.leadResolved = true;
             }
+
+            // CH-2: the caller's recent history, AFTER the lead lookup so a matched
+            // customer's owed callbacks come back with it (callHistory reads the lead
+            // the lookup just stashed server-side).
+            this.loadHistory();
         });
         this.phone.on('answered', () => {
             this.answered = true;
@@ -518,6 +530,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         if (result?.outcome === 'dialed') {
             this.lead = result.lead ?? null;
             this.callerNumber = this.lead ? this.lead.phone : result.phone;
+            this.loadHistory();   // CH-2 — covers served lead, callback and ad-hoc alike
             return;
         }
 
@@ -710,6 +723,23 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         return now.toISOString().slice(0, 16);
     },
 
+    /**
+     * CH-2 — "have we dealt with this number before, and how did it go?". Reads the
+     * number the SERVER is holding (callPartyNumber), so nothing here is trusted from
+     * the browser; this call only asks.
+     *
+     * Best-effort by design: the history is context, not the call. A failure leaves
+     * the panel empty and the agent still takes the call, exactly how the handoff
+     * claim and the lead lookup already fail.
+     */
+    async loadHistory() {
+        try {
+            this.history = await this.$wire.callHistory();
+        } catch (e) {
+            this.history = { calls: [], callbacks: [] };
+        }
+    },
+
     /** A due callback's UTC time, rendered in the agent's own local clock. */
     formatDue(iso) {
         return new Date(iso).toLocaleString([], {
@@ -783,6 +813,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         this.callerNumber = null;
         this.lead = null;
         this.leadResolved = false;
+        this.history = { calls: [], callbacks: [] };
         this.muted = false;
         this.answered = false;
         this.dispositions = {};

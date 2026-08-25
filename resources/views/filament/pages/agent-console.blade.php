@@ -484,52 +484,64 @@
             {{-- CH-2 (customer-history-panel.md): "have we dealt with this number
                  before, and how did it go?" — any callback we still owe them, then the
                  last three calls to or from their number. Keyed on the number the SERVER
-                 is holding, so an ad-hoc dial to a stranger still builds a history nobody
-                 had to create a customer record for. Rendered server-side: lookupLead()
-                 and dial() both re-render, so it fills in as the call starts and clears
-                 with resetMatch when the wrap-up is saved.
+                 holds, so an ad-hoc dial to a stranger still builds a history nobody had
+                 to create a customer record for.
 
-                 Times ride out as UTC and print through the existing formatDue(), so a
-                 past call reads in the AGENT's own clock exactly like a due callback. --}}
-            @if ($this->callPartyNumber !== null)
-                @php($history = $this->callHistory())
+                 🔴 Rendered from Alpine state, NOT from Blade, and that is not a style
+                 choice. Livewire batches the $wire calls made in one tick, and a single
+                 #[Renderless] method in the batch drops the HTML for the whole request:
+                 the browser ships dialAdhoc() together with setPresence(), which is
+                 renderless, so a Blade-rendered panel is built server-side and thrown
+                 away before it ever reaches the DOM. The lead card above has always read
+                 its return value for the same reason (lookupLead rides with the
+                 renderless claimHandoffTicket). Times print through the same formatDue()
+                 the callback lists use, so a past call reads in the AGENT's own clock. --}}
+            <div x-show="callerNumber" x-cloak class="mt-4 border-t border-gray-100 pt-4 dark:border-white/10">
+                {{-- CH-4: callbacks are lead-keyed (callbacks.lead_id is NOT NULL), so this
+                     is simply absent for a number nobody has saved — never an empty row
+                     claiming "no callbacks". --}}
+                <template x-for="callback in history.callbacks" :key="callback.scheduledAtIso">
+                    <p class="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                        <span class="font-semibold">Callback still owed</span> — due
+                        <span x-text="formatDue(callback.scheduledAtIso)"></span>
+                        <span x-show="callback.notes" x-text="'· “' + callback.notes + '”'"></span>
+                    </p>
+                </template>
 
-                <div class="mt-4 border-t border-gray-100 pt-4 dark:border-white/10">
-                    {{-- CH-4: lead-keyed, so this block is simply absent for a number
-                         nobody has saved — never an empty row claiming "no callbacks". --}}
-                    @foreach ($history['callbacks'] as $callback)
-                        <p class="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-                            <span class="font-semibold">Callback still owed</span> — due
-                            <span x-text="formatDue(@js($callback['scheduledAtIso']))"></span>@if ($callback['notes']) · “{{ $callback['notes'] }}”@endif
-                        </p>
-                    @endforeach
-
-                    @if ($history['calls'])
+                <template x-if="history.calls.length">
+                    <div>
                         <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Previous calls</p>
                         <ul class="mt-1 space-y-1 text-sm text-gray-600 dark:text-gray-300">
-                            @foreach ($history['calls'] as $call)
+                            <template x-for="call in history.calls" :key="call.whenIso">
                                 <li class="flex flex-wrap items-center gap-x-2">
-                                    <span x-text="formatDue(@js($call['whenIso']))"></span>
+                                    <span x-text="formatDue(call.whenIso)"></span>
                                     <span class="text-gray-300 dark:text-gray-600">·</span>
-                                    <span>{{ $call['direction'] }}</span>
+                                    <span x-text="call.direction"></span>
                                     <span class="text-gray-300 dark:text-gray-600">·</span>
-                                    <span>{{ $call['talked'] }}</span>
-                                    @if ($call['outcome'])
-                                        <span class="text-gray-300 dark:text-gray-600">·</span>
-                                        <span class="font-medium text-gray-800 dark:text-gray-100">{{ $call['outcome'] }}</span>
-                                    @endif
-                                    @if ($call['agent'])
-                                        <span class="text-gray-300 dark:text-gray-600">·</span>
-                                        <span>{{ $call['agent'] }}</span>
-                                    @endif
+                                    <span x-text="call.talked"></span>
+                                    <template x-if="call.outcome">
+                                        <span class="flex items-center gap-x-2">
+                                            <span class="text-gray-300 dark:text-gray-600">·</span>
+                                            <span class="font-medium text-gray-800 dark:text-gray-100" x-text="call.outcome"></span>
+                                        </span>
+                                    </template>
+                                    <template x-if="call.agent">
+                                        <span class="flex items-center gap-x-2">
+                                            <span class="text-gray-300 dark:text-gray-600">·</span>
+                                            <span x-text="call.agent"></span>
+                                        </span>
+                                    </template>
                                 </li>
-                            @endforeach
+                            </template>
                         </ul>
-                    @elseif (! $history['callbacks'])
-                        <p class="text-sm text-gray-500 dark:text-gray-400">First time we are speaking to this number.</p>
-                    @endif
-                </div>
-            @endif
+                    </div>
+                </template>
+
+                <p
+                    x-show="! history.calls.length && ! history.callbacks.length"
+                    class="text-sm text-gray-500 dark:text-gray-400"
+                >First time we are speaking to this number.</p>
+            </div>
 
             {{-- B2.4a (TD-5): the screen-side transfer feedback. A failed transfer
                  (no-answer / nobody-free) reverts here with a neutral note, since there
