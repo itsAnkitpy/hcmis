@@ -355,8 +355,10 @@ class AgentConsole extends Page
      * so a number nobody has saved has no callback to show — by construction, not by
      * omission. No match, no callback block at all.
      *
-     * The blade calls this on every render; a call with no number yet (page load, or an
-     * anonymous caller) short-circuits before touching the database. Times ride out as
+     * The browser calls this over $wire once a number is in hand, and reads the RETURN
+     * VALUE into Alpine state — never Blade, for the reason the panel's comment gives.
+     * A call with no number yet (page load, or an anonymous caller) short-circuits
+     * before touching the database. Times ride out as
      * UTC ISO strings so the browser prints them in the AGENT's own clock, the same way
      * the callback lists already do.
      *
