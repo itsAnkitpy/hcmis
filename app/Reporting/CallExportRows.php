@@ -152,6 +152,13 @@ final class CallExportRows
             'Campaign',
             'Lead ID',
             'Lead name',
+            // CP-7: the customer's own details, captured on the live call by CP-3's
+            // form. A5 is the whole reason that form exists — the client asks for
+            // these alongside the call report — and until this they were written and
+            // never left the building. Blank for a caller nobody saved, which is
+            // honest rather than missing.
+            'Lead email',
+            'Lead city',
             'Lead entered ('.$this->zoneLabel().')',
             'Disposition',
             'Sale',
@@ -235,6 +242,8 @@ final class CallExportRows
             'campaign' => $call->campaign?->name ?? '',
             'lead_id' => $call->lead_id ?? '',
             'lead_name' => $call->lead?->name ?? '',
+            'lead_email' => $call->lead?->email ?? '',
+            'lead_city' => $call->lead?->city ?? '',
             'lead_entered' => $this->moment($call->lead?->created_at),
             'disposition' => $call->disposition?->label ?? '',
             'sale' => $this->flag($call->disposition?->is_sale),

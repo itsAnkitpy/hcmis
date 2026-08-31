@@ -543,6 +543,62 @@
                 >First time we are speaking to this number.</p>
             </div>
 
+            {{-- CP-3 (customer-profiling.md §6): "save what we just learned about this
+                 caller", beside the live call. A2 put it here rather than in wrap-up —
+                 the form is in front of the agent for the whole call, and whoever hangs
+                 up first decides whether they ever get back to it.
+
+                 Four fields, not sixteen (A1). Three typed, and the phone is not one of
+                 them: it comes off the call, and the server writes the number IT holds,
+                 never one this page could send. All optional (A3) — the Default CRM
+                 never blocks a wrap-up; only a client's own required Dynamic CRM fields
+                 will, and those are CP-8's job, not this form's.
+
+                 🔴 Alpine state again, not Blade, for exactly the reason the history
+                 panel above gives: a renderless method sharing the batch would throw
+                 this markup away. The save reads its RETURN VALUE back into `lead`. --}}
+            <div x-show="callerNumber" x-cloak class="mt-4 border-t border-gray-100 pt-4 dark:border-white/10">
+                <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Customer details</p>
+
+                <div class="mt-2 grid gap-2 sm:grid-cols-3">
+                    <input
+                        type="text"
+                        x-model="customer.name"
+                        placeholder="Name"
+                        class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
+                    />
+                    <input
+                        type="email"
+                        x-model="customer.email"
+                        placeholder="Email"
+                        class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
+                    />
+                    <input
+                        type="text"
+                        x-model="customer.city"
+                        placeholder="City"
+                        class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
+                    />
+                </div>
+
+                <div class="mt-2 flex items-center gap-x-3">
+                    <button
+                        type="button"
+                        x-on:click="saveCustomer()"
+                        :disabled="savingCustomer"
+                        class="inline-flex items-center rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        x-text="savingCustomer ? 'Saving…' : (lead ? 'Update customer' : 'Save customer')"
+                    ></button>
+
+                    <span
+                        x-show="customerNotice"
+                        x-cloak
+                        class="text-sm text-gray-500 dark:text-gray-400"
+                        x-text="customerNotice"
+                    ></span>
+                </div>
+            </div>
+
             {{-- B2.4a (TD-5): the screen-side transfer feedback. A failed transfer
                  (no-answer / nobody-free) reverts here with a neutral note, since there
                  is no listener->screen signal to tell the two apart. --}}

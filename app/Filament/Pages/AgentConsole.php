@@ -300,7 +300,7 @@ class AgentConsole extends Page
      * bare number and says "no matching lead" (D4/D6 honest edge); wrap-up still
      * works.
      *
-     * @return array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}|null
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}|null
      */
     public function lookupLead(string $number): ?array
     {
@@ -399,6 +399,82 @@ class AgentConsole extends Page
     }
 
     /**
+     * CP-3 — "save what we just learned about this caller", from the live-call screen.
+     *
+     * A2 put this beside the call rather than in wrap-up: the form is in front of the
+     * agent for the whole call, and who hangs up decides whether they ever get back to
+     * it. A3 makes every field optional — the Default CRM never blocks a wrap-up.
+     *
+     * 🔴 The phone is the SERVER-HELD `callPartyNumber`, never a number the browser
+     * sends, for the same reason callHistory reads it: a customer write that takes its
+     * key from the client is a write that can be pointed at anyone. It is also why no
+     * lead id appears in the signature — a caller we already know is updated through
+     * the match the server itself made at ring or dial time.
+     *
+     * An upsert in behaviour rather than in SQL, and it looks the row up BY NUMBER
+     * rather than by `matchedLeadId`. That is not a detail: an ad-hoc dial sets the
+     * number without ever running a lead lookup, so an agent typing the number of a
+     * customer we already hold has a live call with no match — and keying on the match
+     * would try to create a second row and hit `leads_tenant_id_phone_unique`. The
+     * number is the unique key per client, so it is the right key here too.
+     *
+     * A new row needs a campaign (`leads.campaign_id` is NOT NULL) and an inbound
+     * stranger has none — CP-4/A8 files them under the client's own "Inbound"
+     * campaign, found-or-created on first use.
+     *
+     * Only filled values are written, so a blank box leaves what is already stored
+     * alone. That means this form cannot CLEAR a field; clearing belongs on the
+     * customer page, not on a live call.
+     *
+     * Saving mid-call also hands the wrap-up a disposition set it did not have: the
+     * picker reads the matched campaign, and until now an ad-hoc call had no match and
+     * therefore no outcome to record.
+     *
+     * Returns the same shape lookupLead does, so the browser swaps it straight into the
+     * lead card. NOT renderless — and read as a RETURN VALUE rather than a render, for
+     * the reason the history panel's comment in the blade sets out.
+     *
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}
+     */
+    public function saveCustomer(?string $name = null, ?string $email = null, ?string $city = null): array
+    {
+        Gate::authorize('save-customer');
+
+        abort_if($this->callPartyNumber === null, 422, 'There is no caller to save.');
+
+        $fields = validator(
+            ['name' => $name, 'email' => $email, 'city' => $city],
+            [
+                'name' => ['nullable', 'string', 'max:255'],
+                'email' => ['nullable', 'email', 'max:255'],
+                'city' => ['nullable', 'string', 'max:255'],
+            ],
+        )->validate();
+
+        $fields = array_filter($fields, fn (?string $value): bool => filled($value));
+
+        abort_if($fields === [], 422, 'Fill in at least one detail before saving.');
+
+        $lead = Lead::query()->where('phone', $this->callPartyNumber)->first();
+
+        if ($lead === null) {
+            $lead = Lead::create([
+                ...$fields,
+                'phone' => $this->callPartyNumber,
+                'campaign_id' => Campaign::inboundFallback()->id,
+                'status' => LeadStatus::New,
+            ]);
+        } else {
+            $lead->update($fields);
+        }
+
+        $this->matchedLeadId = $lead->id;
+        $this->matchedCampaignId = $lead->campaign_id;
+
+        return $this->presentLead($lead->load(['campaign', 'lastDisposition']));
+    }
+
+    /**
      * Claim the call's ticket at ring-time (B2.4b TH-2/TH-3): read the most-recent
      * handoff note the listener left for THIS agent (on the call_handoffs drawer) and
      * hold its ticket as the call's correlation id, so the wrap-up stamps it on the
@@ -451,7 +527,7 @@ class AgentConsole extends Page
      * any the agent passed this session. Presentation only — the id is stashed at
      * dial, never here (the inverse of inbound's ring-time lookup).
      *
-     * @return array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}|null
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}|null
      */
     public function servedLead(): ?array
     {
@@ -565,7 +641,7 @@ class AgentConsole extends Page
      *  - 'blocked' + phone  : on the do-not-call list, not dialed (show the notice).
      *  - 'none'             : nothing callable in the campaign (back to ready).
      *
-     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
      */
     public function dial(): array
     {
@@ -610,7 +686,7 @@ class AgentConsole extends Page
      * wrap-up. On a clean number the lead ids are stashed #[Locked] and the agent
      * leg is originated, exactly like a served-lead dial.
      *
-     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
      */
     public function dialCallback(int $callbackId): array
     {
@@ -922,7 +998,11 @@ class AgentConsole extends Page
      * caller match (lookupLead) and the outbound served lead (servedLead/dial), so
      * the lead card reads identically whichever way the call started.
      *
-     * @return array{id: int, name: ?string, phone: string, campaign: ?string, status: string, lastDisposition: ?string}
+     * CP-3 adds email and city: the live-call form prefills from this shape, so a
+     * caller we already know sees what we already hold rather than a blank box that
+     * invites the agent to ask them the same question twice.
+     *
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}
      */
     private function presentLead(Lead $lead): array
     {
@@ -930,6 +1010,8 @@ class AgentConsole extends Page
             'id' => $lead->id,
             'name' => $lead->name,
             'phone' => $lead->phone,
+            'email' => $lead->email,
+            'city' => $lead->city,
             'campaign' => $lead->campaign?->name,
             'status' => $lead->status->label(),
             'lastDisposition' => $lead->lastDisposition?->label,

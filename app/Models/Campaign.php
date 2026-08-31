@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Actions\SeedCampaignDispositions;
 use App\Audit\LogsModelActivity;
 use App\Enums\CampaignTemplate;
 use App\Tenancy\BelongsToTenant;
@@ -27,6 +28,9 @@ class Campaign extends Model
     /** @use HasFactory<CampaignFactory> */
     use BelongsToTenant, HasFactory, LogsModelActivity;
 
+    /** CP-4: the per-client bucket an inbound caller with no list entry lands in. */
+    public const INBOUND_NAME = 'Inbound';
+
     protected $fillable = [
         'name',
         'template',
@@ -44,6 +48,41 @@ class Campaign extends Model
             'is_active' => 'boolean',
             'custom_fields' => 'array',
         ];
+    }
+
+    /**
+     * CP-4 — the campaign an inbound caller nobody has on a list belongs to.
+     *
+     * `leads.campaign_id` is NOT NULL, so a customer created from an inbound call
+     * has to land somewhere. A8: on their floor these callers already sit under
+     * "inbound", and which campaign that means varies client to client — which is
+     * exactly what a per-client campaign gives. Found-or-created on first use, so
+     * no seeder and no migration on a live table.
+     *
+     * `CustomerCareCallback` as the template deliberately: it is the closest
+     * existing shape, and reusing it means SeedCampaignDispositions hands the new
+     * campaign a real disposition set with no new enum case and no config change.
+     *
+     * Tenant-scoped both ways — the lookup is filtered by TenantScope and the
+     * create is stamped by BelongsToTenant, so one client can never be handed
+     * another client's inbound bucket.
+     */
+    public static function inboundFallback(): self
+    {
+        $campaign = self::query()->firstOrNew(['name' => self::INBOUND_NAME]);
+
+        if ($campaign->exists) {
+            return $campaign;
+        }
+
+        $campaign->fill([
+            'template' => CampaignTemplate::CustomerCareCallback,
+            'is_active' => true,
+        ])->save();
+
+        SeedCampaignDispositions::run($campaign);
+
+        return $campaign;
     }
 
     /**

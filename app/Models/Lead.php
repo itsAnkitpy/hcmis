@@ -24,6 +24,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string|null $name
  * @property string $phone
  * @property string|null $email
+ * @property string|null $city
  * @property string|null $region
  * @property LeadStatus $status
  * @property int|null $last_disposition_id
@@ -40,6 +41,7 @@ class Lead extends Model
         'name',
         'phone',
         'email',
+        'city',
         'region',
         'status',
         'last_disposition_id',
@@ -115,7 +117,7 @@ class Lead extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['campaign_id', 'name', 'phone', 'email', 'region', 'status', 'last_disposition_id', 'attempts', 'custom_fields'];
+        return ['campaign_id', 'name', 'phone', 'email', 'city', 'region', 'status', 'last_disposition_id', 'attempts', 'custom_fields'];
     }
 
     protected function activityLogName(): string

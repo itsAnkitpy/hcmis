@@ -42,6 +42,14 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     // reaches the DOM. Reading the return value is immune to that, and is how the
     // lead card has always worked.
     history: { calls: [], callbacks: [] },
+    // CP-3: the live-call customer form (A2 — it sits beside the call, not in
+    // wrap-up). Held client-side and kept in step with `lead` by a single $watch in
+    // init(), so every path that assigns a lead — inbound match, served lead,
+    // callback, our own save, and resetCall's null — refills or clears these boxes
+    // without three call sites having to remember to.
+    customer: { name: '', email: '', city: '' },
+    savingCustomer: false,
+    customerNotice: null,
     muted: false,
     answered: false,
     dispositions: {},
@@ -125,6 +133,18 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
 
     init() {
         this.phone = new AgentPhone(config).attachRemoteAudio(this.$refs.remoteAudio);
+
+        // CP-3: the form mirrors whatever customer we currently hold. A known caller
+        // sees what we already have rather than a blank box that invites the agent to
+        // ask them the same question twice; no match, and it is empty and ready.
+        this.$watch('lead', (lead) => {
+            this.customer = {
+                name: lead?.name ?? '',
+                email: lead?.email ?? '',
+                city: lead?.city ?? '',
+            };
+            this.customerNotice = null;
+        });
 
         // BK-7 resume-on-return (the industry pattern: the screen asks the server
         // "what am I?" on load — it never assumes Ready). A still-fresh on-break
@@ -740,6 +760,41 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         }
     },
 
+    /**
+     * CP-3 — write what the agent just learned about this caller.
+     *
+     * Sends only the three typed fields: the NUMBER is the one the server is already
+     * holding, never one this browser picks, so there is no way to point the save at
+     * someone else. A miss creates the customer (filed under the client's Inbound
+     * campaign, CP-4), a match updates them.
+     *
+     * The reply is the same lead shape the card already reads, so assigning it both
+     * refreshes the card and — through the $watch above — leaves the form showing
+     * what is now stored. Reading the RETURN VALUE rather than a render is the
+     * CH-2 lesson: a renderless method in the same batch would throw the HTML away.
+     */
+    async saveCustomer() {
+        if (this.savingCustomer) {
+            return;
+        }
+
+        this.savingCustomer = true;
+        this.customerNotice = null;
+
+        try {
+            this.lead = await this.$wire.saveCustomer(
+                this.customer.name,
+                this.customer.email,
+                this.customer.city,
+            );
+            this.customerNotice = 'Saved.';
+        } catch (e) {
+            this.customerNotice = 'Could not save that — check the details and try again.';
+        } finally {
+            this.savingCustomer = false;
+        }
+    },
+
     /** A due callback's UTC time, rendered in the agent's own local clock. */
     formatDue(iso) {
         return new Date(iso).toLocaleString([], {
@@ -814,6 +869,9 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         this.lead = null;
         this.leadResolved = false;
         this.history = { calls: [], callbacks: [] };
+        this.customer = { name: '', email: '', city: '' };
+        this.savingCustomer = false;
+        this.customerNotice = null;
         this.muted = false;
         this.answered = false;
         this.dispositions = {};

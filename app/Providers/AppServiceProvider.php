@@ -92,6 +92,16 @@ class AppServiceProvider extends ServiceProvider
             'dial-adhoc',
             fn (User $user): bool => $user->operatesGlobally() || $user->hasRole(RoleName::Agent->value),
         );
+
+        // CP-3: writing the customer record from the live-call form. A DISTINCT
+        // named ability rather than LeadPolicy::create/update, for the same reason
+        // record-call-outcome is one: agents hold no Leads CRUD (D-M4-5) and this
+        // must not hand it to them by the side door. Same population as the other
+        // two console write-gates; super_admin passes via Shield's Gate::before.
+        Gate::define(
+            'save-customer',
+            fn (User $user): bool => $user->operatesGlobally() || $user->hasRole(RoleName::Agent->value),
+        );
     }
 
     /**

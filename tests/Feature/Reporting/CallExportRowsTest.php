@@ -103,7 +103,7 @@ it('fills the menu from the real call, not from blanks', function () {
     $call = TenantContext::run($tenant->id, function () use ($ticket): Call {
         $agent = User::factory()->create(['name' => 'Asha']);
         $campaign = Campaign::factory()->create(['name' => 'Renewals']);
-        $lead = Lead::factory()->create(['campaign_id' => $campaign->id, 'name' => 'Ravi Kumar']);
+        $lead = Lead::factory()->create(['campaign_id' => $campaign->id, 'name' => 'Ravi Kumar', 'email' => 'ravi@example.test', 'city' => 'Nagpur']);
         $sale = Disposition::factory()->sale()->create(['label' => 'Sold']);
 
         return Call::factory()->forAgent($agent)->forLead($lead)->create([
@@ -128,6 +128,12 @@ it('fills the menu from the real call, not from blanks', function () {
         ->and(cell($tenant, $row, 'Agent'))->toBe('Asha')
         ->and(cell($tenant, $row, 'Campaign'))->toBe('Renewals')
         ->and(cell($tenant, $row, 'Lead name'))->toBe('Ravi Kumar')
+        // CP-7: the details CP-3's live-call form captures. A5 is the reason that
+        // form exists — the client asks for these next to the call report — so a
+        // customer written and never exported would be the write-only chore CPQ-5
+        // was asked to rule out.
+        ->and(cell($tenant, $row, 'Lead email'))->toBe('ravi@example.test')
+        ->and(cell($tenant, $row, 'Lead city'))->toBe('Nagpur')
         ->and(cell($tenant, $row, 'Disposition'))->toBe('Sold')
         ->and(cell($tenant, $row, 'Sale'))->toBe('Yes')
         ->and(cell($tenant, $row, 'Outcome (provisional)'))->toBe('Answered')

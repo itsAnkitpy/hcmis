@@ -37,6 +37,8 @@ it('returns the matching lead shape for a number in the agent client', function 
         return Lead::factory()->forCampaign($campaign)->create([
             'phone' => '9991234567',
             'name' => 'Alice Caller',
+            'email' => 'alice@example.test',
+            'city' => 'Pune',
             'status' => LeadStatus::Contacted,
             'last_disposition_id' => $disposition->id,
         ])->id;
@@ -46,6 +48,8 @@ it('returns the matching lead shape for a number in the agent client', function 
         'id' => $leadId,
         'name' => 'Alice Caller',
         'phone' => '9991234567',
+        'email' => 'alice@example.test',
+        'city' => 'Pune',
         'campaign' => 'Summer Push',
         'status' => 'Contacted',
         'lastDisposition' => 'Call Back',
