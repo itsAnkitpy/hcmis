@@ -412,11 +412,11 @@ class AgentConsole extends Page
      * the match the server itself made at ring or dial time.
      *
      * An upsert in behaviour rather than in SQL, and it looks the row up BY NUMBER
-     * rather than by `matchedLeadId`. That is not a detail: an ad-hoc dial sets the
-     * number without ever running a lead lookup, so an agent typing the number of a
-     * customer we already hold has a live call with no match — and keying on the match
-     * would try to create a second row and hit `leads_tenant_id_phone_unique`. The
-     * number is the unique key per client, so it is the right key here too.
+     * rather than by `matchedLeadId`. The number is the unique key per client, so it
+     * is the right key here; keying on the held match instead would create a second
+     * row and hit `leads_tenant_id_phone_unique` any time a call path reached this
+     * form without having matched first — which is exactly what an ad-hoc dial did
+     * until it learned to match.
      *
      * A new row needs a campaign (`leads.campaign_id` is NOT NULL) and an inbound
      * stranger has none — CP-4/A8 files them under the client's own "Inbound"
@@ -741,8 +741,8 @@ class AgentConsole extends Page
             return ['outcome' => 'invalid'];
         }
 
-        // No lead behind a typed number — clear any held match so a later wrap-up
-        // takes the no-match path and writes nothing.
+        // Clear any held match first, so this dial can never inherit the previous
+        // call's customer (decision C). Re-matched below, once the number is known.
         $this->resetMatch();
 
         if ($this->isDncListed($phone)) {
@@ -753,7 +753,26 @@ class AgentConsole extends Page
 
         $this->originateAgentLeg($phone);
 
-        return ['outcome' => 'dialed', 'phone' => $phone];
+        // 🔴 A typed number is NOT automatically a stranger, and used to be treated
+        // as one. CP-3 lets an agent save a customer in the middle of an ad-hoc call,
+        // so the SECOND dial to that number is a dial to somebody we hold — and
+        // without this the card showed a bare number, the customer form came back
+        // empty, and the wrap-up offered no outcome to record. Matched on the server
+        // for the same reason lookupLead is: the browser gets a lead to show, never a
+        // lead id to send back.
+        $lead = Lead::query()
+            ->with(['campaign', 'lastDisposition'])
+            ->where('phone', $phone)
+            ->first();
+
+        if ($lead === null) {
+            return ['outcome' => 'dialed', 'phone' => $phone];
+        }
+
+        $this->matchedLeadId = $lead->id;
+        $this->matchedCampaignId = $lead->campaign_id;
+
+        return ['outcome' => 'dialed', 'phone' => $phone, 'lead' => $this->presentLead($lead)];
     }
 
     /**

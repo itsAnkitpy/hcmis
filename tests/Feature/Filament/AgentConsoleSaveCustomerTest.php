@@ -131,6 +131,29 @@ it('updates the customer already on that number instead of creating a second', f
         ->and($lead->email)->toBe('old@example.test');
 });
 
+// A typed number is not automatically a stranger. Saving a customer mid-call means the
+// NEXT ad-hoc dial to that number is a dial to somebody we hold — and until the ad-hoc
+// path learned to match, the card showed a bare number, the form came back blank and the
+// wrap-up had no outcome to offer. Seen on staging before it was seen here.
+it('matches the saved customer when the agent types their number again', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    $this->actingAs($agent);
+    TenantContext::applyWebRequest($tenant->id, crossTenant: false);
+
+    consoleDialing($tenant, '+919805907341')->call('saveCustomer', 'Meera Nair', null, 'Kochi');
+
+    consoleDialing($tenant, '+919805907341')
+        ->assertReturned(fn (array $result): bool => isset($result['lead'])
+            && $result['lead']['name'] === 'Meera Nair'
+            && $result['lead']['city'] === 'Kochi')
+        // ...and the wrap-up can therefore record an outcome, which is the half of
+        // this that an agent actually notices.
+        ->call('dispositions')
+        ->assertReturned(fn (array $options): bool => $options !== []);
+});
+
 // The wall, named-not-counted: client B's customer sits on the same number, and client
 // A's agent saving it must produce A's OWN new record, never a write into B's row.
 it('never writes another client customer on the same number', function () {
