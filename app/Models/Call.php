@@ -97,6 +97,8 @@ class Call extends Model
         'agent_id',
         'disposition_id',
         'outcome',
+        // CP-5: the agent's own note about this conversation.
+        'notes',
         'correlation_id',
         'started_at',
         'ringing_at',

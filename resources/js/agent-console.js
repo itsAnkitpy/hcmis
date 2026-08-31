@@ -88,6 +88,12 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     callbackAt: '',
     callbackNotes: '',
 
+    // CP-5 (N1b): the agent's note about the live call. It is typed DURING the call
+    // but sent at wrap-up, because the calls row does not exist until then — there is
+    // nothing to attach it to earlier. This one variable survives the ringing -> onCall
+    // -> wrapUp transitions because the whole console is one Alpine component.
+    callNotes: '',
+
     // B2.0 PC-1: who can take the callback being captured — false = sticky to me
     // (default), true = pooled (any free agent can grab it). Sent to saveWrapUp.
     callbackPooled: false,
@@ -835,6 +841,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
                 scheduledAt,
                 isCallback ? (this.callbackNotes || null) : null,
                 isCallback ? this.callbackPooled : false,
+                this.callNotes || null,
             );
         } finally {
             this.saving = false;
@@ -852,7 +859,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         this.saving = true;
 
         try {
-            await this.$wire.completeUnmatched();
+            await this.$wire.completeUnmatched(this.callNotes || null);
         } finally {
             this.saving = false;
             this.resetCall();
@@ -880,6 +887,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         this.callbackAt = '';
         this.callbackNotes = '';
         this.callbackPooled = false;
+        this.callNotes = '';
         this.outboundDialing = false;
         this.notice = null;
         clearTimeout(this.transferTimer);

@@ -481,121 +481,136 @@
                 </div>
             </div>
 
-            {{-- CH-2 (customer-history-panel.md): "have we dealt with this number
-                 before, and how did it go?" — any callback we still owe them, then the
-                 last three calls to or from their number. Keyed on the number the SERVER
-                 holds, so an ad-hoc dial to a stranger still builds a history nobody had
-                 to create a customer record for.
+            {{-- CP-5 (N1b) O3 layout: two columns on a wide screen, so the panels
+                 stop stacking as they are added. LEFT is what the agent reads (the
+                 caller history, and the call script when it lands); RIGHT is what the
+                 agent types (customer details, then the call note). On a narrow screen
+                 the grid collapses back to the single stack this used to be. --}}
+            <div
+                x-show="callerNumber"
+                x-cloak
+                class="mt-4 grid gap-x-6 gap-y-4 border-t border-gray-100 pt-4 lg:grid-cols-2 dark:border-white/10"
+            >
+                {{-- CH-2 (customer-history-panel.md): "have we dealt with this number
+                     before, and how did it go?" — any callback we still owe them, then the
+                     last three calls to or from their number. Keyed on the number the SERVER
+                     holds, so an ad-hoc dial to a stranger still builds a history nobody had
+                     to create a customer record for.
 
-                 🔴 Rendered from Alpine state, NOT from Blade, and that is not a style
-                 choice. Livewire batches the $wire calls made in one tick, and a single
-                 #[Renderless] method in the batch drops the HTML for the whole request:
-                 the browser ships dialAdhoc() together with setPresence(), which is
-                 renderless, so a Blade-rendered panel is built server-side and thrown
-                 away before it ever reaches the DOM. The lead card above has always read
-                 its return value for the same reason (lookupLead rides with the
-                 renderless claimHandoffTicket). Times print through the same formatDue()
-                 the callback lists use, so a past call reads in the AGENT's own clock. --}}
-            <div x-show="callerNumber" x-cloak class="mt-4 border-t border-gray-100 pt-4 dark:border-white/10">
-                {{-- CH-4: callbacks are lead-keyed (callbacks.lead_id is NOT NULL), so this
-                     is simply absent for a number nobody has saved — never an empty row
-                     claiming "no callbacks". --}}
-                <template x-for="callback in history.callbacks" :key="callback.scheduledAtIso">
-                    <p class="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-                        <span class="font-semibold">Callback still owed</span> — due
-                        <span x-text="formatDue(callback.scheduledAtIso)"></span>
-                        <span x-show="callback.notes" x-text="'· “' + callback.notes + '”'"></span>
-                    </p>
-                </template>
+                     🔴 Rendered from Alpine state, NOT from Blade, and that is not a style
+                     choice. Livewire batches the $wire calls made in one tick, and a single
+                     #[Renderless] method in the batch drops the HTML for the whole request:
+                     the browser ships dialAdhoc() together with setPresence(), which is
+                     renderless, so a Blade-rendered panel is built server-side and thrown
+                     away before it ever reaches the DOM. The lead card above has always read
+                     its return value for the same reason (lookupLead rides with the
+                     renderless claimHandoffTicket). Times print through the same formatDue()
+                     the callback lists use, so a past call reads in the AGENT's own clock. --}}
+                <div>
+                    {{-- CH-4: callbacks are lead-keyed (callbacks.lead_id is NOT NULL), so this
+                         is simply absent for a number nobody has saved — never an empty row
+                         claiming "no callbacks". --}}
+                    <template x-for="callback in history.callbacks" :key="callback.scheduledAtIso">
+                        <p class="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                            <span class="font-semibold">Callback still owed</span> — due
+                            <span x-text="formatDue(callback.scheduledAtIso)"></span>
+                            <span x-show="callback.notes" x-text="'· “' + callback.notes + '”'"></span>
+                        </p>
+                    </template>
 
-                <template x-if="history.calls.length">
-                    <div>
-                        <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Previous calls</p>
-                        <ul class="mt-1 space-y-1 text-sm text-gray-600 dark:text-gray-300">
-                            <template x-for="call in history.calls" :key="call.whenIso">
-                                <li class="flex flex-wrap items-center gap-x-2">
-                                    <span x-text="formatDue(call.whenIso)"></span>
-                                    <span class="text-gray-300 dark:text-gray-600">·</span>
-                                    <span x-text="call.direction"></span>
-                                    <span class="text-gray-300 dark:text-gray-600">·</span>
-                                    <span x-text="call.talked"></span>
-                                    <template x-if="call.outcome">
-                                        <span class="flex items-center gap-x-2">
-                                            <span class="text-gray-300 dark:text-gray-600">·</span>
-                                            <span class="font-medium text-gray-800 dark:text-gray-100" x-text="call.outcome"></span>
-                                        </span>
-                                    </template>
-                                    <template x-if="call.agent">
-                                        <span class="flex items-center gap-x-2">
-                                            <span class="text-gray-300 dark:text-gray-600">·</span>
-                                            <span x-text="call.agent"></span>
-                                        </span>
-                                    </template>
-                                </li>
-                            </template>
-                        </ul>
-                    </div>
-                </template>
+                    <template x-if="history.calls.length">
+                        <div>
+                            <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Previous calls</p>
+                            <ul class="mt-1 space-y-1 text-sm text-gray-600 dark:text-gray-300">
+                                <template x-for="call in history.calls" :key="call.whenIso">
+                                    <li class="flex flex-wrap items-center gap-x-2">
+                                        <span x-text="formatDue(call.whenIso)"></span>
+                                        <span class="text-gray-300 dark:text-gray-600">·</span>
+                                        <span x-text="call.direction"></span>
+                                        <span class="text-gray-300 dark:text-gray-600">·</span>
+                                        <span x-text="call.talked"></span>
+                                        <template x-if="call.outcome">
+                                            <span class="flex items-center gap-x-2">
+                                                <span class="text-gray-300 dark:text-gray-600">·</span>
+                                                <span class="font-medium text-gray-800 dark:text-gray-100" x-text="call.outcome"></span>
+                                            </span>
+                                        </template>
+                                        <template x-if="call.agent">
+                                            <span class="flex items-center gap-x-2">
+                                                <span class="text-gray-300 dark:text-gray-600">·</span>
+                                                <span x-text="call.agent"></span>
+                                            </span>
+                                        </template>
+                                    </li>
+                                </template>
+                            </ul>
+                        </div>
+                    </template>
 
-                <p
-                    x-show="! history.calls.length && ! history.callbacks.length"
-                    class="text-sm text-gray-500 dark:text-gray-400"
-                >First time we are speaking to this number.</p>
-            </div>
-
-            {{-- CP-3 (customer-profiling.md §6): "save what we just learned about this
-                 caller", beside the live call. A2 put it here rather than in wrap-up —
-                 the form is in front of the agent for the whole call, and whoever hangs
-                 up first decides whether they ever get back to it.
-
-                 Four fields, not sixteen (A1). Three typed, and the phone is not one of
-                 them: it comes off the call, and the server writes the number IT holds,
-                 never one this page could send. All optional (A3) — the Default CRM
-                 never blocks a wrap-up; only a client's own required Dynamic CRM fields
-                 will, and those are CP-8's job, not this form's.
-
-                 🔴 Alpine state again, not Blade, for exactly the reason the history
-                 panel above gives: a renderless method sharing the batch would throw
-                 this markup away. The save reads its RETURN VALUE back into `lead`. --}}
-            <div x-show="callerNumber" x-cloak class="mt-4 border-t border-gray-100 pt-4 dark:border-white/10">
-                <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Customer details</p>
-
-                <div class="mt-2 grid gap-2 sm:grid-cols-3">
-                    <input
-                        type="text"
-                        x-model="customer.name"
-                        placeholder="Name"
-                        class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
-                    />
-                    <input
-                        type="email"
-                        x-model="customer.email"
-                        placeholder="Email"
-                        class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
-                    />
-                    <input
-                        type="text"
-                        x-model="customer.city"
-                        placeholder="City"
-                        class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
-                    />
+                    <p
+                        x-show="! history.calls.length && ! history.callbacks.length"
+                        class="text-sm text-gray-500 dark:text-gray-400"
+                    >First time we are speaking to this number.</p>
                 </div>
 
-                <div class="mt-2 flex items-center gap-x-3">
-                    <button
-                        type="button"
-                        x-on:click="saveCustomer()"
-                        :disabled="savingCustomer"
-                        class="inline-flex items-center rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
-                        x-text="savingCustomer ? 'Saving…' : (lead ? 'Update customer' : 'Save customer')"
-                    ></button>
+                {{-- CP-3 (customer-profiling.md §6): "save what we just learned about this
+                     caller", beside the live call. A2 put it here rather than in wrap-up —
+                     the form is in front of the agent for the whole call, and whoever hangs
+                     up first decides whether they ever get back to it.
 
-                    <span
-                        x-show="customerNotice"
-                        x-cloak
-                        class="text-sm text-gray-500 dark:text-gray-400"
-                        x-text="customerNotice"
-                    ></span>
+                     Four fields, not sixteen (A1). Three typed, and the phone is not one of
+                     them: it comes off the call, and the server writes the number IT holds,
+                     never one this page could send. All optional (A3) — the Default CRM
+                     never blocks a wrap-up; only a client's own required Dynamic CRM fields
+                     will, and those are CP-8's job, not this form's.
+
+                     🔴 Alpine state again, not Blade, for exactly the reason the history
+                     panel above gives: a renderless method sharing the batch would throw
+                     this markup away. The save reads its RETURN VALUE back into `lead`. --}}
+                <div class="lg:border-l lg:border-gray-100 lg:pl-6 dark:lg:border-white/10">
+                    <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Customer details</p>
+
+                    <div class="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                        <input
+                            type="text"
+                            x-model="customer.name"
+                            placeholder="Name"
+                            class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
+                        />
+                        <input
+                            type="email"
+                            x-model="customer.email"
+                            placeholder="Email"
+                            class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
+                        />
+                        <input
+                            type="text"
+                            x-model="customer.city"
+                            placeholder="City"
+                            class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
+                        />
+                    </div>
+
+                    <div class="mt-2 flex items-center gap-x-3">
+                        <button
+                            type="button"
+                            x-on:click="saveCustomer()"
+                            :disabled="savingCustomer"
+                            class="inline-flex items-center rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                            x-text="savingCustomer ? 'Saving…' : (lead ? 'Update customer' : 'Save customer')"
+                        ></button>
+
+                        <span
+                            x-show="customerNotice"
+                            x-cloak
+                            class="text-sm text-gray-500 dark:text-gray-400"
+                            x-text="customerNotice"
+                        ></span>
+                    </div>
+
+                    <div class="mt-4">
+                        @include('filament.pages.partials.call-notes', ['id' => 'liveCallNotes'])
+                    </div>
                 </div>
             </div>
 
@@ -645,6 +660,10 @@
                         x-text="lead.name || 'Unnamed lead'"
                     ></p>
                     <p class="text-sm text-gray-500 dark:text-gray-400" x-text="callerNumber"></p>
+
+                    <div class="mt-4 sm:max-w-md">
+                        @include('filament.pages.partials.call-notes', ['id' => 'wrapUpCallNotes'])
+                    </div>
 
                     <div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
                         <select
@@ -719,6 +738,10 @@
                         x-text="callerNumber || 'Unknown number'"
                     ></p>
                     <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No matching lead — the call is still logged</p>
+
+                    <div class="mt-4 sm:max-w-md">
+                        @include('filament.pages.partials.call-notes', ['id' => 'unmatchedCallNotes'])
+                    </div>
 
                     <button
                         type="button"

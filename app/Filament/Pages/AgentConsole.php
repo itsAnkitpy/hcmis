@@ -1111,8 +1111,13 @@ class AgentConsole extends Page
      * sticky v1 shape — owned by the wrapping agent; true creates it UNOWNED
      * (owner null) so it lands in the pooled list any free agent can grab. It only
      * applies to a CALLBACK outcome; it's ignored otherwise.
+     *
+     * CP-5: $callNotes is the agent's note about THIS CALL and is deliberately not
+     * the same argument as $notes, which is the callback's own "why to ring back"
+     * line and only exists on a CALLBACK outcome. One is about the conversation
+     * that happened, the other about the one still owed.
      */
-    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null, bool $poolCallback = false): void
+    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null, bool $poolCallback = false, ?string $callNotes = null): void
     {
         Gate::authorize('record-call-outcome');
 
@@ -1136,10 +1141,10 @@ class AgentConsole extends Page
         $isCallback = $disposition->code === Disposition::CALLBACK_CODE;
         $callbackAt = $isCallback ? $this->validateCallbackSchedule($scheduledAt) : null;
 
-        DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes, $poolCallback): void {
+        DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes, $poolCallback, $callNotes): void {
             // B3 D2: the calls row is the PRIMARY write; the lead update + the
             // call.wrapped_up audit are now side-effects of it, same transaction.
-            $this->recordCall($lead, $disposition);
+            $this->recordCall($lead, $disposition, $callNotes);
 
             $lead->update([
                 'last_disposition_id' => $disposition->id,
@@ -1190,7 +1195,7 @@ class AgentConsole extends Page
      * is touched. outcome is null (no disposition picked) — the trunk-era watcher
      * fills the real line-result later. A DNC-blocked dial never reaches here.
      */
-    public function completeUnmatched(): void
+    public function completeUnmatched(?string $callNotes = null): void
     {
         Gate::authorize('record-call-outcome');
 
@@ -1198,8 +1203,8 @@ class AgentConsole extends Page
         // lead-less row (no disposition → outcome null), with the audit miss as a
         // side-effect, one transaction. A DNC-blocked dial never reaches here, so
         // it correctly writes no row.
-        DB::transaction(function (): void {
-            $this->recordCall(null, null);
+        DB::transaction(function () use ($callNotes): void {
+            $this->recordCall(null, null, $callNotes);
 
             Audit::callWrappedUp(null);
         });
@@ -1283,8 +1288,15 @@ class AgentConsole extends Page
      * wrap-up-inflated "duration" this slice exists to remove. A dash on one row is
      * honest; a plausible wrong number is not (B3 D4).
      */
-    private function recordCall(?Lead $lead, ?Disposition $disposition): void
+    private function recordCall(?Lead $lead, ?Disposition $disposition, ?string $callNotes = null): void
     {
+        // CP-5: validated HERE rather than in the two callers, because this is the one
+        // place every call row is written — matched wrap-up and no-match Done alike.
+        $callNotes = validator(
+            ['notes' => $callNotes],
+            ['notes' => ['nullable', 'string', 'max:2000']],
+        )->validate()['notes'];
+
         $isOutbound = $this->callDirection === CallDirection::Outbound;
         $moments = $this->handoffMoments();
         $sibling = $this->siblingRecording();
@@ -1309,6 +1321,8 @@ class AgentConsole extends Page
             'agent_id' => auth()->id(),
             'disposition_id' => $disposition?->id,
             'outcome' => $this->outcomeFor($disposition),
+            // CP-5: what the agent typed during the call. Blank stays null, never ''.
+            'notes' => filled($callNotes) ? trim($callNotes) : null,
             'correlation_id' => $this->callCorrelationId,
             'started_at' => $moments?->arrived_at,
             // The note's own created_at IS the ring moment — it is written immediately
