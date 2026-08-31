@@ -34,7 +34,7 @@ class CallsTable
     public static function configure(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn (Builder $query): Builder => ClientColumn::eagerLoad($query->with(['agent', 'campaign'])))
+            ->modifyQueryUsing(fn (Builder $query): Builder => ClientColumn::eagerLoad($query->with(['agent', 'campaign', 'lead'])))
             ->columns([
                 TextColumn::make('created_at')->label('When')->dateTime()->sortable(),
                 ClientColumn::make(),
@@ -44,6 +44,14 @@ class CallsTable
                     ->sortable(),
                 TextColumn::make('agent.name')->label('Agent')->placeholder('—')->searchable(),
                 TextColumn::make('campaign.name')->label('Campaign')->placeholder('—'),
+                // CP-3: who the number belongs to, once somebody has saved them. This
+                // screen has always identified a call by its number alone, which is fine
+                // until agents start saving people — then the name is what a supervisor
+                // scans for. Blank for a caller nobody has saved, which is honest.
+                TextColumn::make('lead.name')
+                    ->label('Customer')
+                    ->placeholder('—')
+                    ->searchable(),
                 TextColumn::make('customer_number')
                     ->label('Number')
                     ->state(fn (Call $record): ?string => $record->direction === CallDirection::Outbound

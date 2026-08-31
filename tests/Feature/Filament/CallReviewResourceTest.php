@@ -5,6 +5,7 @@ use App\Filament\Resources\Calls\CallResource;
 use App\Filament\Resources\Calls\Pages\ListCalls;
 use App\Filament\Resources\Calls\Pages\ViewCall;
 use App\Models\Call;
+use App\Models\Lead;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Tenancy\TenantContext;
@@ -132,6 +133,27 @@ it('loads the call-review list for a permitted user', function () {
     TenantContext::applyWebRequest(null, crossTenant: true);
 
     Livewire::test(ListCalls::class)->assertOk();
+});
+
+// --- CP-3: the call's customer, once somebody has saved them ---
+
+it('shows the saved customer name beside the number on the list', function () {
+    $admin = callReviewHcUser(RoleName::HcAdmin->value);
+    $tenant = Tenant::factory()->create();
+
+    $call = TenantContext::run($tenant->id, function (): Call {
+        $lead = Lead::factory()->create(['name' => 'Abhikesh Tarwan', 'phone' => '+919805418052']);
+
+        return Call::factory()->forLead($lead)->create();
+    });
+
+    $this->actingAs($admin);
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(ListCalls::class)
+        ->assertOk()
+        ->assertCanRenderTableColumn('lead.name')
+        ->assertTableColumnStateSet('lead.name', 'Abhikesh Tarwan', $call);
 });
 
 // --- HD-1: the view page embeds the player when a recording exists, the fallback when not ---

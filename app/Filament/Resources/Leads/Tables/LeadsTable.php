@@ -59,6 +59,17 @@ class LeadsTable
                     ->label('Last disposition')
                     ->placeholder('—')
                     ->toggleable(),
+                // CP-3: the two fields the agent-side form captures beside the name.
+                // Visible like `region` and hideable like `region` — a supervisor
+                // chasing a customer should not have to go looking for them first.
+                TextColumn::make('email')
+                    ->searchable()
+                    ->placeholder('—')
+                    ->toggleable(),
+                TextColumn::make('city')
+                    ->searchable()
+                    ->placeholder('—')
+                    ->toggleable(),
                 TextColumn::make('region')
                     ->toggleable(),
                 TextColumn::make('attempts')

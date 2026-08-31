@@ -35,6 +35,25 @@ function actingAsClientTeamLeader(): Tenant
     return $tenant;
 }
 
+// --- CP-3: the two fields the agent-side customer form captures ---
+
+it('carries the email and city columns the console form writes', function () {
+    $tenant = actingAsClientTeamLeader();
+
+    $lead = TenantContext::run($tenant->id, fn (): Lead => Lead::factory()->create([
+        'name' => 'Abhikesh Tarwan',
+        'email' => 'abhi@mailer.com',
+        'city' => 'Shimla',
+    ]));
+
+    Livewire::test(ListLeads::class)
+        ->assertOk()
+        ->assertCanRenderTableColumn('email')
+        ->assertCanRenderTableColumn('city')
+        ->assertTableColumnStateSet('email', 'abhi@mailer.com', $lead)
+        ->assertTableColumnStateSet('city', 'Shimla', $lead);
+});
+
 // --- lead filters (FR-LC03): status, attempt-count bucket, age bucket ---
 
 it('filters leads by status, attempt-count bucket, and age bucket', function () {
