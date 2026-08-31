@@ -570,33 +570,53 @@
                 <div class="border-t border-gray-100 pt-5 @3xl:border-l @3xl:border-t-0 @3xl:pl-8 @3xl:pt-0 dark:border-white/10">
                     <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Customer details</p>
 
-                    <div class="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                        <input
-                            type="text"
-                            x-model="customer.name"
-                            placeholder="Name"
-                            class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
-                        />
-                        <input
-                            type="email"
-                            x-model="customer.email"
-                            placeholder="Email"
-                            class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
-                        />
-                        <input
-                            type="text"
-                            x-model="customer.city"
-                            placeholder="City"
-                            class="rounded-lg border-gray-200 text-sm shadow-sm dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
-                        />
+                    {{-- One field per row, labelled. They were three across, which is
+                         fine full-width and unreadable in half a card — and a
+                         placeholder-only field loses its own name the moment it is
+                         filled, which is most of the time on a known caller. --}}
+                    <div class="mt-3 space-y-3">
+                        <div>
+                            <label for="customerName" class="block text-xs font-medium text-gray-600 dark:text-gray-400">Name</label>
+                            <input
+                                id="customerName"
+                                type="text"
+                                x-model="customer.name"
+                                placeholder="Not captured yet"
+                                class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
+                            />
+                        </div>
+
+                        <div>
+                            <label for="customerEmail" class="block text-xs font-medium text-gray-600 dark:text-gray-400">Email</label>
+                            <input
+                                id="customerEmail"
+                                type="email"
+                                x-model="customer.email"
+                                placeholder="Not captured yet"
+                                class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
+                            />
+                        </div>
+
+                        <div>
+                            <label for="customerCity" class="block text-xs font-medium text-gray-600 dark:text-gray-400">City</label>
+                            <input
+                                id="customerCity"
+                                type="text"
+                                x-model="customer.city"
+                                placeholder="Not captured yet"
+                                class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
+                            />
+                        </div>
                     </div>
 
-                    <div class="mt-2 flex items-center gap-x-3">
+                    {{-- A quiet button: the loud ones on this screen are the call
+                         controls, and filing a detail is not one of them. --}}
+                    <div class="mt-3 flex items-center justify-between gap-3">
                         <button
                             type="button"
                             x-on:click="saveCustomer()"
                             :disabled="savingCustomer"
-                            class="inline-flex items-center rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                            class="inline-flex items-center rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-gray-700 ring-1 ring-gray-300 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white/10 dark:text-gray-200 dark:ring-white/10 dark:hover:bg-white/20"
                             x-text="savingCustomer ? 'Saving…' : (lead ? 'Update customer' : 'Save customer')"
                         ></button>
 
@@ -608,7 +628,7 @@
                         ></span>
                     </div>
 
-                    <div class="mt-4">
+                    <div class="mt-5 border-t border-gray-100 pt-5 dark:border-white/10">
                         @include('filament.pages.partials.call-notes', ['id' => 'liveCallNotes'])
                     </div>
                 </div>
