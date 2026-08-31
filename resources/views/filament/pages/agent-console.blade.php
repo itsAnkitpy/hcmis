@@ -15,7 +15,7 @@
          BK-7: resumableBreak() rides in the same way — a still-fresh on-break
          board row means this load RESUMES the break (same type, countdown on
          the original start) instead of auto-pushing Ready. --}}
-    <div x-data="agentConsole(@js($this->getPhoneConfig()), @js($this->breakCategoryOptions()), @js($this->resumableBreak()))" class="mx-auto w-full max-w-2xl">
+    <div x-data="agentConsole(@js($this->getPhoneConfig()), @js($this->breakCategoryOptions()), @js($this->resumableBreak()))" class="mx-auto w-full max-w-4xl">
         <div
             class="rounded-xl border p-5 shadow-sm"
             :class="{
@@ -364,7 +364,7 @@
         <div
             x-show="state === 'ringing' || state === 'calling' || state === 'onCall'"
             x-cloak
-            class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
+            class="@container mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
         >
             <div class="flex items-center justify-between gap-4">
                 <div>
@@ -489,7 +489,7 @@
             <div
                 x-show="callerNumber"
                 x-cloak
-                class="mt-4 grid gap-x-6 gap-y-4 border-t border-gray-100 pt-4 lg:grid-cols-2 dark:border-white/10"
+                class="mt-5 grid gap-x-8 gap-y-5 border-t border-gray-100 pt-5 @3xl:grid-cols-2 dark:border-white/10"
             >
                 {{-- CH-2 (customer-history-panel.md): "have we dealt with this number
                      before, and how did it go?" — any callback we still owe them, then the
@@ -567,7 +567,7 @@
                      🔴 Alpine state again, not Blade, for exactly the reason the history
                      panel above gives: a renderless method sharing the batch would throw
                      this markup away. The save reads its RETURN VALUE back into `lead`. --}}
-                <div class="lg:border-l lg:border-gray-100 lg:pl-6 dark:lg:border-white/10">
+                <div class="border-t border-gray-100 pt-5 @3xl:border-l @3xl:border-t-0 @3xl:pl-8 @3xl:pt-0 dark:border-white/10">
                     <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Customer details</p>
 
                     <div class="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">

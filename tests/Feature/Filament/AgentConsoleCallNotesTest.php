@@ -213,6 +213,10 @@ it('carries the notes box bound to the call state, on the call and at wrap-up', 
 
 // O3 layout: the live-call panels sit in a two-column grid so they stop stacking as
 // more are added. Pinned because the next panel (call scripts) has to land in it.
+//
+// A CONTAINER query, not a screen one: the console is a fixed-width column in the
+// middle of the page, so a screen-width breakpoint splits it while the card itself is
+// still too narrow to type in. The card measures itself.
 it('lays the live-call panels out in two columns', function () {
     $tenant = Tenant::factory()->create();
     $agent = clientUserWithRole($tenant, RoleName::Agent->value);
@@ -220,7 +224,7 @@ it('lays the live-call panels out in two columns', function () {
     $this->actingAs($agent);
     TenantContext::applyWebRequest($tenant->id, crossTenant: false);
 
-    expect(Livewire::test(AgentConsole::class)->html())->toContain('lg:grid-cols-2');
+    expect(Livewire::test(AgentConsole::class)->html())->toContain('@3xl:grid-cols-2');
 
     TenantContext::resetWebRequest();
 });
