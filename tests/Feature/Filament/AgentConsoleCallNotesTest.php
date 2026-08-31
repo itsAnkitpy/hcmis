@@ -191,6 +191,37 @@ it('refuses a note longer than the console allows', function () {
     TenantContext::resetWebRequest();
 });
 
+// The point of writing one down: the next agent to speak to this number sees it while
+// the phone is still in their hand. Pinned in BOTH halves — the payload carries it and
+// the panel binds it — because either one alone shows the agent nothing.
+it('hands the note to the next agent through the caller history', function () {
+    fakeDial();
+
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    [$campaignId, $dispositionId] = seedNotesCampaign($tenant);
+
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function () use ($campaignId, $dispositionId): void {
+        $page = new AgentConsole;
+        $page->selectedCampaignId = $campaignId;
+        $page->dial();
+        $page->saveWrapUp($dispositionId, callNotes: 'Angry about the third bill. Handle gently.');
+    });
+
+    TenantContext::applyWebRequest($tenant->id, crossTenant: false);
+
+    Livewire::test(AgentConsole::class)
+        ->call('dialAdhoc', '9991234567')
+        ->call('callHistory')
+        ->assertReturned(fn (array $history): bool => $history['calls'][0]['notes'] === 'Angry about the third bill. Handle gently.');
+
+    expect(Livewire::test(AgentConsole::class)->html())->toContain('call.notes');
+
+    TenantContext::resetWebRequest();
+});
+
 // The markup half — the same lesson CH-2 and CP-3 earned. The note is worthless if
 // the box bound to it is gone, and it must be reachable on the live call AND at
 // wrap-up, since either moment can be the one the agent types in.

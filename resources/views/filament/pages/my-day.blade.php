@@ -100,6 +100,10 @@
                         <th class="px-3 py-2 font-medium" style="text-align:left">Customer</th>
                         <th class="px-3 py-2 font-medium" style="text-align:left">Campaign</th>
                         <th class="px-3 py-2 font-medium" style="text-align:left">Outcome</th>
+                        {{-- CP-5: the agent's own note, back where they can re-read it.
+                             Truncated to keep the row one line; the whole note is in the
+                             cell's title, and unabridged on Call Review. --}}
+                        <th class="px-3 py-2 font-medium" style="text-align:left">Notes</th>
                         <th class="px-3 py-2 font-medium" style="text-align:left">Play</th>
                     </tr>
                 </thead>
@@ -116,6 +120,11 @@
                             </td>
                             <td class="px-3 py-2" style="text-align:left">{{ $call->campaign?->name ?? '—' }}</td>
                             <td class="px-3 py-2" style="text-align:left">{{ $call->outcome?->label() ?? '—' }}</td>
+                            <td
+                                class="max-w-xs truncate px-3 py-2 text-gray-600 dark:text-gray-400"
+                                style="text-align:left"
+                                title="{{ $call->notes }}"
+                            >{{ $call->notes ?? '—' }}</td>
                             <td class="px-3 py-2" style="text-align:left">
                                 @if (filled($call->recording_path))
                                     {{-- MD-4 (amended 2026-07-06): a compact custom control instead of the
@@ -185,7 +194,7 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="6" class="px-3 py-6 text-gray-400" style="text-align:center">
+                            <td colspan="7" class="px-3 py-6 text-gray-400" style="text-align:center">
                                 No calls yet today.
                             </td>
                         </tr>

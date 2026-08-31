@@ -156,6 +156,33 @@ it('shows the saved customer name beside the number on the list', function () {
         ->assertTableColumnStateSet('lead.name', 'Abhikesh Tarwan', $call);
 });
 
+// --- CP-5: the agent's note about the call ---
+
+it('shows the call note on the list and in full on the view page', function () {
+    $admin = callReviewHcUser(RoleName::HcAdmin->value);
+    $tenant = Tenant::factory()->create();
+
+    $note = 'Asked for the annual plan in writing before renewing.';
+
+    $call = TenantContext::run(
+        $tenant->id,
+        fn (): Call => Call::factory()->create(['notes' => $note]),
+    );
+
+    $this->actingAs($admin);
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(ListCalls::class)
+        ->assertOk()
+        ->assertCanRenderTableColumn('notes')
+        ->assertTableColumnStateSet('notes', $note, $call);
+
+    // The list truncates; the view page is where the whole note is read.
+    Livewire::test(ViewCall::class, ['record' => $call->getRouteKey()])
+        ->assertOk()
+        ->assertSee($note);
+});
+
 // --- HD-1: the view page embeds the player when a recording exists, the fallback when not ---
 
 it('renders the embedded audio player when the call has a recording', function () {

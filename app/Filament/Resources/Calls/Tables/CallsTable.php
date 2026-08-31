@@ -63,6 +63,17 @@ class CallsTable
                     ->placeholder('—')
                     ->formatStateUsing(fn (?CallOutcome $state): string => $state?->label() ?? '—')
                     ->sortable(),
+                // CP-5: what the agent wrote about the call. Truncated here because a
+                // note runs to a paragraph and this row already carries eleven facts —
+                // the full text is on the View page and in the export. Searchable is the
+                // point of it on a list: "find me the call where they said refund".
+                TextColumn::make('notes')
+                    ->label('Notes')
+                    ->placeholder('—')
+                    ->limit(40)
+                    ->tooltip(fn (Call $record): ?string => $record->notes)
+                    ->searchable()
+                    ->toggleable(),
                 // CT-7: how long this customer waited before somebody picked up. The one
                 // new thing on this screen, and the reason the slice exists — every wait
                 // figure a report can quote starts here.

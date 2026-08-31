@@ -44,6 +44,21 @@ it('lets an agent open My Day', function () {
     $this->actingAs($agent)->get('/admin/my-day')->assertSuccessful();
 });
 
+// CP-5: the agent's own note, back where they can re-read it after the call.
+it('shows an agent their own note on their own call', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    TenantContext::run($tenant->id, fn (): Call => Call::factory()->forAgent($agent)->create([
+        'notes' => 'Promised a callback once their invoice clears.',
+    ]));
+
+    $this->actingAs($agent)
+        ->get('/admin/my-day')
+        ->assertSuccessful()
+        ->assertSee('Promised a callback once their invoice clears.', false);
+});
+
 it('forbids My Day for every non-agent client role', function (string $role) {
     $tenant = Tenant::factory()->create();
     $user = clientUserWithRole($tenant, $role);

@@ -167,6 +167,10 @@ final class CallExportRows
             // from the agent's disposition, not from the line result. A column that
             // looks like a telecom fact and is an agent's opinion needs saying so.
             'Outcome (provisional)',
+            // CP-5: the agent's own account of the call, beside the coded outcome. The
+            // disposition says WHICH box the call went in; this says what was actually
+            // said, which is what a client queries a row about.
+            'Call notes',
             'Queue time',
             'Ring time',
             'Waited',
@@ -249,6 +253,7 @@ final class CallExportRows
             'sale' => $this->flag($call->disposition?->is_sale),
             'contact' => $this->flag($call->disposition?->is_contact),
             'outcome' => $call->outcome?->label() ?? '',
+            'notes' => $call->notes ?? '',
             // The wait, split the way their column sheet splits it. Queue is the caller
             // holding before any phone rang; Ring is a phone ringing; Waited is both
             // together, which is the number the Calls list shows.

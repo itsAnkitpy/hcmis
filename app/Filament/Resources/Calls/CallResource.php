@@ -75,6 +75,13 @@ class CallResource extends Resource
                     TextEntry::make('held')
                         ->label('Held')
                         ->state(fn (Call $record): string => Call::asClock($record->hold_seconds)),
+                    // CP-5: the full note, unabridged — the list truncates it, this is
+                    // where a supervisor reads the whole thing. Full width because it is
+                    // prose, not a field.
+                    TextEntry::make('notes')
+                        ->label('Call notes')
+                        ->placeholder('No notes for this call.')
+                        ->columnSpanFull(),
                 ]),
             Section::make('Recording')
                 ->schema([

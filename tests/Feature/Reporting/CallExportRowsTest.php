@@ -150,6 +150,20 @@ it('fills the menu from the real call, not from blanks', function () {
         ->and(cell($tenant, $row, 'Dial time'))->toBe('');
 });
 
+// CP-5: the disposition says which box the call went in; the note says what was
+// actually said. A client querying one row asks about the second.
+it('exports the agent note beside the coded outcome', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, fn (): Call => Call::factory()->create([
+        'notes' => 'Wants the quote emailed by Friday.',
+    ]));
+
+    $row = exportRows($tenant)[0];
+
+    expect(cell($tenant, $row, 'Call notes'))->toBe('Wants the quote emailed by Friday.');
+});
+
 it('reads the customer and our own number from opposite ends on outbound', function () {
     $tenant = Tenant::factory()->create();
 

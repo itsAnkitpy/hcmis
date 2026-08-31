@@ -381,6 +381,9 @@ class AgentConsole extends Page
                 'talked' => Call::asClock($call->talkedSeconds()),
                 'outcome' => $call->outcome?->label(),
                 'agent' => $call->agent?->name,
+                // CP-5: what the last agent wrote. The single most useful thing on this
+                // panel — the outcome says the call was a callback, the note says why.
+                'notes' => $call->notes,
             ])
             ->all();
 

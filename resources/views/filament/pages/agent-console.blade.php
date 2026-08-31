@@ -521,7 +521,7 @@
                     <template x-if="history.calls.length">
                         <div>
                             <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Previous calls</p>
-                            <ul class="mt-1 space-y-1 text-sm text-gray-600 dark:text-gray-300">
+                            <ul class="mt-1 space-y-2 text-sm text-gray-600 dark:text-gray-300">
                                 <template x-for="call in history.calls" :key="call.whenIso">
                                     <li class="flex flex-wrap items-center gap-x-2">
                                         <span x-text="formatDue(call.whenIso)"></span>
@@ -540,6 +540,17 @@
                                                 <span class="text-gray-300 dark:text-gray-600">·</span>
                                                 <span x-text="call.agent"></span>
                                             </span>
+                                        </template>
+
+                                        {{-- CP-5: on its own line under the row. What the
+                                             last agent wrote is what makes this panel worth
+                                             reading — the outcome says "callback", the note
+                                             says why. --}}
+                                        <template x-if="call.notes">
+                                            <span
+                                                class="block w-full text-xs italic text-gray-500 dark:text-gray-400"
+                                                x-text="'“' + call.notes + '”'"
+                                            ></span>
                                         </template>
                                     </li>
                                 </template>
