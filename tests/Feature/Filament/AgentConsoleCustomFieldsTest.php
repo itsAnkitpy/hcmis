@@ -4,6 +4,7 @@ use App\Enums\RoleName;
 use App\Filament\Pages\AgentConsole;
 use App\Models\CallHandoff;
 use App\Models\Campaign;
+use App\Models\Disposition;
 use App\Models\Lead;
 use App\Models\PhoneNumber;
 use App\Models\Tenant;
@@ -399,4 +400,107 @@ it('stores the client boxes on a customer who already existed', function () {
         // And the save's own reply carries them back, so the boxes stay filled on screen
         // rather than blanking the instant the agent presses the button.
         ->and($shape['customFields'])->toEqualCanonicalizing(['policy_number' => 'POL-4471', 'plan' => 'Gold']);
+});
+
+/**
+ * CF-6 — the wrap-up Save carries the client's boxes too, and the wrap-up screen DRAWS
+ * them.
+ *
+ * The trap it closes: the agent types Ravi's policy number into the box, never presses
+ * "Save customer" because they are busy talking, and the call ends. The value only ever
+ * existed on screen. CF-4 then refuses the wrap-up for a box the agent has already
+ * filled — and by then the live-call card is gone, so there is nowhere to fill it again.
+ *
+ * So the values ride to saveWrapUp() and are written inside the same transaction as the
+ * call row, BEFORE the must-fill check CF-4 adds. Merged, never replaced, for the same
+ * reason the mid-call save merges.
+ */
+function wrapUpConsoleWithBoxes(Tenant $tenant, User $agent, array $stored = []): array
+{
+    $dispositionId = TenantContext::run($tenant->id, function () use ($stored): int {
+        $insurance = Campaign::factory()->withCustomFields(insuranceBoxes())->create();
+
+        Lead::factory()->create([
+            'phone' => '9991234567',
+            'campaign_id' => $insurance->id,
+            'name' => 'Ravi Menon',
+            'custom_fields' => $stored,
+        ]);
+
+        return Disposition::factory()->forCampaign($insurance)->create(['is_contact' => true])->id;
+    });
+
+    return [consoleHoldingCall($tenant, $agent, null), $dispositionId];
+}
+
+it('stores the boxes sent at wrap-up and keeps the ones it was not sent', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $dispositionId] = wrapUpConsoleWithBoxes($tenant, $agent, ['policy_number' => 'POL-4471']);
+
+    TenantContext::run($tenant->id, function () use ($page, $dispositionId): void {
+        $page->lookupLead('9991234567');
+        // Plan was typed mid-call and "Save customer" was never pressed. Policy Number is
+        // already stored and this save does not carry it.
+        $page->saveWrapUp($dispositionId, null, null, false, null, ['plan' => 'Gold']);
+    });
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    expect($saved->custom_fields)->toEqualCanonicalizing([
+        'policy_number' => 'POL-4471',
+        'plan' => 'Gold',
+    ])
+        // The wrap-up's own writes still happened — the boxes ride along with them, they
+        // do not replace them.
+        ->and($saved->last_disposition_id)->toBe($dispositionId)
+        ->and($saved->attempts)->toBe(1);
+});
+
+it('drops a box name the campaign does not define at wrap-up too', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $dispositionId] = wrapUpConsoleWithBoxes($tenant, $agent);
+
+    // Same allow-list as the mid-call save, because it is literally the same method:
+    // validate() answers with the validated attributes only, so an undefined name has no
+    // rule and never reaches the write.
+    TenantContext::run($tenant->id, function () use ($page, $dispositionId): void {
+        $page->lookupLead('9991234567');
+        $page->saveWrapUp($dispositionId, null, null, false, null, [
+            'policy_number' => 'POL-9001',
+            'is_admin' => true,
+        ]);
+    });
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    expect($saved->custom_fields)->toEqualCanonicalizing(['policy_number' => 'POL-9001']);
+});
+
+/**
+ * The markup half, and it is the half that matters most here. CF-4 refuses the wrap-up
+ * when a must-fill box is blank; if the wrap-up screen does not draw the boxes, the agent
+ * is blocked with no way to unblock themselves. Delete the include and every data test
+ * above still passes.
+ */
+it('draws the same boxes again on the wrap-up screen, under their own ids', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    $this->actingAs($agent);
+    TenantContext::applyWebRequest($tenant->id, crossTenant: false);
+
+    $html = Livewire::test(AgentConsole::class)->html();
+
+    // Two copies of the panel: the live-call card and the wrap-up card.
+    expect(substr_count($html, 'field in history.fields'))->toBe(2)
+        // Distinct id prefixes, so the two copies' labels point at their own inputs
+        // rather than both at the first one.
+        ->and($html)->toContain("'liveCallField-' + field.key")
+        ->and($html)->toContain("'wrapUpField-' + field.key");
 });

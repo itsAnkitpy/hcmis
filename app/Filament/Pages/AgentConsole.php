@@ -471,23 +471,7 @@ class AgentConsole extends Page
 
         $fields = array_filter($fields, fn (?string $value): bool => filled($value));
 
-        // CF-1: the SAME campaign the boxes were drawn from, so a value can only be
-        // validated and stored against the definitions the agent was actually shown.
-        $definitions = CampaignCustomFields::definitionsForBrowser($this->campaignForThisCall());
-
-        // 🔴 CF-3, and this one is not a preference. The browser sends box NAMES beside the
-        // values, so without an allow-list a tampered browser pushes arbitrary keys into a
-        // customer's stored JSON. The allow-list IS the rule set: `validate()` answers with
-        // the validated attributes only, so a name the campaign never defined has no rule,
-        // is never returned, and never reaches the write. Silently, the posture LeadsImport
-        // already takes with a column nobody defined.
-        //
-        // An explicit array_intersect_key on the same keys was written here first and then
-        // removed: it changed nothing, and the test below stays green either way because it
-        // asserts what was STORED rather than how it got filtered.
-        $custom = validator($customFields, CampaignCustomFields::rules($definitions))->validate();
-
-        $custom = array_filter($custom, fn (mixed $value): bool => filled($value));
+        $custom = $this->validatedCustomFields($customFields);
 
         // CF-3: the guard has to count the client's boxes too. An agent who filled only
         // Policy Number was refused here for no reason — all three standard boxes empty
@@ -535,6 +519,41 @@ class AgentConsole extends Page
         $this->matchedCampaignId = $lead->campaign_id;
 
         return $this->presentLead($lead->load(['campaign', 'lastDisposition']));
+    }
+
+    /**
+     * The client's own boxes as the console is allowed to store them (CF-3), shared by
+     * the mid-call save and the wrap-up save (CF-6) so the two can never diverge on what
+     * they accept.
+     *
+     * CF-1: validated against the SAME campaign the boxes were drawn from, so a value can
+     * only be stored against the definitions the agent was actually shown.
+     *
+     * 🔴 And this one is not a preference. The browser sends box NAMES beside the values,
+     * so without an allow-list a tampered browser pushes arbitrary keys into a customer's
+     * stored JSON. The allow-list IS the rule set: `validate()` answers with the validated
+     * attributes only, so a name the campaign never defined has no rule, is never returned,
+     * and never reaches the write. Silently, the posture LeadsImport already takes with a
+     * column nobody defined.
+     *
+     * An explicit array_intersect_key on the same keys was written here first and then
+     * removed: it changed nothing, and the tests stay green either way because they assert
+     * what was STORED rather than how it got filtered.
+     *
+     * Blanks are dropped, so an empty box never wipes what is already stored — the same
+     * rule the three standard boxes beside it follow.
+     *
+     * @param  array<string, mixed>  $customFields
+     * @return array<string, mixed>
+     */
+    private function validatedCustomFields(array $customFields): array
+    {
+        $definitions = CampaignCustomFields::definitionsForBrowser($this->campaignForThisCall());
+
+        return array_filter(
+            validator($customFields, CampaignCustomFields::rules($definitions))->validate(),
+            fn (mixed $value): bool => filled($value),
+        );
     }
 
     /**
@@ -1184,8 +1203,16 @@ class AgentConsole extends Page
      * the same argument as $notes, which is the callback's own "why to ring back"
      * line and only exists on a CALLBACK outcome. One is about the conversation
      * that happened, the other about the one still owed.
+     *
+     * CF-6: $customFields carries the client's own boxes from the wrap-up screen, so a
+     * value the agent typed mid-call and never pressed "Save customer" for is still
+     * filed. Merged onto the customer inside the same transaction as the call row —
+     * and BEFORE CF-4's must-fill check, so the agent is never refused while staring
+     * at the value they just typed.
+     *
+     * @param  array<string, mixed>  $customFields
      */
-    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null, bool $poolCallback = false, ?string $callNotes = null): void
+    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null, bool $poolCallback = false, ?string $callNotes = null, array $customFields = []): void
     {
         Gate::authorize('record-call-outcome');
 
@@ -1209,7 +1236,9 @@ class AgentConsole extends Page
         $isCallback = $disposition->code === Disposition::CALLBACK_CODE;
         $callbackAt = $isCallback ? $this->validateCallbackSchedule($scheduledAt) : null;
 
-        DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes, $poolCallback, $callNotes): void {
+        $custom = $this->validatedCustomFields($customFields);
+
+        DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes, $poolCallback, $callNotes, $custom): void {
             // B3 D2: the calls row is the PRIMARY write; the lead update + the
             // call.wrapped_up audit are now side-effects of it, same transaction.
             $this->recordCall($lead, $disposition, $callNotes);
@@ -1218,6 +1247,11 @@ class AgentConsole extends Page
                 'last_disposition_id' => $disposition->id,
                 'attempts' => $lead->attempts + 1,
                 'status' => (new AdvanceLeadStatus)($lead->status, $disposition->is_contact),
+                // CF-6: MERGE, for the same reason saveCustomer merges — a box this
+                // screen never drew, or one added to the campaign an hour ago, must not
+                // be wiped by a save it was not part of. No second write: the lead row
+                // was already being updated here.
+                'custom_fields' => array_merge($lead->custom_fields ?? [], $custom),
             ]);
 
             Audit::callWrappedUp($lead, $disposition);

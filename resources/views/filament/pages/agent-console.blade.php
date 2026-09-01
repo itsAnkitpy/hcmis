@@ -694,6 +694,21 @@
                     ></p>
                     <p class="text-sm text-gray-500 dark:text-gray-400" x-text="callerNumber"></p>
 
+                    {{-- CF-6: the SAME boxes as the live-call card, drawn again here, and
+                         this half is not cosmetic. CF-4 refuses the wrap-up while a
+                         must-fill box is blank — and by wrap-up the live-call card is
+                         gone, so without this the agent is blocked on a screen giving
+                         them no way to unblock themselves. That is a dead end, not a
+                         named limit.
+
+                         One include, because the partial takes an `id` prefix for exactly
+                         this — the same shape call-notes below it already uses three
+                         times. Same `history.fields`, same `customer.fields`, so whatever
+                         was typed mid-call is still in the box and simply carries on. --}}
+                    <div class="sm:max-w-md">
+                        @include('filament.pages.partials.campaign-fields', ['id' => 'wrapUpField'])
+                    </div>
+
                     <div class="mt-4 sm:max-w-md">
                         @include('filament.pages.partials.call-notes', ['id' => 'wrapUpCallNotes'])
                     </div>

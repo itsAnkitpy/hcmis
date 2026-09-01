@@ -862,6 +862,12 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
                 isCallback ? (this.callbackNotes || null) : null,
                 isCallback ? this.callbackPooled : false,
                 this.callNotes || null,
+                // CF-6: the client's own boxes ride along, so a value the agent typed
+                // mid-call and never pressed "Save customer" for is still filed. The
+                // server merges them onto the stored record BEFORE it decides whether a
+                // must-fill box is blank — otherwise the agent is refused while staring
+                // at the value they just typed.
+                this.customer.fields,
             );
 
             // F7: reset ONLY once the server has actually taken it. This used to sit in
