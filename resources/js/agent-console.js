@@ -50,6 +50,11 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     customer: { name: '', email: '', city: '' },
     savingCustomer: false,
     customerNotice: null,
+
+    // F7: why a wrap-up save was refused, shown back on the wrap-up screen. Null
+    // until something is refused. Today nothing on a normal call refuses, so this
+    // stays null — CF-4's must-fill check is what starts using it.
+    wrapUpNotice: null,
     muted: false,
     answered: false,
     dispositions: {},
@@ -830,6 +835,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         }
 
         this.saving = true;
+        this.wrapUpNotice = null;
 
         try {
             // The picker is browser-local; send UTC so the server (UTC) stores the
@@ -843,10 +849,19 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
                 isCallback ? this.callbackPooled : false,
                 this.callNotes || null,
             );
-        } finally {
-            this.saving = false;
+
+            // F7: reset ONLY once the server has actually taken it. This used to sit in
+            // `finally`, which reset the screen whether the save succeeded or not — a
+            // refused save destroyed the call row, the note and the typed details at
+            // once and showed the agent nothing but a browser-console error.
             this.resetCall();
             this.state = 'ready';
+        } catch (e) {
+            // ponytail: one fixed line. CF-4 is what starts refusing, and naming the
+            // missing boxes is CF-4's job — it needs a reply shape the browser can read.
+            this.wrapUpNotice = 'That outcome was not saved — check the details and try again.';
+        } finally {
+            this.saving = false;
         }
     },
 
@@ -857,13 +872,20 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         }
 
         this.saving = true;
+        this.wrapUpNotice = null;
 
         try {
             await this.$wire.completeUnmatched(this.callNotes || null);
-        } finally {
-            this.saving = false;
+
+            // F7: same reset-only-on-success rule as saveWrapUp. CF-4 never blocks this
+            // path (there is no customer to require anything of), but the note the agent
+            // typed is just as destroyable by a network failure.
             this.resetCall();
             this.state = 'ready';
+        } catch (e) {
+            this.wrapUpNotice = 'That call was not logged — try Done again.';
+        } finally {
+            this.saving = false;
         }
     },
 
@@ -879,6 +901,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         this.customer = { name: '', email: '', city: '' };
         this.savingCustomer = false;
         this.customerNotice = null;
+        this.wrapUpNotice = null;
         this.muted = false;
         this.answered = false;
         this.dispositions = {};
