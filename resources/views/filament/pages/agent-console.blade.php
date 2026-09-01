@@ -620,6 +620,8 @@
                         </div>
                     </div>
 
+                    @include('filament.pages.partials.campaign-fields', ['id' => 'liveCallField'])
+
                     {{-- A quiet button: the loud ones on this screen are the call
                          controls, and filing a detail is not one of them. --}}
                     <div class="mt-3 flex items-center justify-between gap-3">

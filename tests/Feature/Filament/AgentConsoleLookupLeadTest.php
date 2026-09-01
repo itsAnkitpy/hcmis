@@ -53,6 +53,8 @@ it('returns the matching lead shape for a number in the agent client', function 
         'campaign' => 'Summer Push',
         'status' => 'Contacted',
         'lastDisposition' => 'Call Back',
+        // CF-8: the stored values for this campaign's own boxes, so they prefill.
+        'customFields' => [],
     ]);
 });
 

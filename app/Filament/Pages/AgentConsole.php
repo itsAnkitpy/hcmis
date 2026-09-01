@@ -14,6 +14,7 @@ use App\Enums\LeadStatus;
 use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
+use App\Filament\Support\CampaignCustomFields;
 use App\Models\AgentPresence;
 use App\Models\AgentStatusHistory;
 use App\Models\BreakCategory;
@@ -300,7 +301,7 @@ class AgentConsole extends Page
      * bare number and says "no matching lead" (D4/D6 honest edge); wrap-up still
      * works.
      *
-     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}|null
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}|null
      */
     public function lookupLead(string $number): ?array
     {
@@ -362,12 +363,20 @@ class AgentConsole extends Page
      * UTC ISO strings so the browser prints them in the AGENT's own clock, the same way
      * the callback lists already do.
      *
-     * @return array{calls: array<int, array{whenIso: string, direction: string, talked: string, outcome: ?string, agent: ?string}>, callbacks: array<int, array{scheduledAtIso: string, notes: ?string}>}
+     * CF-2: it also answers with `fields` — the client's OWN boxes for this call's campaign
+     * (CF-1's chain). This method rather than a new one, because it already fires at exactly
+     * the two right moments (an inbound ring and every outbound dial), already reads the
+     * server-held number the chain needs, and already returns a value rather than relying on
+     * a redraw — the one mechanism proven to survive the S120b bug in this component. The
+     * accepted cost is the name: this is now "what we know about this number", not just its
+     * history. Renaming it touches more than living with it does.
+     *
+     * @return array{calls: array<int, array{whenIso: string, direction: string, talked: string, outcome: ?string, agent: ?string}>, callbacks: array<int, array{scheduledAtIso: string, notes: ?string}>, fields: array<int, array{key: string, label: string, type: string, required: bool, options: array<int, string>}>}
      */
     public function callHistory(): array
     {
         if ($this->callPartyNumber === null) {
-            return ['calls' => [], 'callbacks' => []];
+            return ['calls' => [], 'callbacks' => [], 'fields' => []];
         }
 
         $calls = Call::query()
@@ -398,7 +407,13 @@ class AgentConsole extends Page
             ])
             ->all();
 
-        return ['calls' => $calls, 'callbacks' => $callbacks];
+        return [
+            'calls' => $calls,
+            'callbacks' => $callbacks,
+            // CF-2: the definitions only. The VALUES for a known caller ride out on
+            // presentLead(), the same way name, email and city already do.
+            'fields' => CampaignCustomFields::definitionsForBrowser($this->campaignForThisCall()),
+        ];
     }
 
     /**
@@ -437,7 +452,7 @@ class AgentConsole extends Page
      * lead card. NOT renderless — and read as a RETURN VALUE rather than a render, for
      * the reason the history panel's comment in the blade sets out.
      *
-     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}
      */
     public function saveCustomer(?string $name = null, ?string $email = null, ?string $city = null): array
     {
@@ -464,7 +479,14 @@ class AgentConsole extends Page
             $lead = Lead::create([
                 ...$fields,
                 'phone' => $this->callPartyNumber,
-                'campaign_id' => Campaign::inboundFallback()->id,
+                // F6: was always the generic Inbound bucket, which disagreed with the call
+                // row `recordCall()` writes for the same caller (:1323) — Ravi rings Acme's
+                // insurance line and we filed the CALL under Insurance Renewals and the
+                // PERSON under Inbound. Same chain on both sides now.
+                // The found-or-create belongs HERE and not in the chain: `leads.campaign_id`
+                // is NOT NULL so this one caller needs the row to exist, while the read path
+                // must not write. Reached only when the client has no bucket yet.
+                'campaign_id' => $this->campaignForThisCall() ?? Campaign::inboundFallback()->id,
                 'status' => LeadStatus::New,
             ]);
         } else {
@@ -530,7 +552,7 @@ class AgentConsole extends Page
      * any the agent passed this session. Presentation only — the id is stashed at
      * dial, never here (the inverse of inbound's ring-time lookup).
      *
-     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}|null
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}|null
      */
     public function servedLead(): ?array
     {
@@ -644,7 +666,7 @@ class AgentConsole extends Page
      *  - 'blocked' + phone  : on the do-not-call list, not dialed (show the notice).
      *  - 'none'             : nothing callable in the campaign (back to ready).
      *
-     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
      */
     public function dial(): array
     {
@@ -689,7 +711,7 @@ class AgentConsole extends Page
      * wrap-up. On a clean number the lead ids are stashed #[Locked] and the agent
      * leg is originated, exactly like a served-lead dial.
      *
-     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
      */
     public function dialCallback(int $callbackId): array
     {
@@ -1024,7 +1046,7 @@ class AgentConsole extends Page
      * caller we already know sees what we already hold rather than a blank box that
      * invites the agent to ask them the same question twice.
      *
-     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string}
+     * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}
      */
     private function presentLead(Lead $lead): array
     {
@@ -1037,6 +1059,11 @@ class AgentConsole extends Page
             'campaign' => $lead->campaign?->name,
             'status' => $lead->status->label(),
             'lastDisposition' => $lead->lastDisposition?->label,
+            // CF-8: what is already stored in the client's own boxes, so they prefill for a
+            // known caller — the same reason name, email and city do (CP-3). The DEFINITIONS
+            // of those boxes come separately, on callHistory() (CF-2): definitions belong to
+            // the campaign and change per call, values belong to the person.
+            'customFields' => $lead->custom_fields ?? [],
         ];
     }
 
@@ -1363,6 +1390,54 @@ class AgentConsole extends Page
     private function campaignForDialledNumber(?CallHandoff $moments): ?int
     {
         return PhoneNumberRecord::campaignIdFor($moments?->dialled_number);
+    }
+
+    /**
+     * The campaign this call belongs to, for every purpose that has to agree with every
+     * other (CF-1) — which custom boxes the console prints, and which campaign a customer
+     * saved mid-call is filed under.
+     *
+     * 🔴 THE RULE: the boxes printed always come from the campaign the save will write to.
+     * Anything else silently loses data. The export prints the columns a CAMPAIGN defines
+     * (CE-12a, `CallExportRows::customFields()`) and reads the values off the LEAD, so a
+     * policy number typed against Insurance Renewals but stored on a person filed under
+     * the generic Inbound bucket never leaves the building. The agent typed it; it vanished.
+     *
+     * The order, and why each step:
+     *
+     * 1. The matched customer's own campaign — the most specific fact we hold, and the one
+     *    `recordCall()` already files the call under (:1323). Keeping the same order here is
+     *    what stops the call row and the customer row disagreeing (F6).
+     * 2. The number they rang. Which line an inbound call arrived on is what tells a contact
+     *    centre which campaign it belongs to — the ordinary DNIS rule, not a local invention.
+     * 3. The client's generic Inbound bucket. `leads.campaign_id` is NOT NULL, so a customer
+     *    created from a call on an unassigned number still has to land somewhere.
+     *
+     * NOT `selectedCampaignId`: that is the OUTBOUND queue the agent picked earlier in their
+     * shift. On an inbound call it is stale and unrelated — it would print the courses
+     * campaign's boxes to a caller on the insurance line.
+     *
+     * 🔴 Step 3 READS the bucket, it does not create it, and returns null when it does not
+     * exist yet. `callHistory()` calls this on every ring to decide which boxes to print,
+     * and a screen pop must not write — creating a campaign and seeding it a disposition
+     * set is not something an incoming call should do. The one caller that genuinely needs
+     * the row to exist, `saveCustomer()`, adds the found-or-create itself. Both land on the
+     * same campaign either way: if the bucket exists, step 3 finds it; if it does not, there
+     * are no boxes to print anyway, because a campaign that does not exist defines none.
+     *
+     * `??` short-circuits, so steps 2 and 3 stay off the path entirely for a matched caller.
+     *
+     * **Named limit (CF-1):** a customer can be filed under exactly one campaign, so someone
+     * who deals with the client across two product lines gets the boxes of whichever one
+     * they are filed under, not the one they rang about. That is the single `campaign_id`
+     * column, not this ordering — flipping the order here would write values the export can
+     * never print. The upgrade is a lead-to-campaign join; do not build it on a guess.
+     */
+    private function campaignForThisCall(): ?int
+    {
+        return $this->matchedCampaignId
+            ?? $this->campaignForDialledNumber($this->handoffMoments())
+            ?? Campaign::query()->where('name', Campaign::INBOUND_NAME)->value('id');
     }
 
     /**

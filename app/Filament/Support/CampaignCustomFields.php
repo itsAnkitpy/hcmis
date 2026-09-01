@@ -82,6 +82,50 @@ class CampaignCustomFields
     }
 
     /**
+     * The same definitions as PLAIN DATA, for a screen that draws its own inputs (CF-2).
+     *
+     * The agent console cannot use valueFields() — that returns Filament components, and
+     * the console's live-call panel is Alpine markup fed by a return value, never a
+     * server render (the S120b redraw bug). So it needs the list itself: key, label,
+     * type, options and required, and it draws native browser inputs from them (CF-8).
+     *
+     * Two guards worth their line. An unknown `type` falls back to text, matching
+     * valueField()'s own match default, so a definition written by an older or newer
+     * shape still draws a usable box instead of nothing. `options` always rides out as a
+     * list — empty for the three non-select types — so the browser can loop it without
+     * asking what type it is first.
+     *
+     * Tenant-scoped: a cross-tenant id resolves to null and yields no fields, exactly as
+     * valueFields() does.
+     *
+     * @return array<int, array{key: string, label: string, type: string, required: bool, options: array<int, string>}>
+     */
+    public static function definitionsForBrowser(int|string|null $campaignId): array
+    {
+        if (blank($campaignId)) {
+            return [];
+        }
+
+        $campaign = Campaign::find($campaignId);
+
+        if (! $campaign) {
+            return [];
+        }
+
+        return collect($campaign->custom_fields ?? [])
+            ->filter(fn (array $definition): bool => filled($definition['key'] ?? null))
+            ->map(fn (array $definition): array => [
+                'key' => (string) $definition['key'],
+                'label' => (string) ($definition['label'] ?? $definition['key']),
+                'type' => isset(self::TYPES[$definition['type'] ?? '']) ? (string) $definition['type'] : 'text',
+                'required' => (bool) ($definition['required'] ?? false),
+                'options' => array_values(array_map(strval(...), $definition['options'] ?? [])),
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
      * The input components a Lead form renders for the given campaign's custom
      * fields. Returns an empty array when there is no campaign or it defines no
      * fields, so the caller can drop it into a layout component's schema().

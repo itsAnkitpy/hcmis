@@ -41,13 +41,20 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     // — dialAdhoc() ships with setPresence(), so a server-rendered panel never
     // reaches the DOM. Reading the return value is immune to that, and is how the
     // lead card has always worked.
-    history: { calls: [], callbacks: [] },
+    history: { calls: [], callbacks: [], fields: [] },
     // CP-3: the live-call customer form (A2 — it sits beside the call, not in
     // wrap-up). Held client-side and kept in step with `lead` by a single $watch in
     // init(), so every path that assigns a lead — inbound match, served lead,
     // callback, our own save, and resetCall's null — refills or clears these boxes
     // without three call sites having to remember to.
-    customer: { name: '', email: '', city: '' },
+    //
+    // CF-2/CF-8: `customer.fields` is a MAP of this person's stored values, keyed by box
+    // name — deliberately nested rather than spread alongside name/email/city, because a
+    // client is free to define a box called `name` and flattening would have it quietly
+    // overwrite the standard one. Read it beside `history.fields`, which is the LIST of
+    // box definitions the campaign defines: the campaign says which boxes exist, the
+    // person fills them.
+    customer: { name: '', email: '', city: '', fields: {} },
     savingCustomer: false,
     customerNotice: null,
 
@@ -153,6 +160,9 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
                 name: lead?.name ?? '',
                 email: lead?.email ?? '',
                 city: lead?.city ?? '',
+                // CF-8: prefilled for a known caller for the same reason the three above
+                // are — do not make the agent ask them what we already know.
+                fields: { ...(lead?.customFields ?? {}) },
             };
             this.customerNotice = null;
         });
@@ -767,7 +777,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         try {
             this.history = await this.$wire.callHistory();
         } catch (e) {
-            this.history = { calls: [], callbacks: [] };
+            this.history = { calls: [], callbacks: [], fields: [] };
         }
     },
 
@@ -897,8 +907,8 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         this.callerNumber = null;
         this.lead = null;
         this.leadResolved = false;
-        this.history = { calls: [], callbacks: [] };
-        this.customer = { name: '', email: '', city: '' };
+        this.history = { calls: [], callbacks: [], fields: [] };
+        this.customer = { name: '', email: '', city: '', fields: {} };
         this.savingCustomer = false;
         this.customerNotice = null;
         this.wrapUpNotice = null;
