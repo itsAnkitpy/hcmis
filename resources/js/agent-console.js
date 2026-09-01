@@ -807,6 +807,10 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
                 this.customer.name,
                 this.customer.email,
                 this.customer.city,
+                // CF-3: the client's own boxes ride along. The server drops any name the
+                // campaign does not define and MERGES the rest onto what is stored, so a
+                // box this screen never drew cannot be wiped by a save it was not part of.
+                this.customer.fields,
             );
             this.customerNotice = 'Saved.';
         } catch (e) {

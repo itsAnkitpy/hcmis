@@ -454,7 +454,7 @@ class AgentConsole extends Page
      *
      * @return array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}
      */
-    public function saveCustomer(?string $name = null, ?string $email = null, ?string $city = null): array
+    public function saveCustomer(?string $name = null, ?string $email = null, ?string $city = null, array $customFields = []): array
     {
         Gate::authorize('save-customer');
 
@@ -471,7 +471,28 @@ class AgentConsole extends Page
 
         $fields = array_filter($fields, fn (?string $value): bool => filled($value));
 
-        abort_if($fields === [], 422, 'Fill in at least one detail before saving.');
+        // CF-1: the SAME campaign the boxes were drawn from, so a value can only be
+        // validated and stored against the definitions the agent was actually shown.
+        $definitions = CampaignCustomFields::definitionsForBrowser($this->campaignForThisCall());
+
+        // 🔴 CF-3, and this one is not a preference. The browser sends box NAMES beside the
+        // values, so without an allow-list a tampered browser pushes arbitrary keys into a
+        // customer's stored JSON. The allow-list IS the rule set: `validate()` answers with
+        // the validated attributes only, so a name the campaign never defined has no rule,
+        // is never returned, and never reaches the write. Silently, the posture LeadsImport
+        // already takes with a column nobody defined.
+        //
+        // An explicit array_intersect_key on the same keys was written here first and then
+        // removed: it changed nothing, and the test below stays green either way because it
+        // asserts what was STORED rather than how it got filtered.
+        $custom = validator($customFields, CampaignCustomFields::rules($definitions))->validate();
+
+        $custom = array_filter($custom, fn (mixed $value): bool => filled($value));
+
+        // CF-3: the guard has to count the client's boxes too. An agent who filled only
+        // Policy Number was refused here for no reason — all three standard boxes empty
+        // read as "nothing typed" when in fact the only box that mattered was full.
+        abort_if($fields === [] && $custom === [], 422, 'Fill in at least one detail before saving.');
 
         $lead = Lead::query()->where('phone', $this->callPartyNumber)->first();
 
@@ -488,9 +509,26 @@ class AgentConsole extends Page
                 // must not write. Reached only when the client has no bucket yet.
                 'campaign_id' => $this->campaignForThisCall() ?? Campaign::inboundFallback()->id,
                 'status' => LeadStatus::New,
+                'custom_fields' => $custom,
             ]);
         } else {
-            $lead->update($fields);
+            // 🔴 CF-3: MERGE, never replace. Meera has POL-4471 stored and the agent only
+            // changes her Plan; her policy number must survive whatever the browser did or
+            // did not send. One rendering failure, one box added to the campaign an hour
+            // ago, one type we draw badly — and a replace loses a stored value silently.
+            //
+            // It also matches the three boxes sitting next to it, which already drop blanks
+            // (the array_filter above), so blanking a box never wipes what is stored. Two
+            // different rules on one form is how agents stop trusting a screen.
+            //
+            // ponytail: the cost is that this form cannot CLEAR a box — correcting a value
+            // means typing the right one, and clearing entirely happens on the Leads screen.
+            // Already true of name, email and city. Upgrade path if a client asks: an
+            // explicit clear control per box.
+            $lead->update([
+                ...$fields,
+                'custom_fields' => array_merge($lead->custom_fields ?? [], $custom),
+            ]);
         }
 
         $this->matchedLeadId = $lead->id;

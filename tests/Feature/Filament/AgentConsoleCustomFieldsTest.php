@@ -12,7 +12,9 @@ use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 uses(RefreshDatabase::class);
 
@@ -239,4 +241,121 @@ it('carries the custom-box markup bound to the definitions and the values', func
         ->and($html)->toContain('overflow-y-auto')
         // CF-8: must-fill boxes are marked during the call, not discovered at wrap-up.
         ->and($html)->toContain('x-show="field.required"');
+});
+
+/**
+ * CF-3 — the mid-call save MERGES onto what is stored, and never replaces it.
+ *
+ * The failure this exists to stop is silent: Meera has POL-4471 filed against her, the
+ * agent changes only her Plan, and a wholesale replace drops the policy number with
+ * nothing on screen to say so. One rendering failure, one box added to the campaign an
+ * hour ago, one type we draw badly, and a stored value is simply gone.
+ */
+function consoleOnCallWithBoxes(Tenant $tenant, User $agent): AgentConsole
+{
+    TenantContext::run($tenant->id, function (): void {
+        $insurance = Campaign::factory()->withCustomFields(insuranceBoxes())->create();
+        PhoneNumber::factory()->create(['number' => '+911772345678', 'campaign_id' => $insurance->id]);
+    });
+
+    return consoleHoldingCall($tenant, $agent, '+911772345678');
+}
+
+it('keeps a stored box the save never sent', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    TenantContext::run($tenant->id, function () use ($page): void {
+        $page->saveCustomer('Meera Nair', null, null, ['policy_number' => 'POL-4471', 'plan' => 'Gold']);
+        // The second save carries only Plan — exactly what a browser sends when a box was
+        // never drawn, or was drawn and left alone.
+        $page->saveCustomer(null, null, null, ['plan' => 'Silver']);
+    });
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    expect($saved->custom_fields)->toEqualCanonicalizing([
+        'policy_number' => 'POL-4471',
+        'plan' => 'Silver',
+    ]);
+});
+
+it('drops a box name the campaign does not define', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    TenantContext::run($tenant->id, fn () => $page->saveCustomer(
+        'Meera Nair', null, null,
+        ['policy_number' => 'POL-4471', 'is_admin' => true, 'internal_score' => 99],
+    ));
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    // Silently, the same posture LeadsImport takes with a column nobody defined.
+    expect($saved->custom_fields)->toBe(['policy_number' => 'POL-4471']);
+});
+
+it('saves when only a client box is filled and all three standard boxes are empty', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    TenantContext::run($tenant->id, fn () => $page->saveCustomer(null, null, null, ['policy_number' => 'POL-4471']));
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    // Before CF-3 this was refused 422: three empty standard boxes read as "nothing
+    // typed" when the only box that mattered was full.
+    expect($saved->custom_fields)->toBe(['policy_number' => 'POL-4471'])
+        ->and($saved->name)->toBeNull();
+});
+
+it('still refuses a save with nothing in it at all', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    expect(fn () => TenantContext::run($tenant->id, fn () => $page->saveCustomer(null, null, null, ['policy_number' => ''])))
+        ->toThrow(HttpException::class);
+
+    expect(TenantContext::run($tenant->id, fn (): int => Lead::count()))->toBe(0);
+});
+
+it('refuses a dropdown value the client never defined', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    // Otherwise the client's option list is decoration and the export prints anything.
+    expect(fn () => TenantContext::run($tenant->id, fn () => $page->saveCustomer('Meera', null, null, ['plan' => 'Platinum'])))
+        ->toThrow(ValidationException::class);
+});
+
+it('stores the client boxes for a brand new customer', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    TenantContext::run($tenant->id, fn () => $page->saveCustomer(
+        'Ravi Menon', null, null,
+        ['policy_number' => 'POL-9001', 'plan' => 'Gold'],
+    ));
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    expect($saved->custom_fields)->toEqualCanonicalizing(['policy_number' => 'POL-9001', 'plan' => 'Gold']);
 });

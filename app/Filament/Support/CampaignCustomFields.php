@@ -13,6 +13,7 @@ use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Utilities\Get;
+use Illuminate\Validation\Rule;
 
 /**
  * Per-campaign custom fields (FR-LC02), shared by both halves of the feature:
@@ -122,6 +123,39 @@ class CampaignCustomFields
                 'options' => array_values(array_map(strval(...), $definition['options'] ?? [])),
             ])
             ->values()
+            ->all();
+    }
+
+    /**
+     * Validation rules for VALUES a screen sends back, keyed by box name (CF-3).
+     *
+     * Takes the definitions rather than a campaign id so the caller reads them once and
+     * uses the same list for the allow-list and the rules — one query, and no chance of
+     * validating against a different set than the one that was drawn.
+     *
+     * 🔴 NOT `required`, ever, whatever the definition says. A3 settled that the live-call
+     * form never blocks: it is the optional mid-call save, and an agent who has learned
+     * one detail must be able to file it. Enforcing must-fill is CF-4's job and it happens
+     * at wrap-up, on a contact disposition only. Adding `required` here would block exactly
+     * what A3 protects.
+     *
+     * A dropdown is checked against its own choices, so the stored value can only be one
+     * the client actually defined — otherwise the option list is decoration.
+     *
+     * @param  array<int, array{key: string, label: string, type: string, required: bool, options: array<int, string>}>  $definitions
+     * @return array<string, array<int, mixed>>
+     */
+    public static function rules(array $definitions): array
+    {
+        return collect($definitions)
+            ->mapWithKeys(fn (array $definition): array => [
+                $definition['key'] => match ($definition['type']) {
+                    'number' => ['nullable', 'numeric'],
+                    'date' => ['nullable', 'date'],
+                    'select' => ['nullable', Rule::in($definition['options'])],
+                    default => ['nullable', 'string', 'max:255'],
+                },
+            ])
             ->all();
     }
 
