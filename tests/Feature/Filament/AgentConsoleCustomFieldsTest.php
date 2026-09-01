@@ -2,6 +2,7 @@
 
 use App\Enums\RoleName;
 use App\Filament\Pages\AgentConsole;
+use App\Models\Call;
 use App\Models\CallHandoff;
 use App\Models\Campaign;
 use App\Models\Disposition;
@@ -417,7 +418,7 @@ it('stores the client boxes on a customer who already existed', function () {
  */
 function wrapUpConsoleWithBoxes(Tenant $tenant, User $agent, array $stored = []): array
 {
-    $dispositionId = TenantContext::run($tenant->id, function () use ($stored): int {
+    $dispositionId = TenantContext::run($tenant->id, function () use ($stored): array {
         $insurance = Campaign::factory()->withCustomFields(insuranceBoxes())->create();
 
         Lead::factory()->create([
@@ -427,10 +428,13 @@ function wrapUpConsoleWithBoxes(Tenant $tenant, User $agent, array $stored = [])
             'custom_fields' => $stored,
         ]);
 
-        return Disposition::factory()->forCampaign($insurance)->create(['is_contact' => true])->id;
+        return [
+            Disposition::factory()->forCampaign($insurance)->create(['is_contact' => true, 'label' => 'Interested'])->id,
+            Disposition::factory()->forCampaign($insurance)->create(['is_contact' => false, 'label' => 'Voicemail'])->id,
+        ];
     });
 
-    return [consoleHoldingCall($tenant, $agent, null), $dispositionId];
+    return [consoleHoldingCall($tenant, $agent, null), ...$dispositionId];
 }
 
 it('stores the boxes sent at wrap-up and keeps the ones it was not sent', function () {
@@ -503,4 +507,115 @@ it('draws the same boxes again on the wrap-up screen, under their own ids', func
         // rather than both at the first one.
         ->and($html)->toContain("'liveCallField-' + field.key")
         ->and($html)->toContain("'wrapUpField-' + field.key");
+});
+
+/**
+ * CF-4 — a must-fill box blocks the wrap-up, and ONLY when the agent actually reached a
+ * person. This is the only decision in N1c that can stop an agent finishing a call, and
+ * it ships last for that reason.
+ *
+ * Non-contact outcomes are never blocked: nobody needs a policy number off a voicemail,
+ * and every mandatory field is a charge on handle time multiplied by call volume. Gating
+ * the requirement on state rather than shipping a bypass is the researched shape —
+ * Zendesk gates on ticket status, Amazon Connect on a field condition. Scoping it per
+ * disposition is CP-10.
+ *
+ * The refusal comes back as a STRING, not a thrown 422, because a blank box is ordinary
+ * and the agent's to fix. F7 keeps them on the wrap-up screen and CF-6 draws the boxes
+ * there, so the box the message names is one they can actually go and fill.
+ */
+it('refuses a contact outcome while a must-fill box is blank, and writes nothing', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    // Plan is filled, Policy Number is not — and only Policy Number is must-fill.
+    [$page, $contactId] = wrapUpConsoleWithBoxes($tenant, $agent, ['plan' => 'Gold']);
+
+    $refusal = TenantContext::run($tenant->id, function () use ($page, $contactId): ?string {
+        $page->lookupLead('9991234567');
+
+        return $page->saveWrapUp($contactId);
+    });
+
+    // Named by its LABEL, which is what the box on the agent's screen says.
+    expect($refusal)->toBeString()
+        ->and($refusal)->toContain('Policy Number');
+
+    [$saved, $callCount] = TenantContext::run($tenant->id, fn (): array => [
+        Lead::where('phone', '9991234567')->sole(),
+        Call::count(),
+    ]);
+
+    // 🔴 Nothing was written. The refusal happens before the transaction, so there is no
+    // half-recorded call to reconcile — the agent fills the box and saves again.
+    expect($callCount)->toBe(0)
+        ->and($saved->last_disposition_id)->toBeNull()
+        ->and($saved->attempts)->toBe(0);
+});
+
+it('allows a non-contact outcome with the same box blank', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, , $nonContactId] = wrapUpConsoleWithBoxes($tenant, $agent);
+
+    $refusal = TenantContext::run($tenant->id, function () use ($page, $nonContactId): ?string {
+        $page->lookupLead('9991234567');
+
+        return $page->saveWrapUp($nonContactId);
+    });
+
+    [$saved, $callCount] = TenantContext::run($tenant->id, fn (): array => [
+        Lead::where('phone', '9991234567')->sole(),
+        Call::count(),
+    ]);
+
+    expect($refusal)->toBeNull()
+        ->and($callCount)->toBe(1)
+        ->and($saved->last_disposition_id)->toBe($nonContactId);
+});
+
+/**
+ * T10 — the CF-6/CF-4 interaction, and the reason CF-6 had to ship first. The agent typed
+ * the policy number mid-call and never pressed "Save customer", so the STORED record is
+ * still blank. Checking what is stored would refuse them while they stare at the value.
+ */
+it('accepts a must-fill value the wrap-up is carrying but nobody saved mid-call', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $contactId] = wrapUpConsoleWithBoxes($tenant, $agent);
+
+    $refusal = TenantContext::run($tenant->id, function () use ($page, $contactId): ?string {
+        $page->lookupLead('9991234567');
+
+        return $page->saveWrapUp($contactId, null, null, false, null, ['policy_number' => 'POL-9001']);
+    });
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    expect($refusal)->toBeNull()
+        ->and($saved->custom_fields)->toEqualCanonicalizing(['policy_number' => 'POL-9001'])
+        ->and($saved->attempts)->toBe(1);
+});
+
+/**
+ * T9 — the no-match path is never blocked. A genuine stranger the agent never saved has
+ * no customer record, so there is nothing to require anything of. Wrong numbers need no
+ * special handling; this test exists to keep it that way.
+ */
+it('never blocks the no-match wrap-up, whatever the campaign requires', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    // The campaign defines a must-fill Policy Number; nobody has been matched or saved.
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    TenantContext::run($tenant->id, fn () => $page->completeUnmatched('Wrong number.'));
+
+    expect(TenantContext::run($tenant->id, fn (): int => Call::count()))->toBe(1);
 });

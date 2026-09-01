@@ -856,7 +856,11 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
             // real instant. The agent's clock and the stored time then agree.
             const scheduledAt = isCallback ? new Date(this.callbackAt).toISOString() : null;
 
-            await this.$wire.saveWrapUp(
+            // CF-4: null when the server took it, or the reason it did not — a blank
+            // must-fill box on a contact outcome. A refusal is ordinary and the agent's
+            // to fix, so it comes back as a value rather than as a thrown error; the
+            // catch below is for the genuinely unexpected.
+            const refusal = await this.$wire.saveWrapUp(
                 Number(this.selectedDisposition),
                 scheduledAt,
                 isCallback ? (this.callbackNotes || null) : null,
@@ -874,11 +878,20 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
             // `finally`, which reset the screen whether the save succeeded or not — a
             // refused save destroyed the call row, the note and the typed details at
             // once and showed the agent nothing but a browser-console error.
+            //
+            // A refusal keeps the agent here with the note, the picked outcome and the
+            // boxes all still filled — and CF-6 draws those boxes on this screen, so the
+            // named box is one they can actually go and fill.
+            if (refusal) {
+                this.wrapUpNotice = refusal;
+                return;
+            }
+
             this.resetCall();
             this.state = 'ready';
         } catch (e) {
-            // ponytail: one fixed line. CF-4 is what starts refusing, and naming the
-            // missing boxes is CF-4's job — it needs a reply shape the browser can read.
+            // Only the unexpected reaches here now — a dropped connection, a 500. A
+            // blank must-fill box comes back as a value, not a throw.
             this.wrapUpNotice = 'That outcome was not saved — check the details and try again.';
         } finally {
             this.saving = false;

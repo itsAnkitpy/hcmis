@@ -1210,9 +1210,21 @@ class AgentConsole extends Page
      * and BEFORE CF-4's must-fill check, so the agent is never refused while staring
      * at the value they just typed.
      *
+     * 🔴 CF-4 returns its refusal as a STRING rather than throwing. F7 left a
+     * `ponytail:` note asking for "a reply shape the browser can read", and this is it:
+     * null on success, the reason on a refusal. A 422 would reach the browser as a
+     * Livewire error and the agent would see a fixed line that names no box. Reading a
+     * RETURN VALUE is also what every other panel on this screen already does, for the
+     * S120b reason — nothing here is ever rendered server-side.
+     *
+     * A blank must-fill box is ordinary, expected, and the agent's to fix, so it is not
+     * an abort. The `abort_if`s left in this method are the tamper and impossible-state
+     * cases, which is what they are for.
+     *
      * @param  array<string, mixed>  $customFields
+     * @return string|null null when saved; the reason to show the agent when refused.
      */
-    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null, bool $poolCallback = false, ?string $callNotes = null, array $customFields = []): void
+    public function saveWrapUp(int $dispositionId, ?string $scheduledAt = null, ?string $notes = null, bool $poolCallback = false, ?string $callNotes = null, array $customFields = []): ?string
     {
         Gate::authorize('record-call-outcome');
 
@@ -1223,7 +1235,7 @@ class AgentConsole extends Page
         if ($lead === null) {
             $this->resetMatch();
 
-            return;
+            return null;
         }
 
         abort_unless(
@@ -1237,6 +1249,28 @@ class AgentConsole extends Page
         $callbackAt = $isCallback ? $this->validateCallbackSchedule($scheduledAt) : null;
 
         $custom = $this->validatedCustomFields($customFields);
+
+        // CF-4: a must-fill box blocks only when the agent actually REACHED a person.
+        // Nobody needs a policy number off a voicemail, and every mandatory field is a
+        // direct charge on handle time multiplied by call volume — so the blocking
+        // surface stays as small as it can be. Gating the requirement on state rather
+        // than shipping a bypass is the researched shape: Zendesk gates on ticket status
+        // ("required to solve"), Amazon Connect on a field condition. Per-disposition
+        // scoping — so "General enquiry" asks for nothing — is CP-10, the next slice.
+        //
+        // 🔴 Checked BEFORE the transaction, on the values the wrap-up MERGED IN MEMORY
+        // (stored ∪ just sent), not on what is stored. A number the agent typed mid-call
+        // and never pressed "Save customer" for must satisfy this — otherwise CF-6's
+        // whole point is lost and the agent is refused while staring at the value.
+        // Refusing here writes nothing at all: no calls row, no lead update. The typed
+        // values are still on the agent's screen (F7), so nothing is lost by not writing.
+        if ($disposition->is_contact) {
+            $missing = $this->missingRequiredBoxes($lead, $custom);
+
+            if ($missing !== []) {
+                return implode(', ', $missing).' must be filled before you can finish this call.';
+            }
+        }
 
         DB::transaction(function () use ($lead, $disposition, $isCallback, $callbackAt, $notes, $poolCallback, $callNotes, $custom): void {
             // B3 D2: the calls row is the PRIMARY write; the lead update + the
@@ -1271,6 +1305,32 @@ class AgentConsole extends Page
         });
 
         $this->resetMatch();
+
+        return null;
+    }
+
+    /**
+     * CF-4 — the client's must-fill boxes still blank for this customer, by LABEL.
+     *
+     * Labels, not keys: the agent is told "Policy Number", which is what the box on their
+     * screen says, never `policy_number`.
+     *
+     * Read against the merge of what is stored and what this wrap-up is carrying, so a
+     * value typed mid-call satisfies the requirement even though "Save customer" was
+     * never pressed. Same campaign the boxes were drawn from (CF-1), so the agent can
+     * only be blocked by a box they were actually shown.
+     *
+     * @param  array<string, mixed>  $custom
+     * @return array<int, string>
+     */
+    private function missingRequiredBoxes(Lead $lead, array $custom): array
+    {
+        $values = array_merge($lead->custom_fields ?? [], $custom);
+
+        return collect(CampaignCustomFields::definitionsForBrowser($this->campaignForThisCall()))
+            ->filter(fn (array $definition): bool => $definition['required'] && blank($values[$definition['key']] ?? null))
+            ->pluck('label')
+            ->all();
     }
 
     /**

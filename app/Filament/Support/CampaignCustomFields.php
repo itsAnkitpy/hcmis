@@ -66,9 +66,18 @@ class CampaignCustomFields
                     ->required()
                     ->live()
                     ->native(false),
+                // CF-7 (campaign-fields-on-console.md): this text used to say only "Must be
+                // filled on the lead form", which was true while the tick affected office
+                // staff typing up leads and nothing else. CF-4 makes it stop agents
+                // finishing live calls, so one team leader ticking it on a new box halts
+                // every agent on the floor on their next answered call — every existing
+                // customer has that box blank. Warn the admin rather than silently enforce;
+                // that is the standard move, and it is the same division of labour
+                // Salesforce uses (the admin is never blocked, the rule's SCOPE is what
+                // gets narrowed). Narrowing the scope per disposition is CP-10.
                 Toggle::make('required')
                     ->default(false)
-                    ->helperText('Must be filled on the lead form.'),
+                    ->helperText('Must be filled on the lead form — and agents cannot finish an answered call until it is filled. Existing customers with this box blank will block on their next answered call.'),
                 TagsInput::make('options')
                     ->label('Dropdown choices')
                     ->visible(fn (Get $get): bool => $get('type') === 'select')
