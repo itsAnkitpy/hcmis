@@ -240,7 +240,11 @@ it('carries the custom-box markup bound to the definitions and the values', func
         ->and($html)->toContain('max-h-64')
         ->and($html)->toContain('overflow-y-auto')
         // CF-8: must-fill boxes are marked during the call, not discovered at wrap-up.
-        ->and($html)->toContain('x-show="field.required"');
+        ->and($html)->toContain('x-show="field.required"')
+        // A dropdown's stored value has to be re-applied after its options exist. Without
+        // this the box reads "Not captured yet" over a value that is stored and correct —
+        // it showed on the Leads screen and not on the console.
+        ->and($html)->toContain('$nextTick(() => { $el.value = customer.fields[field.key]');
 });
 
 /**
@@ -358,4 +362,41 @@ it('stores the client boxes for a brand new customer', function () {
     $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
 
     expect($saved->custom_fields)->toEqualCanonicalizing(['policy_number' => 'POL-9001', 'plan' => 'Gold']);
+});
+
+// The reported scenario, end to end: a customer who ALREADY EXISTS (a seeded lead, an
+// imported one, anybody the agent did not create) rings in, matches, and the agent types
+// into the client's boxes for the first time. Their stored map is empty, not absent.
+it('stores the client boxes on a customer who already existed', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function (): void {
+        $insurance = Campaign::factory()->withCustomFields(insuranceBoxes())->create();
+        Lead::factory()->create([
+            'phone' => '9991234567',
+            'campaign_id' => $insurance->id,
+            'name' => 'Prof. Blanca Wuckert',
+        ]);
+    });
+
+    $page = consoleHoldingCall($tenant, $agent, null);
+
+    $shape = TenantContext::run($tenant->id, function () use ($page): array {
+        // The ring matches them first — this is what makes the button say "Update".
+        $page->lookupLead('9991234567');
+
+        return $page->saveCustomer('Prof. Blanca Wuckert', null, null, [
+            'policy_number' => 'POL-4471',
+            'plan' => 'Gold',
+        ]);
+    });
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    expect($saved->custom_fields)->toEqualCanonicalizing(['policy_number' => 'POL-4471', 'plan' => 'Gold'])
+        // And the save's own reply carries them back, so the boxes stay filled on screen
+        // rather than blanking the instant the agent presses the button.
+        ->and($shape['customFields'])->toEqualCanonicalizing(['policy_number' => 'POL-4471', 'plan' => 'Gold']);
 });

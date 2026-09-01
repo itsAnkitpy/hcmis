@@ -45,9 +45,18 @@
                 </label>
 
                 <template x-if="field.type === 'select'">
+                    {{-- 🔴 The x-init is not optional, and text/date do not need it. Alpine
+                         initialises this element's own directives BEFORE it processes the
+                         children, so x-model sets the select's value while it still has no
+                         options — and a select handed a value matching no option silently
+                         falls back to the first one. The stored Plan was there and the box
+                         still read "Not captured yet". $nextTick re-applies it once the
+                         options exist. Later changes are fine on x-model alone, because by
+                         then the options are in the DOM. --}}
                     <select
                         :id="'{{ $id }}-' + field.key"
                         x-model="customer.fields[field.key]"
+                        x-init="$nextTick(() => { $el.value = customer.fields[field.key] ?? '' })"
                         :required="field.required"
                         class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
                     >
