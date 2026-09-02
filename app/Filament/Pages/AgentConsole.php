@@ -1255,8 +1255,12 @@ class AgentConsole extends Page
         // direct charge on handle time multiplied by call volume — so the blocking
         // surface stays as small as it can be. Gating the requirement on state rather
         // than shipping a bypass is the researched shape: Zendesk gates on ticket status
-        // ("required to solve"), Amazon Connect on a field condition. Per-disposition
-        // scoping — so "General enquiry" asks for nothing — is CP-10, the next slice.
+        // ("required to solve"), Amazon Connect on a field condition.
+        //
+        // CP-10 narrows it a second time, INSIDE this gate: a box can name the outcomes
+        // it is required for, so "Customer informed" asks for nothing. This gate stays
+        // put and stays outermost — DF-4 keeps non-contact outcomes out of the checklist
+        // entirely, so a box can never name one and this is a wall, not a duplicate.
         //
         // 🔴 Checked BEFORE the transaction, on the values the wrap-up MERGED IN MEMORY
         // (stored ∪ just sent), not on what is stored. A number the agent typed mid-call
@@ -1265,7 +1269,7 @@ class AgentConsole extends Page
         // Refusing here writes nothing at all: no calls row, no lead update. The typed
         // values are still on the agent's screen (F7), so nothing is lost by not writing.
         if ($disposition->is_contact) {
-            $missing = $this->missingRequiredBoxes($lead, $custom);
+            $missing = $this->missingRequiredBoxes($lead, $disposition, $custom);
 
             if ($missing !== []) {
                 return implode(', ', $missing).' must be filled before you can finish this call.';
@@ -1310,7 +1314,8 @@ class AgentConsole extends Page
     }
 
     /**
-     * CF-4 — the client's must-fill boxes still blank for this customer, by LABEL.
+     * CF-4 + CP-10 — the client's must-fill boxes still blank for this customer AND
+     * required for the outcome just picked, by LABEL.
      *
      * Labels, not keys: the agent is told "Policy Number", which is what the box on their
      * screen says, never `policy_number`.
@@ -1320,15 +1325,30 @@ class AgentConsole extends Page
      * never pressed. Same campaign the boxes were drawn from (CF-1), so the agent can
      * only be blocked by a box they were actually shown.
      *
+     * 🔴 DF-1 — an empty `requiredOn` means required on EVERY contact outcome, which is
+     * what a bare must-fill tick has always meant. Every campaign configured before CP-10
+     * has one, so this branch is the reason nobody's floor changes on deploy day. It also
+     * means the list can only ever make the rule smaller: nothing here can newly block a
+     * call that passes today.
+     *
+     * 🔴 DF-2 — compared against the disposition the SERVER loaded, never a browser value.
+     * A `requiredOn` id is a raw number inside JSON and is walled by nothing on its own;
+     * this comparison is what keeps another tenant's id from ever matching. An id for a
+     * deleted outcome matches nothing and so blocks nothing (T5) — deleting an in-use
+     * outcome already nulls it on every historical call, so this is the smallest part of
+     * that damage, and a delete guard belongs on DispositionResource, not here.
+     *
      * @param  array<string, mixed>  $custom
      * @return array<int, string>
      */
-    private function missingRequiredBoxes(Lead $lead, array $custom): array
+    private function missingRequiredBoxes(Lead $lead, Disposition $disposition, array $custom): array
     {
         $values = array_merge($lead->custom_fields ?? [], $custom);
 
         return collect(CampaignCustomFields::definitionsForBrowser($this->campaignForThisCall()))
-            ->filter(fn (array $definition): bool => $definition['required'] && blank($values[$definition['key']] ?? null))
+            ->filter(fn (array $definition): bool => $definition['required']
+                && ($definition['requiredOn'] === [] || in_array($disposition->id, $definition['requiredOn'], true))
+                && blank($values[$definition['key']] ?? null))
             ->pluck('label')
             ->all();
     }

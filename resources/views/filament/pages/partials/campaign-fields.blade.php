@@ -25,7 +25,14 @@
      Native inputs on purpose (CF-8). The Leads screen uses Filament's JS date picker;
      matching it here costs the console a dependency it does not have, for a difference
      no agent will notice. `type` is bound straight from the definition — text, number
-     and date are all valid input types, so only the dropdown needs its own branch. --}}
+     and date are all valid input types, so only the dropdown needs its own branch.
+
+     🔴 DF-6 (disposition-driven-fields.md): $outcomeAware. This partial is included TWICE
+     from the same `history.fields`, so the difference between the two copies has to be
+     per-include, not per-state. The wrap-up copy passes the flag and its star follows the
+     outcome the agent just picked; the live-call copy does not and keeps a static star,
+     because no outcome has been picked there yet. --}}
+@php($requiredExpr = ($outcomeAware ?? false) ? 'requiredNow(field)' : 'field.required')
 <div x-show="history.fields.length" x-cloak class="mt-4 border-t border-gray-100 pt-4 dark:border-white/10">
     <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">{{ $heading ?? 'For this campaign' }}</p>
 
@@ -41,7 +48,7 @@
                     {{-- CF-8: the agent sees which boxes are must-fill DURING the call,
                          so they can ask, rather than discovering it at wrap-up when the
                          caller has already gone. --}}
-                    <span x-show="field.required" class="text-red-500 dark:text-red-400" aria-hidden="true">*</span>
+                    <span x-show="{{ $requiredExpr }}" class="text-red-500 dark:text-red-400" aria-hidden="true">*</span>
                 </label>
 
                 <template x-if="field.type === 'select'">
@@ -57,7 +64,7 @@
                         :id="'{{ $id }}-' + field.key"
                         x-model="customer.fields[field.key]"
                         x-init="$nextTick(() => { $el.value = customer.fields[field.key] ?? '' })"
-                        :required="field.required"
+                        :required="{{ $requiredExpr }}"
                         class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
                     >
                         <option value="">Not captured yet</option>
@@ -72,7 +79,7 @@
                         :id="'{{ $id }}-' + field.key"
                         :type="field.type"
                         x-model="customer.fields[field.key]"
-                        :required="field.required"
+                        :required="{{ $requiredExpr }}"
                         placeholder="Not captured yet"
                         class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-950 shadow-sm dark:border-white/10 dark:bg-gray-800 dark:text-white"
                     />

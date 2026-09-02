@@ -706,7 +706,7 @@
                          times. Same `history.fields`, same `customer.fields`, so whatever
                          was typed mid-call is still in the box and simply carries on. --}}
                     <div class="sm:max-w-md">
-                        @include('filament.pages.partials.campaign-fields', ['id' => 'wrapUpField'])
+                        @include('filament.pages.partials.campaign-fields', ['id' => 'wrapUpField', 'outcomeAware' => true])
                     </div>
 
                     <div class="mt-4 sm:max-w-md">

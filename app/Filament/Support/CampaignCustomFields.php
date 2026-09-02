@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace App\Filament\Support;
 
+use App\Filament\Resources\Leads\Schemas\LeadForm;
 use App\Models\Campaign;
+use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Field;
+use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TagsInput;
@@ -29,7 +32,13 @@ use Illuminate\Validation\Rule;
  * Definition shape (one array entry per field):
  *   ['key' => 'policy_number', 'label' => 'Policy Number',
  *    'type' => 'text|number|date|select', 'required' => bool,
- *    'options' => ['Gold', 'Silver']]   // options only for the select type
+ *    'options' => ['Gold', 'Silver'],   // options only for the select type
+ *    'required_on' => [14, 15]]         // disposition ids; narrows `required` at wrap-up
+ *
+ * `required_on` is CP-10 (DF-2). It only ever makes the `required` rule SMALLER, and only
+ * at wrap-up: an empty or absent list means the box blocks on every contact disposition,
+ * which is what `required` alone has always meant (DF-1). Ids, not codes —
+ * `dispositions.code` carries no unique index, so one code can name two rows.
  */
 class CampaignCustomFields
 {
@@ -75,9 +84,46 @@ class CampaignCustomFields
                 // that is the standard move, and it is the same division of labour
                 // Salesforce uses (the admin is never blocked, the rule's SCOPE is what
                 // gets narrowed). Narrowing the scope per disposition is CP-10.
+                // ->live() so CP-10's outcome checklist appears the moment Must fill is
+                // ticked (DF-3). The `type` select above already does the same for the
+                // dropdown-choices control, so the pattern is this file's own.
                 Toggle::make('required')
                     ->default(false)
+                    ->live()
                     ->helperText('Must be filled on the lead form — and agents cannot finish an answered call until it is filled. Existing customers with this box blank will block on their next answered call.'),
+                // CP-10 (disposition-driven-fields.md) — the box names the outcomes it is
+                // actually required for, so "Customer informed" can stop asking for a
+                // policy number nobody needed. One checklist, one helper block (DF-9.8).
+                //
+                // Only shown while Must fill is on (DF-3): the list has no meaning on a
+                // box that blocks nothing, and most boxes are not must-fill. Unticking
+                // Must fill hides it but LEAVES the stored ids, so a mis-click costs
+                // nothing and re-ticking brings them back.
+                //
+                // 🔴 dehydratedWhenHidden() is what makes that sentence true. Filament
+                // drops a hidden field from the saved state, so without it a leader who
+                // unticks Must fill and saves loses the ids — and re-ticking would hand
+                // them an empty list, which DF-1 reads as "block on every contact
+                // outcome". Silent, and in the opposite direction from what they picked.
+                // On the create screen it dehydrates an empty list, which DF-9.3 already
+                // treats identically to an absent key.
+                CheckboxList::make('required_on')
+                    ->label('Required only for these outcomes')
+                    ->options(fn (?Campaign $record): array => LeadForm::dispositionOptions($record?->id, contactOnly: true))
+                    ->columns(2)
+                    ->visible(fn (string $operation, Get $get): bool => $operation !== 'create' && (bool) $get('required'))
+                    ->dehydratedWhenHidden()
+                    ->helperText('Only outcomes where the agent reached a person can require a box. Leave every outcome unticked and the box stays required on all of them — to stop requiring it, turn off Must fill above. Office staff filling in the lead form are always asked for it, whatever is ticked here.'),
+                // DF-5 — CreateCampaign seeds this campaign's outcomes in afterCreate(),
+                // so while the create form is on screen there are none of its own to show.
+                // Rendering the checklist here would come back empty and read as a bug, or
+                // worse, list only the tenant-wide outcomes and let a leader tick something
+                // incomplete. DF-1 makes the wait safe: a box saved with nothing ticked
+                // blocks on every contact outcome, which is exactly today's behaviour.
+                Placeholder::make('required_on_hint')
+                    ->label('Required only for these outcomes')
+                    ->content('Outcomes are created with the campaign. Save, then reopen this box to choose them.')
+                    ->visible(fn (string $operation, Get $get): bool => $operation === 'create' && (bool) $get('required')),
                 TagsInput::make('options')
                     ->label('Dropdown choices')
                     ->visible(fn (Get $get): bool => $get('type') === 'select')
@@ -97,18 +143,27 @@ class CampaignCustomFields
      * The agent console cannot use valueFields() — that returns Filament components, and
      * the console's live-call panel is Alpine markup fed by a return value, never a
      * server render (the S120b redraw bug). So it needs the list itself: key, label,
-     * type, options and required, and it draws native browser inputs from them (CF-8).
+     * type, options, required and requiredOn, and it draws native browser inputs from
+     * them (CF-8).
      *
-     * Two guards worth their line. An unknown `type` falls back to text, matching
+     * Three guards worth their line. An unknown `type` falls back to text, matching
      * valueField()'s own match default, so a definition written by an older or newer
      * shape still draws a usable box instead of nothing. `options` always rides out as a
      * list — empty for the three non-select types — so the browser can loop it without
-     * asking what type it is first.
+     * asking what type it is first. `requiredOn` rides out the same way: always a list,
+     * always ints, empty when the key is absent, and anything non-numeric dropped rather
+     * than coerced — so the browser can compare it against a disposition id without
+     * checking types first (DF-9.3).
+     *
+     * 🔴 A `requiredOn` id is a raw number inside JSON and is walled by nothing on its
+     * own. It is safe to send because the browser only uses it to paint the star. The
+     * refusal compares it against the disposition the SERVER loaded, never against a
+     * value the browser sent back.
      *
      * Tenant-scoped: a cross-tenant id resolves to null and yields no fields, exactly as
      * valueFields() does.
      *
-     * @return array<int, array{key: string, label: string, type: string, required: bool, options: array<int, string>}>
+     * @return array<int, array{key: string, label: string, type: string, required: bool, options: array<int, string>, requiredOn: array<int, int>}>
      */
     public static function definitionsForBrowser(int|string|null $campaignId): array
     {
@@ -130,6 +185,7 @@ class CampaignCustomFields
                 'type' => isset(self::TYPES[$definition['type'] ?? '']) ? (string) $definition['type'] : 'text',
                 'required' => (bool) ($definition['required'] ?? false),
                 'options' => array_values(array_map(strval(...), $definition['options'] ?? [])),
+                'requiredOn' => array_values(array_map(intval(...), array_filter((array) ($definition['required_on'] ?? []), is_numeric(...)))),
             ])
             ->values()
             ->all();

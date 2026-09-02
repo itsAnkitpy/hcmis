@@ -756,6 +756,33 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         return this.callbackDispositionIds.includes(Number(this.selectedDisposition));
     },
 
+    /**
+     * DF-6 (disposition-driven-fields.md) — is this box required for the outcome the
+     * agent has picked RIGHT NOW? Under CP-10 nothing hides, so the star is the only
+     * signal the agent has about which box matters, and a static one would state
+     * "required" on a box the picked outcome does not require.
+     *
+     * An empty list means required on every contact outcome (DF-1) — that is what a bare
+     * must-fill tick has always meant, and it is the shape every campaign configured
+     * before CP-10 has.
+     *
+     * 🔴 Advisory only, and the wrap-up panel only. The server's missingRequiredBoxes()
+     * is what actually refuses the wrap-up; this just stops the star lying. The live-call
+     * panel keeps a static star: no outcome has been picked there yet, and A3 means the
+     * mid-call save never blocks either way.
+     */
+    requiredNow(field) {
+        if (! field.required) {
+            return false;
+        }
+
+        if (! field.requiredOn?.length) {
+            return true;
+        }
+
+        return field.requiredOn.includes(Number(this.selectedDisposition));
+    },
+
     /** Now, as a `datetime-local` value — the earliest a callback may be set to. */
     minCallbackLocal() {
         const now = new Date();

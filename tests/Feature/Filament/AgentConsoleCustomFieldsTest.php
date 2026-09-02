@@ -178,6 +178,34 @@ it('falls back to a text box for a type it does not know', function () {
         ->and($fields[0]['type'])->toBe('text');
 });
 
+// T6 (disposition-driven-fields.md, DF-9.3) — the CP-10 outcome ids ride out as a list of
+// ints whatever the stored JSON holds, so the browser can compare one to the picked
+// disposition id without checking its type first.
+it('answers with the outcome ids as a list of ints, and an empty list when the box has none', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    TenantContext::run($tenant->id, function (): void {
+        $campaign = Campaign::factory()->withCustomFields([
+            ['key' => 'policy_number', 'label' => 'Policy Number', 'type' => 'text', 'required' => true,
+                'required_on' => [14, '15', 'RESOLVED', null]],
+            ['key' => 'plan', 'label' => 'Plan', 'type' => 'text', 'required' => true],
+        ])->create();
+        PhoneNumber::factory()->create(['number' => '+911772345678', 'campaign_id' => $campaign->id]);
+    });
+
+    $page = consoleHoldingCall($tenant, $agent, '+911772345678');
+
+    $fields = TenantContext::run($tenant->id, fn (): array => $page->callHistory()['fields']);
+
+    // The numeric string becomes an int; the code and the null are dropped, not coerced to 0.
+    // A box with no key at all answers with [], which DF-1 reads as "blocks on every
+    // contact outcome" — not as "blocks nowhere".
+    expect($fields[0]['requiredOn'])->toBe([14, 15])
+        ->and($fields[1]['requiredOn'])->toBe([]);
+});
+
 // T12, the wall. Assert the identity of what came back, not that a count is zero.
 it('never answers with another client campaign boxes', function () {
     $tenant = Tenant::factory()->create();
@@ -509,6 +537,29 @@ it('draws the same boxes again on the wrap-up screen, under their own ids', func
         ->and($html)->toContain("'wrapUpField-' + field.key");
 });
 
+// T8 — DF-6, and the standing "a console panel needs a markup test as well as a data
+// test" rule. The partial is included twice from the same history.fields, so the two
+// stars have to differ per-INCLUDE. The wrap-up copy follows the outcome the agent just
+// picked; the live-call copy stays static, because no outcome has been picked there yet
+// and A3 means the mid-call save never blocks either way.
+it('binds the wrap-up star to the picked outcome and the live-call star to the plain tick', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    $this->actingAs($agent);
+    TenantContext::applyWebRequest($tenant->id, crossTenant: false);
+
+    $html = Livewire::test(AgentConsole::class)->html();
+
+    // One of each, never two of either — two static stars would mean the flag never
+    // reached the wrap-up include, and two live ones would mean it leaked to both.
+    expect(substr_count($html, 'x-show="requiredNow(field)"'))->toBe(1)
+        ->and(substr_count($html, 'x-show="field.required"'))->toBe(1)
+        // The input's own required attribute follows the same expression, both copies.
+        ->and(substr_count($html, ':required="requiredNow(field)"'))->toBe(2)
+        ->and(substr_count($html, ':required="field.required"'))->toBe(2);
+});
+
 /**
  * CF-4 — a must-fill box blocks the wrap-up, and ONLY when the agent actually reached a
  * person. This is the only decision in N1c that can stop an agent finishing a call, and
@@ -523,6 +574,11 @@ it('draws the same boxes again on the wrap-up screen, under their own ids', func
  * The refusal comes back as a STRING, not a thrown 422, because a blank box is ordinary
  * and the agent's to fix. F7 keeps them on the wrap-up screen and CF-6 draws the boxes
  * there, so the box the message names is one they can actually go and fill.
+ *
+ * 🔴 This is also CP-10's T1. insuranceBoxes() names no outcomes, which is the shape
+ * EVERY campaign configured before CP-10 has, and DF-1 says that must keep blocking on
+ * every contact outcome. If this fixture ever gains a `required_on`, T1 is gone — add
+ * one back rather than editing this.
  */
 it('refuses a contact outcome while a must-fill box is blank, and writes nothing', function () {
     $tenant = Tenant::factory()->create();
@@ -575,6 +631,200 @@ it('allows a non-contact outcome with the same box blank', function () {
     expect($refusal)->toBeNull()
         ->and($callCount)->toBe(1)
         ->and($saved->last_disposition_id)->toBe($nonContactId);
+});
+
+/**
+ * CP-10 (disposition-driven-fields.md) — the same fixture, but Policy Number names the
+ * outcomes it is required for. The ids only exist once the outcomes are created, so the
+ * box list is written second.
+ *
+ * @param  callable(array<string, int>): array<int, mixed>  $requiredOn
+ * @return array{0: AgentConsole, 1: array<string, int>}
+ */
+function wrapUpConsoleRequiringOn(Tenant $tenant, User $agent, callable $requiredOn): array
+{
+    $ids = TenantContext::run($tenant->id, function () use ($requiredOn): array {
+        $insurance = Campaign::factory()->withCustomFields(insuranceBoxes())->create();
+
+        Lead::factory()->create([
+            'phone' => '9991234567',
+            'campaign_id' => $insurance->id,
+            'name' => 'Ravi Menon',
+        ]);
+
+        $ids = [
+            'resolved' => Disposition::factory()->forCampaign($insurance)->create(['is_contact' => true, 'label' => 'Issue resolved'])->id,
+            'informed' => Disposition::factory()->forCampaign($insurance)->create(['is_contact' => true, 'label' => 'Customer informed'])->id,
+            'voicemail' => Disposition::factory()->forCampaign($insurance)->create(['is_contact' => false, 'label' => 'Voicemail left'])->id,
+        ];
+
+        // Policy Number is insuranceBoxes()[0], the only must-fill box.
+        $boxes = insuranceBoxes();
+        $boxes[0]['required_on'] = $requiredOn($ids);
+        $insurance->update(['custom_fields' => $boxes]);
+
+        return $ids;
+    });
+
+    return [consoleHoldingCall($tenant, $agent, null), $ids];
+}
+
+function wrapUpRefusal(Tenant $tenant, AgentConsole $page, int $dispositionId): ?string
+{
+    return TenantContext::run($tenant->id, function () use ($page, $dispositionId): ?string {
+        $page->lookupLead('9991234567');
+
+        return $page->saveWrapUp($dispositionId);
+    });
+}
+
+// T2 — the trap closing. Priya picks "Customer informed" on a 40-second call that never
+// needed a policy number, and the wrap-up goes through. This is the whole reason CP-10
+// exists: before it, CF-4 refused her and her only exits were a pointless callback or
+// typing N/A into the client's report.
+it('does not block an outcome the box was not ticked for', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $ids] = wrapUpConsoleRequiringOn($tenant, $agent, fn (array $ids): array => [$ids['resolved']]);
+
+    $refusal = wrapUpRefusal($tenant, $page, $ids['informed']);
+
+    [$saved, $callCount] = TenantContext::run($tenant->id, fn (): array => [
+        Lead::where('phone', '9991234567')->sole(),
+        Call::count(),
+    ]);
+
+    expect($refusal)->toBeNull()
+        ->and($callCount)->toBe(1)
+        ->and($saved->last_disposition_id)->toBe($ids['informed']);
+});
+
+// T3 — the other half of T2. The same box on the same campaign still blocks the outcome
+// it WAS ticked for, so narrowing the rule did not quietly switch it off.
+it('still blocks the outcome the box was ticked for', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $ids] = wrapUpConsoleRequiringOn($tenant, $agent, fn (array $ids): array => [$ids['resolved']]);
+
+    $refusal = wrapUpRefusal($tenant, $page, $ids['resolved']);
+
+    expect($refusal)->toBeString()
+        ->and($refusal)->toContain('Policy Number')
+        ->and(TenantContext::run($tenant->id, fn (): int => Call::count()))->toBe(0);
+});
+
+// DF-8 — an EXPLICITLY empty list reads the same as an absent one: blocks everywhere. A
+// team leader who unticks all four outcomes has not switched the rule off, and the only
+// way to switch it off is to untick Must fill. Stored as [] rather than missing, which is
+// a different shape on disk and must not behave differently.
+it('blocks every contact outcome when the box names none', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $ids] = wrapUpConsoleRequiringOn($tenant, $agent, fn (): array => []);
+
+    $refusal = wrapUpRefusal($tenant, $page, $ids['informed']);
+
+    expect($refusal)->toBeString()
+        ->and($refusal)->toContain('Policy Number');
+});
+
+// T4 — the is_contact gate is a WALL, not a duplicate condition. DF-4 keeps non-contact
+// outcomes out of the admin checklist, so this list can only be reached by hand-editing
+// the JSON — and even then the outer gate refuses to block a voicemail.
+it('never blocks a non-contact outcome even when the box names it', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $ids] = wrapUpConsoleRequiringOn($tenant, $agent, fn (array $ids): array => [$ids['voicemail']]);
+
+    $refusal = wrapUpRefusal($tenant, $page, $ids['voicemail']);
+
+    expect($refusal)->toBeNull()
+        ->and(TenantContext::run($tenant->id, fn (): int => Call::count()))->toBe(1);
+});
+
+// T5 — DF-2's accepted limit, made deliberate rather than discovered. Delete "Issue
+// resolved" and recreate it and it comes back with a new id, so the tick is dead and the
+// box quietly stops being required there. Not guarded in v1: deleting an in-use outcome
+// already nulls it on every historical call, so this is the smallest part of that damage,
+// and the guard belongs on DispositionResource. Pinned so a future change to it is a
+// choice, not an accident.
+it('blocks nothing when the box names an outcome that no longer exists', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    [$page, $ids] = wrapUpConsoleRequiringOn($tenant, $agent, fn (array $ids): array => [$ids['resolved'] + 9_000]);
+
+    expect(wrapUpRefusal($tenant, $page, $ids['resolved']))->toBeNull();
+});
+
+// T7 — 🔴 the wall. A required_on id is a raw number inside JSON, walled by nothing on its
+// own. Another client's outcome id sitting in this client's campaign must match nothing,
+// because the comparison is against the disposition the SERVER loaded. Names the two
+// outcomes and asserts identities, never counts.
+it('never matches another client outcome id sitting in the box list', function () {
+    $tenant = Tenant::factory()->create();
+    $other = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $theirResolvedId = TenantContext::run($other->id, fn (): int => Disposition::factory()
+        ->forCampaign(Campaign::factory()->create())
+        ->create(['is_contact' => true, 'label' => 'Issue resolved'])->id);
+
+    // Our campaign's Policy Number names THEIR "Issue resolved", and only theirs.
+    [$page, $ids] = wrapUpConsoleRequiringOn($tenant, $agent, fn (): array => [$theirResolvedId]);
+
+    expect($theirResolvedId)->not->toBe($ids['resolved']);
+
+    // Ours is picked. Their id is in the list; it is not this outcome, so nothing blocks.
+    expect(wrapUpRefusal($tenant, $page, $ids['resolved']))->toBeNull();
+});
+
+// T9 — the boxes and the outcome can never come from different campaigns. The customer is
+// filed under the insurance campaign but rang a number owned by another one; both the
+// must-fill check and the outcome resolve to the customer's campaign (CF-1), so the box
+// that blocks is one the agent was actually shown.
+it('checks the boxes of the campaign the customer is filed under, not the number they rang', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $resolvedId = TenantContext::run($tenant->id, function (): int {
+        $insurance = Campaign::factory()->withCustomFields(insuranceBoxes())->create();
+
+        Lead::factory()->create([
+            'phone' => '9991234567',
+            'campaign_id' => $insurance->id,
+            'name' => 'Ravi Menon',
+        ]);
+
+        // A different campaign owns the number, and defines no boxes at all.
+        $switchboard = Campaign::factory()->withCustomFields([])->create();
+        PhoneNumber::factory()->create(['number' => '+911772345678', 'campaign_id' => $switchboard->id]);
+
+        $resolved = Disposition::factory()->forCampaign($insurance)->create(['is_contact' => true, 'label' => 'Issue resolved']);
+
+        $boxes = insuranceBoxes();
+        $boxes[0]['required_on'] = [$resolved->id];
+        $insurance->update(['custom_fields' => $boxes]);
+
+        return $resolved->id;
+    });
+
+    $page = consoleHoldingCall($tenant, $agent, '+911772345678');
+
+    // The switchboard defines nothing; if the check read the DIALLED campaign this would
+    // pass silently.
+    expect(wrapUpRefusal($tenant, $page, $resolvedId))->toContain('Policy Number');
 });
 
 /**

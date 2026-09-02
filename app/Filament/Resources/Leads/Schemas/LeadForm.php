@@ -91,11 +91,18 @@ class LeadForm
      * campaign's own outcomes plus the tenant-wide ones. Tenant-scoped via RLS.
      * Public so the C1 scoping can be asserted directly in tests.
      *
+     * $contactOnly is CP-10's DF-4: the campaign screen's "required for these outcomes"
+     * checklist offers contact outcomes only, because the must-fill check never runs on a
+     * non-contact one (AgentConsole's is_contact gate), so a tick beside "No answer" would
+     * do nothing at all. Kept here rather than re-queried there so the tenant + campaign
+     * scoping lives in one place.
+     *
      * @return array<int, string>
      */
-    public static function dispositionOptions(int|string|null $campaignId): array
+    public static function dispositionOptions(int|string|null $campaignId, bool $contactOnly = false): array
     {
         return Disposition::query()
+            ->when($contactOnly, fn ($query) => $query->where('is_contact', true))
             ->when(
                 filled($campaignId),
                 fn ($query) => $query->where(function ($q) use ($campaignId): void {
