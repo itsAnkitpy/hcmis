@@ -74,7 +74,13 @@ it('offers contact outcomes only, and says why the others are missing', function
         // The helper block, which is the only place DF-4, DF-7 and DF-8 are explained.
         ->assertSee('Only outcomes where the agent reached a person can require a box.')
         ->assertSee('to stop requiring it, turn off Must fill above', escape: false)
-        ->assertSee('Office staff filling in the lead form are always asked for it');
+        ->assertSee('Office staff filling in the lead form are always asked for it')
+        // 🔴 The helper text above names a control by name, so that control has to exist
+        // by that name — it did not on the first build, where the toggle carried
+        // Filament's generated "Required". Order is what makes this exact: the helper
+        // text's own "Must fill" sits INSIDE the sentence starting "Only outcomes…", so
+        // an earlier one can only be the toggle's label.
+        ->assertSeeInOrder(['Must fill', 'Only outcomes where the agent reached a person']);
 });
 
 // The same rule at its source, asserted by identity rather than by count: the checklist

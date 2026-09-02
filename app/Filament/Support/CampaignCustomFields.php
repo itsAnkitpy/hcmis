@@ -87,7 +87,14 @@ class CampaignCustomFields
                 // ->live() so CP-10's outcome checklist appears the moment Must fill is
                 // ticked (DF-3). The `type` select above already does the same for the
                 // dropdown-choices control, so the pattern is this file's own.
+                // Labelled "Must fill", not Filament's generated "Required". Two reasons,
+                // both found on the S128 staging run: the checklist's helper text below
+                // names this control as "Must fill" and there was nothing on screen by
+                // that name, and "Required" reads as belonging to the FORM on a screen
+                // where Field key and Label already carry required-asterisks. "Must fill"
+                // is also the vocabulary the rest of the product uses for this tick.
                 Toggle::make('required')
+                    ->label('Must fill')
                     ->default(false)
                     ->live()
                     ->helperText('Must be filled on the lead form — and agents cannot finish an answered call until it is filled. Existing customers with this box blank will block on their next answered call.'),
