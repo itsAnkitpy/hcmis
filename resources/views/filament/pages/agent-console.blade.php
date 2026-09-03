@@ -15,7 +15,7 @@
          BK-7: resumableBreak() rides in the same way — a still-fresh on-break
          board row means this load RESUMES the break (same type, countdown on
          the original start) instead of auto-pushing Ready. --}}
-    <div x-data="agentConsole(@js($this->getPhoneConfig()), @js($this->breakCategoryOptions()), @js($this->resumableBreak()))" class="mx-auto w-full max-w-4xl">
+    <div x-data="agentConsole(@js($this->getPhoneConfig()), @js($this->breakCategoryOptions()), @js($this->resumableBreak()))" class="w-full">
         <div
             class="rounded-xl border p-5 shadow-sm"
             :class="{
@@ -506,62 +506,122 @@
                      its return value for the same reason (lookupLead rides with the
                      renderless claimHandoffTicket). Times print through the same formatDue()
                      the callback lists use, so a past call reads in the AGENT's own clock. --}}
-                <div>
-                    {{-- CH-4: callbacks are lead-keyed (callbacks.lead_id is NOT NULL), so this
-                         is simply absent for a number nobody has saved — never an empty row
-                         claiming "no callbacks". --}}
-                    <template x-for="callback in history.callbacks" :key="callback.scheduledAtIso">
-                        <p class="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-                            <span class="font-semibold">Callback still owed</span> — due
-                            <span x-text="formatDue(callback.scheduledAtIso)"></span>
-                            <span x-show="callback.notes" x-text="'· “' + callback.notes + '”'"></span>
-                        </p>
-                    </template>
+                <div class="@container space-y-5">
+                    {{-- Capped, like every region on this card. Three calls is the server's
+                         limit, but each one can carry a 2,000-character note, so this panel
+                         has no natural ceiling — and the call script sits below it. --}}
+                    <div class="max-h-64 overflow-y-auto pr-1">
+                        {{-- CH-4: callbacks are lead-keyed (callbacks.lead_id is NOT NULL), so this
+                             is simply absent for a number nobody has saved — never an empty row
+                             claiming "no callbacks". --}}
+                        <template x-for="callback in history.callbacks" :key="callback.scheduledAtIso">
+                            <p class="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                                <span class="font-semibold">Callback still owed</span> — due
+                                <span x-text="formatDue(callback.scheduledAtIso)"></span>
+                                <span x-show="callback.notes" x-text="'· “' + callback.notes + '”'"></span>
+                            </p>
+                        </template>
 
-                    <template x-if="history.calls.length">
-                        <div>
-                            <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Previous calls</p>
-                            <ul class="mt-1 space-y-2 text-sm text-gray-600 dark:text-gray-300">
-                                <template x-for="call in history.calls" :key="call.whenIso">
-                                    <li class="flex flex-wrap items-center gap-x-2">
-                                        <span x-text="formatDue(call.whenIso)"></span>
-                                        <span class="text-gray-300 dark:text-gray-600">·</span>
-                                        <span x-text="call.direction"></span>
-                                        <span class="text-gray-300 dark:text-gray-600">·</span>
-                                        <span x-text="call.talked"></span>
-                                        <template x-if="call.outcome">
-                                            <span class="flex items-center gap-x-2">
-                                                <span class="text-gray-300 dark:text-gray-600">·</span>
-                                                <span class="font-medium text-gray-800 dark:text-gray-100" x-text="call.outcome"></span>
-                                            </span>
-                                        </template>
-                                        <template x-if="call.agent">
-                                            <span class="flex items-center gap-x-2">
-                                                <span class="text-gray-300 dark:text-gray-600">·</span>
-                                                <span x-text="call.agent"></span>
-                                            </span>
-                                        </template>
+                        <template x-if="history.calls.length">
+                            <div>
+                                <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Previous calls</p>
+                                <ul class="mt-1 space-y-2 text-sm text-gray-600 dark:text-gray-300">
+                                    <template x-for="call in history.calls" :key="call.whenIso">
+                                        <li class="flex flex-wrap items-center gap-x-2">
+                                            <span x-text="formatDue(call.whenIso)"></span>
+                                            <span class="text-gray-300 dark:text-gray-600">·</span>
+                                            <span x-text="call.direction"></span>
+                                            <span class="text-gray-300 dark:text-gray-600">·</span>
+                                            <span x-text="call.talked"></span>
+                                            <template x-if="call.outcome">
+                                                <span class="flex items-center gap-x-2">
+                                                    <span class="text-gray-300 dark:text-gray-600">·</span>
+                                                    <span class="font-medium text-gray-800 dark:text-gray-100" x-text="call.outcome"></span>
+                                                </span>
+                                            </template>
+                                            <template x-if="call.agent">
+                                                <span class="flex items-center gap-x-2">
+                                                    <span class="text-gray-300 dark:text-gray-600">·</span>
+                                                    <span x-text="call.agent"></span>
+                                                </span>
+                                            </template>
 
-                                        {{-- CP-5: on its own line under the row. What the
-                                             last agent wrote is what makes this panel worth
-                                             reading — the outcome says "callback", the note
-                                             says why. --}}
-                                        <template x-if="call.notes">
-                                            <span
-                                                class="block w-full text-xs italic text-gray-500 dark:text-gray-400"
-                                                x-text="'“' + call.notes + '”'"
-                                            ></span>
-                                        </template>
-                                    </li>
+                                            {{-- CP-5: on its own line under the row. What the
+                                                 last agent wrote is what makes this panel worth
+                                                 reading — the outcome says "callback", the note
+                                                 says why. --}}
+                                            <template x-if="call.notes">
+                                                <span
+                                                    class="block w-full text-xs italic text-gray-500 dark:text-gray-400"
+                                                    x-text="'“' + call.notes + '”'"
+                                                ></span>
+                                            </template>
+                                        </li>
+                                    </template>
+                                </ul>
+                            </div>
+                        </template>
+
+                        <p
+                            x-show="! history.calls.length && ! history.callbacks.length"
+                            class="text-sm text-gray-500 dark:text-gray-400"
+                        >First time we are speaking to this number.</p>
+                    </div>
+
+                    {{-- N2 (dialshree-inspired-roadmap.md #21): the words the agent says.
+                         `Script` and `ScriptResource` have shipped and been administered
+                         since M4; this console never once read them. It lands in the LEFT
+                         column because that is the column CP-5's O3 reserved for what the
+                         agent READS, and because the column was two-thirds empty while the
+                         right one ran past the bottom of the screen.
+
+                         🔴 TABS, not a scrolling list, and the reason is in the enum:
+                         ScriptType has exactly opening / objection / closing, so unlike the
+                         campaign boxes this panel can never grow. One script on screen, the
+                         other two one click away — an agent hunting for the objection
+                         handler by scrolling is doing it while a customer argues at them.
+                         The server sends only the types the client actually wrote, in enum
+                         order, so there is never an empty tab and never a fourth.
+
+                         🔴 Alpine state, not Blade, like every panel on this screen: a
+                         renderless method sharing the Livewire batch would throw
+                         server-rendered markup away (S120b).
+
+                         `x-text` on purpose — the admin form stores a Textarea, so this is
+                         plain text and never HTML. whitespace-pre-wrap keeps the line breaks
+                         the leader typed; max-w-prose keeps the measure readable now that
+                         the card is 1280px rather than 896px. Constrain the TEXT, not the
+                         page — this is the whole reason the console could be widened. --}}
+                    <div x-show="history.scripts.length" x-cloak>
+                        <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+                            <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Call script</p>
+
+                            <div class="flex flex-wrap gap-1" role="tablist" aria-label="Call script">
+                                <template x-for="script in history.scripts" :key="script.type">
+                                    <button
+                                        type="button"
+                                        role="tab"
+                                        :aria-selected="scriptTab === script.type"
+                                        x-on:click="scriptTab = script.type"
+                                        :class="scriptTab === script.type
+                                            ? 'bg-gray-900 text-white dark:bg-white dark:text-gray-900'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/20'"
+                                        class="rounded-lg px-2.5 py-1 text-xs font-semibold"
+                                        x-text="script.label"
+                                    ></button>
                                 </template>
-                            </ul>
+                            </div>
                         </div>
-                    </template>
 
-                    <p
-                        x-show="! history.calls.length && ! history.callbacks.length"
-                        class="text-sm text-gray-500 dark:text-gray-400"
-                    >First time we are speaking to this number.</p>
+                        <template x-for="script in history.scripts" :key="script.type">
+                            <div
+                                x-show="scriptTab === script.type"
+                                role="tabpanel"
+                                class="mt-3 max-h-64 max-w-prose overflow-y-auto whitespace-pre-wrap pr-1 text-sm leading-relaxed text-gray-700 dark:text-gray-300"
+                                x-text="script.content"
+                            ></div>
+                        </template>
+                    </div>
                 </div>
 
                 {{-- CP-3 (customer-profiling.md §6): "save what we just learned about this
@@ -578,14 +638,15 @@
                      🔴 Alpine state again, not Blade, for exactly the reason the history
                      panel above gives: a renderless method sharing the batch would throw
                      this markup away. The save reads its RETURN VALUE back into `lead`. --}}
-                <div class="border-t border-gray-100 pt-5 @3xl:border-l @3xl:border-t-0 @3xl:pl-8 @3xl:pt-0 dark:border-white/10">
+                <div class="@container border-t border-gray-100 pt-5 @3xl:border-l @3xl:border-t-0 @3xl:pl-8 @3xl:pt-0 dark:border-white/10">
                     <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">Customer details</p>
 
-                    {{-- One field per row, labelled. They were three across, which is
-                         fine full-width and unreadable in half a card — and a
-                         placeholder-only field loses its own name the moment it is
-                         filled, which is most of the time on a known caller. --}}
-                    <div class="mt-3 space-y-3">
+                    {{-- Labelled, and two across once the COLUMN (not the card) has room
+                         for it — @lg reads the @container on the column above. A
+                         placeholder-only field loses its own name the moment it is filled,
+                         which is most of the time on a known caller, so the labels stay.
+                         Three across was the version that was unreadable. --}}
+                    <div class="mt-3 grid gap-3 @lg:grid-cols-2">
                         <div>
                             <label for="customerName" class="block text-xs font-medium text-gray-600 dark:text-gray-400">Name</label>
                             <input
@@ -681,7 +742,7 @@
         <div
             x-show="state === 'wrapUp'"
             x-cloak
-            class="mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
+            class="@container mt-4 w-full max-w-3xl rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-gray-900"
         >
             <p class="text-sm text-gray-500 dark:text-gray-400">Wrap-up</p>
 
@@ -705,11 +766,11 @@
                          this — the same shape call-notes below it already uses three
                          times. Same `history.fields`, same `customer.fields`, so whatever
                          was typed mid-call is still in the box and simply carries on. --}}
-                    <div class="sm:max-w-md">
+                    <div>
                         @include('filament.pages.partials.campaign-fields', ['id' => 'wrapUpField', 'outcomeAware' => true])
                     </div>
 
-                    <div class="mt-4 sm:max-w-md">
+                    <div class="mt-4">
                         @include('filament.pages.partials.call-notes', ['id' => 'wrapUpCallNotes'])
                     </div>
 
@@ -796,7 +857,7 @@
                     ></p>
                     <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No matching lead — the call is still logged</p>
 
-                    <div class="mt-4 sm:max-w-md">
+                    <div class="mt-4">
                         @include('filament.pages.partials.call-notes', ['id' => 'unmatchedCallNotes'])
                     </div>
 

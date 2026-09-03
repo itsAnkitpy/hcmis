@@ -255,7 +255,16 @@ it('lays the live-call panels out in two columns', function () {
     $this->actingAs($agent);
     TenantContext::applyWebRequest($tenant->id, crossTenant: false);
 
-    expect(Livewire::test(AgentConsole::class)->html())->toContain('@3xl:grid-cols-2');
+    $html = Livewire::test(AgentConsole::class)->html();
+
+    expect($html)->toContain('@3xl:grid-cols-2')
+        // Each COLUMN is a container in its own right, and this is the assertion that
+        // stops the trap from biting a third time. A container query resolves against
+        // the nearest ANCESTOR container, so without these two marks every breakpoint
+        // written inside a column would measure the whole card and lay fields out two
+        // across in a half-width column. Silent, and only visible on a wide window.
+        ->toContain('@container space-y-5')
+        ->toContain('@container border-t border-gray-100 pt-5 @3xl:border-l');
 
     TenantContext::resetWebRequest();
 });

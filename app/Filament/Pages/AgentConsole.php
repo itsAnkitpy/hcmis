@@ -13,6 +13,7 @@ use App\Enums\CallOutcome;
 use App\Enums\LeadStatus;
 use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
+use App\Enums\ScriptType;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
 use App\Filament\Support\CampaignCustomFields;
 use App\Models\AgentPresence;
@@ -28,6 +29,7 @@ use App\Models\Lead;
 // The model, aliased: App\Support\PhoneNumber (the number formatter) already owns the
 // bare name in this file.
 use App\Models\PhoneNumber as PhoneNumberRecord;
+use App\Models\Script;
 use App\Models\User;
 use App\Support\PhoneNumber;
 use App\Telephony\AgentDirectory;
@@ -376,7 +378,7 @@ class AgentConsole extends Page
     public function callHistory(): array
     {
         if ($this->callPartyNumber === null) {
-            return ['calls' => [], 'callbacks' => [], 'fields' => []];
+            return ['calls' => [], 'callbacks' => [], 'fields' => [], 'scripts' => []];
         }
 
         $calls = Call::query()
@@ -407,12 +409,18 @@ class AgentConsole extends Page
             ])
             ->all();
 
+        // CF-1's chain, resolved ONCE. The client's boxes and the words the agent says
+        // belong to the same campaign by definition, and the fallback branch is a query.
+        $campaignId = $this->campaignForThisCall();
+
         return [
             'calls' => $calls,
             'callbacks' => $callbacks,
             // CF-2: the definitions only. The VALUES for a known caller ride out on
             // presentLead(), the same way name, email and city already do.
-            'fields' => CampaignCustomFields::definitionsForBrowser($this->campaignForThisCall()),
+            'fields' => CampaignCustomFields::definitionsForBrowser($campaignId),
+            // N2: the words the agent says on this call.
+            'scripts' => $this->scriptsForCampaign($campaignId),
         ];
     }
 
@@ -1585,6 +1593,55 @@ class AgentConsole extends Page
      * column, not this ordering — flipping the order here would write values the export can
      * never print. The upgrade is a lead-to-campaign join; do not build it on a guess.
      */
+    /**
+     * N2 — the call scripts the agent reads on THIS call: opening, objection, closing.
+     *
+     * Scoped the same way dispositions are (LeadForm::dispositionOptions): a row with a
+     * null campaign_id is tenant-wide, a row with one belongs to that campaign only.
+     *
+     * 🔴 The campaign row WINS and hides the tenant-wide one of the same type. An agent
+     * reads ONE opening out loud; showing them two and asking them to choose is a
+     * decision made mid-sentence with a customer listening. The query puts campaign rows
+     * first, so first-of-group is the campaign's whenever it has one.
+     *
+     * Bounded at three, because ScriptType is — so this is never a growing list and the
+     * screen can spend a fixed panel on it. Answered in enum order (the order a call
+     * uses them), and a type nobody has written is simply absent rather than an empty
+     * tab. Content is plain text: the admin form is a Textarea, not a rich editor.
+     *
+     * `scripts` carries no unique index, so a client CAN file two openings for one
+     * campaign. `orderBy('id')` makes which one wins stable rather than whatever
+     * Postgres hands back — the oldest. Not worth a migration until someone does it.
+     *
+     * @return array<int, array{type: string, label: string, content: string}>
+     */
+    private function scriptsForCampaign(?int $campaignId): array
+    {
+        $byType = Script::query()
+            ->when(
+                filled($campaignId),
+                fn ($query) => $query->where(function ($q) use ($campaignId): void {
+                    $q->whereNull('campaign_id')->orWhere('campaign_id', $campaignId);
+                }),
+                fn ($query) => $query->whereNull('campaign_id'),
+            )
+            // FALSE sorts before TRUE, so the campaign's own rows lead each group.
+            ->orderByRaw('campaign_id IS NULL')
+            ->orderBy('id')
+            ->get()
+            ->groupBy(fn (Script $script): string => $script->type->value);
+
+        return collect(ScriptType::cases())
+            ->map(fn (ScriptType $type): array => [
+                'type' => $type->value,
+                'label' => $type->label(),
+                'content' => (string) $byType->get($type->value)?->first()?->content,
+            ])
+            ->filter(fn (array $script): bool => filled($script['content']))
+            ->values()
+            ->all();
+    }
+
     private function campaignForThisCall(): ?int
     {
         return $this->matchedCampaignId

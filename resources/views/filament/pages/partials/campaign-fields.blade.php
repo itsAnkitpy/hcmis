@@ -19,6 +19,12 @@
      Silently dropping the twelfth would collect no data and break nothing visible, which
      is the worst failure shape available.
 
+     Two across once the column has room (@lg reads the @container on the column, NOT on
+     the card — a card-wide query would put two boxes in a half-width column). Fifteen
+     short boxes become eight rows, which is what carries a client past the six-to-eight
+     where one-per-row starts costing the agent a scroll mid-call. Same move the Leads
+     screen already makes on the same definitions.
+
      🔴 Alpine state, not Blade, like every panel on this screen: a renderless method
      sharing the Livewire batch would throw server-rendered markup away (S120b).
 
@@ -37,7 +43,7 @@
     <p class="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">{{ $heading ?? 'For this campaign' }}</p>
 
     {{-- pr-1 keeps the scrollbar off the input borders when it appears. --}}
-    <div class="mt-3 max-h-64 space-y-3 overflow-y-auto pr-1">
+    <div class="mt-3 grid max-h-64 gap-3 overflow-y-auto pr-1 @lg:grid-cols-2">
         <template x-for="field in history.fields" :key="field.key">
             <div>
                 <label

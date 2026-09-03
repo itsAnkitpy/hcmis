@@ -41,7 +41,12 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     // — dialAdhoc() ships with setPresence(), so a server-rendered panel never
     // reaches the DOM. Reading the return value is immune to that, and is how the
     // lead card has always worked.
-    history: { calls: [], callbacks: [], fields: [] },
+    history: { calls: [], callbacks: [], fields: [], scripts: [] },
+    // N2: which script the agent is reading. Bounded at three (ScriptType has exactly
+    // opening / objection / closing), which is what makes tabs the right shape here —
+    // one script on screen, the other two a click away. A scrolling list would make the
+    // agent hunt for the objection handler while a customer is arguing with them.
+    scriptTab: null,
     // CP-3: the live-call customer form (A2 — it sits beside the call, not in
     // wrap-up). Held client-side and kept in step with `lead` by a single $watch in
     // init(), so every path that assigns a lead — inbound match, served lead,
@@ -804,8 +809,13 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         try {
             this.history = await this.$wire.callHistory();
         } catch (e) {
-            this.history = { calls: [], callbacks: [], fields: [] };
+            this.history = { calls: [], callbacks: [], fields: [], scripts: [] };
         }
+
+        // Open on the first script this campaign has. The server answers in enum order,
+        // so that is Opening whenever one exists. Set here rather than in the markup: a
+        // tab pointing at a type nobody wrote would draw an empty panel.
+        this.scriptTab = this.history.scripts[0]?.type ?? null;
     },
 
     /**
@@ -957,7 +967,8 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         this.callerNumber = null;
         this.lead = null;
         this.leadResolved = false;
-        this.history = { calls: [], callbacks: [], fields: [] };
+        this.history = { calls: [], callbacks: [], fields: [], scripts: [] };
+        this.scriptTab = null;
         this.customer = { name: '', email: '', city: '', fields: {} };
         this.savingCustomer = false;
         this.customerNotice = null;
