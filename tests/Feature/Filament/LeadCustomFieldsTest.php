@@ -3,8 +3,10 @@
 use App\Enums\LeadStatus;
 use App\Enums\RoleName;
 use App\Filament\Resources\Leads\Pages\CreateLead;
+use App\Filament\Resources\Leads\Pages\EditLead;
 use App\Filament\Resources\Leads\Schemas\LeadForm;
 use App\Filament\Support\CampaignCustomFields;
+use App\Models\ActivityLog;
 use App\Models\Campaign;
 use App\Models\Disposition;
 use App\Models\Lead;
@@ -152,4 +154,48 @@ it('rejects a lead when a required custom field is left blank', function () {
         ])
         ->call('create')
         ->assertHasFormErrors(['custom_fields.policy_number']);
+});
+
+// --- N4 / CL-2: must-fill guards creation only, so a team leader can clear a value ---
+
+it('lets a team leader clear a must-fill box on an existing lead, and logs the old value', function () {
+    $tenant = Tenant::factory()->create();
+    $teamLeader = clientUserWithRole($tenant, RoleName::TeamLeader->value);
+
+    $this->actingAs($teamLeader->fresh());
+    TenantContext::applyWebRequest($tenant->id, false);
+
+    $campaign = Campaign::factory()->withCustomFields([
+        ['key' => 'policy_number', 'label' => 'Policy Number', 'type' => 'text', 'required' => true],
+        ['key' => 'plan', 'label' => 'Plan', 'type' => 'select', 'required' => false, 'options' => ['Gold', 'Silver']],
+    ])->create();
+
+    // Meera carries a policy number that belongs to somebody else.
+    $meera = Lead::factory()->forCampaign($campaign)->create([
+        'phone' => '9990003333',
+        'custom_fields' => ['policy_number' => 'POL-4471', 'plan' => 'Gold'],
+    ]);
+
+    Livewire::test(EditLead::class, ['record' => $meera->getRouteKey()])
+        ->fillForm(['custom_fields' => ['policy_number' => null, 'plan' => 'Gold']])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    // The key survives holding null — Filament writes the whole map back, so a cleared
+    // box is not a dropped key. That is fine and deliberate: CF-4's re-arm test is
+    // blank(), which reads null as blank, so the wrap-up refusal still bites.
+    expect($meera->refresh()->custom_fields)->toEqualCanonicalizing([
+        'policy_number' => null,
+        'plan' => 'Gold',
+    ]);
+
+    // DPDP correction is only servable if the clear is attributable (CL-4).
+    $changes = ActivityLog::query()
+        ->where('subject_id', $meera->id)
+        ->where('event', 'updated')
+        ->latest('id')
+        ->first()
+        ->attribute_changes->toArray();
+
+    expect($changes['old']['custom_fields']['policy_number'])->toBe('POL-4471');
 });

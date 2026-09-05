@@ -276,14 +276,20 @@ class CampaignCustomFields
         $label = $definition['label'] ?? $key;
         $required = (bool) ($definition['required'] ?? false);
 
+        // Must-fill means "capture this on an answered call", not "this record can
+        // never be blank" — leads predating the box, and imports missing the column,
+        // are already blank. So it guards creation only, which lets a team leader
+        // clear a wrong value on an edit.
+        $requiredOnCreate = fn (string $operation): bool => $required && $operation === 'create';
+
         return match ($definition['type'] ?? 'text') {
-            'number' => TextInput::make($name)->label($label)->numeric()->required($required),
-            'date' => DatePicker::make($name)->label($label)->required($required)->native(false),
+            'number' => TextInput::make($name)->label($label)->numeric()->required($requiredOnCreate),
+            'date' => DatePicker::make($name)->label($label)->required($requiredOnCreate)->native(false),
             'select' => Select::make($name)->label($label)
                 ->options(self::optionMap($definition))
-                ->required($required)
+                ->required($requiredOnCreate)
                 ->native(false),
-            default => TextInput::make($name)->label($label)->maxLength(255)->required($required),
+            default => TextInput::make($name)->label($label)->maxLength(255)->required($requiredOnCreate),
         };
     }
 

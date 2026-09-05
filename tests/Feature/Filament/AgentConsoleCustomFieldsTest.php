@@ -317,6 +317,32 @@ it('keeps a stored box the save never sent', function () {
     ]);
 });
 
+// N4 / CL-3: the Leads screen may clear a box, the console may not. The test above
+// covers a key the browser never sent; this one covers a key sent deliberately blank,
+// which is the path the filled() filter actually guards.
+
+it('never empties a stored box when the console sends it blank (CL-3)', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $this->actingAs($agent);
+
+    $page = consoleOnCallWithBoxes($tenant, $agent);
+
+    TenantContext::run($tenant->id, function () use ($page): void {
+        $page->saveCustomer('Meera Nair', null, null, ['policy_number' => 'POL-4471', 'plan' => 'Gold']);
+        // A blank mid-call is ambiguous: "there is no value" or "I have not asked yet".
+        // The console cannot tell them apart, so it keeps what it knows.
+        $page->saveCustomer(null, null, null, ['policy_number' => '', 'plan' => 'Gold']);
+    });
+
+    $saved = TenantContext::run($tenant->id, fn (): Lead => Lead::where('phone', '9991234567')->sole());
+
+    expect($saved->custom_fields)->toEqualCanonicalizing([
+        'policy_number' => 'POL-4471',
+        'plan' => 'Gold',
+    ]);
+});
+
 it('drops a box name the campaign does not define', function () {
     $tenant = Tenant::factory()->create();
     $agent = clientUserWithRole($tenant, RoleName::Agent->value);
