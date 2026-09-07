@@ -99,8 +99,7 @@ it('never hands out a number that is retired against someone who lost their key'
     $leaver = User::factory()->create();
     $retired = $this->writer->provisionFor($leaver);
 
-    // PP-19 destroys the key and leaves the number on the leaver's row.
-    DB::table('asterisk.ps_auths')->where('id', 'auth'.$retired)->update(['password' => '']);
+    $this->writer->retireFor($leaver->fresh());
 
     expect($this->writer->provisionFor(User::factory()->create()))->not->toBe($retired);
 });
@@ -112,7 +111,7 @@ it('mints a new key when re-issuing a phone whose key was destroyed', function (
     $extension = $this->writer->provisionFor($user);
     $oldKey = phoneRowsFor($extension)['auth']->password;
 
-    DB::table('asterisk.ps_auths')->where('id', 'auth'.$extension)->update(['password' => '']);
+    $this->writer->retireFor($user->fresh());
 
     $reissued = $this->writer->provisionFor($user->fresh());
     $newKey = phoneRowsFor($extension)['auth']->password;
@@ -130,4 +129,28 @@ it('gives two agents two different keys', function () {
 
     expect(phoneRowsFor($first)['auth']->password)
         ->not->toBe(phoneRowsFor($second)['auth']->password);
+});
+
+// --- PP-19: retiring destroys the key and keeps the number ---
+
+it('destroys the key and leaves the number standing', function () {
+    $user = User::factory()->create();
+    $extension = $this->writer->provisionFor($user);
+
+    $this->writer->retireFor($user->fresh());
+    $rows = phoneRowsFor($extension);
+
+    expect($rows['auth']->password)->toBe('')
+        ->and($user->fresh()->sip_extension)->toBe($extension)
+        ->and($rows['endpoint'])->not->toBeNull()
+        ->and($rows['aor'])->not->toBeNull();
+});
+
+it('does nothing when the person never had a phone', function () {
+    $user = User::factory()->create();
+
+    $this->writer->retireFor($user);
+
+    expect($user->fresh()->sip_extension)->toBeNull()
+        ->and(DB::table('asterisk.ps_auths')->count())->toBe(0);
 });

@@ -52,6 +52,37 @@ class Audit
     }
 
     /**
+     * Record that an agent's phone key was destroyed (SEC-1, PP-19).
+     *
+     * This one cannot come for free from LogsModelActivity the way an extension
+     * change does: the key lives in Asterisk's own `ps_auths` table and nothing on
+     * the user's row moves when it dies. Without this line, retiring a phone would
+     * leave no trace at all. The key value itself is never recorded (D-M7-2) — the
+     * number it belonged to is enough to answer "whose phone, and when".
+     */
+    public static function phoneRetired(User $user, string $extension): void
+    {
+        self::record('rbac', fn (ActivityLogger $log) => $log
+            ->performedOn($user)
+            ->event('phone_retired')
+            ->withProperties(['extension' => $extension])
+            ->log("retired phone {$extension}"));
+    }
+
+    /**
+     * Record that a retired phone was given a fresh key on the same number (PP-19's
+     * reversal). Same reasoning as phoneRetired: nothing on the user's row moves.
+     */
+    public static function phoneReissued(User $user, string $extension): void
+    {
+        self::record('rbac', fn (ActivityLogger $log) => $log
+            ->performedOn($user)
+            ->event('phone_reissued')
+            ->withProperties(['extension' => $extension])
+            ->log("re-issued phone {$extension}"));
+    }
+
+    /**
      * Record an auth event. Called from LogAuthenticationActivity.
      *
      * @param  array<string, mixed>  $properties

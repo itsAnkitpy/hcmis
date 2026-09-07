@@ -81,6 +81,49 @@ class AgentPhoneWriter
     }
 
     /**
+     * Destroy this person's key and keep their number (PP-19).
+     *
+     * The number stays on their own row forever, retired against their name. That is
+     * what stops it ever being handed to someone else, and it is why every call
+     * record naming it stays readable. Only the key dies.
+     *
+     * Reversible by design: `provisionFor()` on the same person sees no key and cuts
+     * a fresh one on the same extension. That is the entire cost of a mistake here,
+     * which is why PP-19 can be a button rather than a rebuild.
+     *
+     * ponytail: blanks the password rather than deleting the auth row, because a
+     * blank is already the "no key" signal `existingPassword()` reads. Whether
+     * Asterisk treats an empty secret as "reject everything" or "accept anything" is
+     * unverified against the box (RS-2). If it turns out to be the latter, swap
+     * `update` for `delete` and nothing else changes — a missing row reads as "no
+     * key" too.
+     */
+    public function retireFor(User $user): void
+    {
+        if ($user->sip_extension === null) {
+            return;
+        }
+
+        DB::table('asterisk.ps_auths')
+            ->where('id', $this->authIdFor($user->sip_extension))
+            ->update(['password' => '']);
+    }
+
+    /**
+     * Does this person hold a working key right now?
+     *
+     * The screen needs it to choose between offering "retire" and offering
+     * "re-issue" (PP-19). It lives here rather than in the page so that the schema
+     * qualifier and the `auth1100` naming stay in the one file that knows them —
+     * a bare `ps_auths` anywhere else does not resolve at all (RV-3).
+     */
+    public function hasKey(User $user): bool
+    {
+        return $user->sip_extension !== null
+            && $this->existingPassword($this->authIdFor($user->sip_extension)) !== null;
+    }
+
+    /**
      * The next number in the pool: one above the highest ever handed out, floored
      * at the pool start. Read from `users` rather than from Asterisk's tables
      * because a retired agent keeps their number on their own row forever (PP-19),

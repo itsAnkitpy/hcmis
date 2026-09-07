@@ -2,13 +2,18 @@
 
 namespace App\Filament\Resources\Users\Pages;
 
+use App\Audit\Audit;
 use App\Enums\RoleName;
 use App\Filament\Resources\Users\UserResource;
 use App\Models\User;
+use App\Telephony\AgentPhoneWriter;
 use App\Tenancy\TenantContext;
+use Filament\Actions\Action;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\EditRecord;
+use Filament\Support\Icons\Heroicon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\HtmlString;
 use Spatie\Permission\PermissionRegistrar;
 
 /**
@@ -19,6 +24,98 @@ use Spatie\Permission\PermissionRegistrar;
 class EditUser extends EditRecord
 {
     protected static string $resource = UserResource::class;
+
+    /**
+     * The retire / re-issue pair for an agent's phone (SEC-1, PP-19).
+     *
+     * 🔴 Retiring is a deliberate act and not an automatic one, because there is
+     * nothing automatic to hang it on: HCIMS cannot switch off or delete a user
+     * account at all (RV-8). Removing someone from a client is the wrong trigger —
+     * that is also how a role gets corrected, and PP-9 exists to stop a correction
+     * churning a phone.
+     *
+     * Only one of the two is ever on screen, and neither appears for someone who has
+     * no phone. Re-issue is not a nicety: without it, a phone retired by mistake
+     * could never be brought back, because provisioning skips anyone who already
+     * holds a number.
+     *
+     * @return array<int, Action>
+     */
+    protected function getHeaderActions(): array
+    {
+        return [
+            Action::make('retire_phone')
+                ->label("Retire this agent's phone")
+                ->icon(Heroicon::OutlinedPhoneXMark)
+                ->color('danger')
+                ->visible(fn (): bool => app(AgentPhoneWriter::class)->hasKey($this->record))
+                ->requiresConfirmation()
+                ->modalHeading("Retire this agent's phone?")
+                ->modalDescription(fn (): HtmlString => self::retireWarning($this->record))
+                ->modalSubmitActionLabel('Retire the phone')
+                ->action(function (): void {
+                    /** @var User $user */
+                    $user = $this->record;
+                    $extension = (string) $user->sip_extension;
+
+                    app(AgentPhoneWriter::class)->retireFor($user);
+                    Audit::phoneRetired($user, $extension);
+
+                    Notification::make()
+                        ->success()
+                        ->title("Phone {$extension} retired")
+                        ->body('Their key is destroyed. The number stays retired to them and their call records are untouched.')
+                        ->send();
+                }),
+
+            Action::make('reissue_phone')
+                ->label("Re-issue this agent's phone")
+                ->icon(Heroicon::OutlinedPhone)
+                ->visible(fn (): bool => $this->record->sip_extension !== null
+                    && ! app(AgentPhoneWriter::class)->hasKey($this->record))
+                ->requiresConfirmation()
+                ->modalHeading('Give this agent a working phone again?')
+                ->modalDescription(fn (): string => 'They get a new key on their own number '.$this->record->sip_extension.', and nothing else changes. They will need to open the agent console again for it to take effect.')
+                ->modalSubmitActionLabel('Re-issue the phone')
+                ->action(function (): void {
+                    /** @var User $user */
+                    $user = $this->record;
+                    $extension = (string) $user->sip_extension;
+
+                    app(AgentPhoneWriter::class)->provisionFor($user);
+                    Audit::phoneReissued($user, $extension);
+
+                    Notification::make()
+                        ->success()
+                        ->title("Phone {$extension} re-issued")
+                        ->body('They can sign in to the agent console again.')
+                        ->send();
+                }),
+        ];
+    }
+
+    /**
+     * What the warning says before a phone is retired (PP-20).
+     *
+     * Three things, in the order someone needs them: what survives, what the number
+     * does afterwards, and where to get their calls as a file first. 🔴 The link
+     * goes to the Call export screen that shipped in August and already filters by
+     * agent — do not build a second download here (RV-9).
+     */
+    private static function retireWarning(User $user): HtmlString
+    {
+        $extension = e((string) $user->sip_extension);
+        $export = route('filament.admin.pages.call-export-report');
+
+        return new HtmlString(
+            'Their key is destroyed, so nothing can sign in as this phone again. '
+            .'<strong>Every call they made or took stays exactly as it is</strong>, and '
+            ."number {$extension} stays retired to them — it is never given to anyone else. "
+            .'If you want their calls as a file first, download them from '
+            ."<a href=\"{$export}\" target=\"_blank\" class=\"underline font-medium\">Reports → Call export</a> "
+            .'before you retire this phone.'
+        );
+    }
 
     /**
      * @param  array<string, mixed>  $data
