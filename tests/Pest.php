@@ -13,6 +13,7 @@ use App\Telephony\NumberDirectory;
 use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Mockery\MockInterface;
 use Spatie\Permission\Models\Role;
@@ -368,4 +369,55 @@ function channelUserevent(string $name, array $variables): array
         'eventname' => $name,
         'userevent' => array_merge($variables, ['eventname' => $name]),
     ];
+}
+
+/**
+ * Build Asterisk's three phone tables in the test database (SEC-1, slice 2).
+ *
+ * On the real box these tables are created and owned by Asterisk's own Alembic
+ * migration set, in the `asterisk` schema, and our migrations must never touch them
+ * — two migration systems on one schema is how they drift. So the tests build their
+ * own copy instead, carrying ONLY the columns App\Telephony\AgentPhoneWriter writes.
+ *
+ * Column types and widths were read off the staging box on 2026-09-07 and match it,
+ * including the two custom value lists — so a value Asterisk would reject fails here
+ * too, rather than passing locally and failing on the switch. The full read-back is
+ * in `PRD/pre-work/server-build-log.md` §5e. One field was not read: `ps_endpoints.id`
+ * is assumed to match its siblings at 255, and our longest id is eight characters.
+ *
+ * Postgres DDL is transactional, so RefreshDatabase rolls all of this back.
+ */
+function createAsteriskPhoneTables(): void
+{
+    DB::statement('drop schema if exists asterisk cascade');
+    DB::statement('create schema asterisk');
+
+    DB::statement("create type asterisk.ast_bool_values as enum
+        ('0', '1', 'off', 'on', 'false', 'true', 'no', 'yes')");
+
+    DB::statement("create type asterisk.pjsip_auth_type_values_v2 as enum
+        ('md5', 'userpass', 'google_oauth')");
+
+    DB::statement('create table asterisk.ps_endpoints (
+        id varchar(255) primary key,
+        context varchar(40),
+        disallow varchar(200),
+        allow varchar(200),
+        auth varchar(255),
+        aors varchar(2048),
+        webrtc asterisk.ast_bool_values
+    )');
+
+    DB::statement('create table asterisk.ps_auths (
+        id varchar(255) primary key,
+        auth_type asterisk.pjsip_auth_type_values_v2,
+        username varchar(40),
+        password varchar(80)
+    )');
+
+    DB::statement('create table asterisk.ps_aors (
+        id varchar(255) primary key,
+        max_contacts integer,
+        remove_existing asterisk.ast_bool_values
+    )');
 }

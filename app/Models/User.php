@@ -104,11 +104,16 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
      * secrets are never on the allowlist, so a "user updated" / "password
      * changed" event records that it happened, never the secret value (D-M7-2).
      *
+     * `sip_extension` is on the list because which phone a person holds is an
+     * identity fact worth an audit trail (SEC-1, PP-2). Their SIP password is
+     * not, and cannot be: it never lives on this row at all — it is written to
+     * Asterisk's own `ps_auths` table, and the same D-M7-2 rule applies there.
+     *
      * @return array<int, string>
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'email'];
+        return ['name', 'email', 'sip_extension'];
     }
 
     protected function activityLogName(): string
