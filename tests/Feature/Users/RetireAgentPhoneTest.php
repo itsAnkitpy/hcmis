@@ -58,7 +58,7 @@ it('destroys the key, keeps the number, and records that it happened', function 
     editPageFor($this->agent)->callAction('retire_phone');
 
     expect($this->agent->fresh()->sip_extension)->toBe($extension)
-        ->and(DB::table('asterisk.ps_auths')->where('id', 'auth'.$extension)->value('password'))->toBe('')
+        ->and(DB::table('asterisk.ps_auths')->where('id', 'auth'.$extension)->exists())->toBeFalse()
         ->and(DB::table('asterisk.ps_endpoints')->where('id', $extension)->exists())->toBeTrue()
         ->and(auditEventsFor($this->agent))->toContain('phone_retired');
 });

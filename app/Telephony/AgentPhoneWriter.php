@@ -91,12 +91,15 @@ class AgentPhoneWriter
      * a fresh one on the same extension. That is the entire cost of a mistake here,
      * which is why PP-19 can be a button rather than a rebuild.
      *
-     * ponytail: blanks the password rather than deleting the auth row, because a
-     * blank is already the "no key" signal `existingPassword()` reads. Whether
-     * Asterisk treats an empty secret as "reject everything" or "accept anything" is
-     * unverified against the box (RS-2). If it turns out to be the latter, swap
-     * `update` for `delete` and nothing else changes — a missing row reads as "no
-     * key" too.
+     * 🔴 Deletes the auth row rather than blanking its password (RS-2, measured on
+     * the box 2026-09-08). Blanking was the first shape and it is not safe: Asterisk
+     * loaded `auth1102/1102` with an empty secret and the endpoint still pointed at
+     * it, because res_pjsip only refuses when there is NO stored credential at all —
+     * an empty string is a credential. Deleting the row makes `ast_sip_retrieve_auths`
+     * fail, which rejects the request outright.
+     *
+     * The endpoint and aor rows stay. They are inert without an auth object, and
+     * keeping them means a re-issue is one `provisionFor()` call on the same number.
      */
     public function retireFor(User $user): void
     {
@@ -106,7 +109,7 @@ class AgentPhoneWriter
 
         DB::table('asterisk.ps_auths')
             ->where('id', $this->authIdFor($user->sip_extension))
-            ->update(['password' => '']);
+            ->delete();
     }
 
     /**
@@ -149,6 +152,8 @@ class AgentPhoneWriter
      */
     private function existingPassword(string $authId): ?string
     {
+        // A missing row is the retired case (PP-19) and value() returns null for it;
+        // the empty-string check stays for any row blanked before RS-2 was settled.
         $password = DB::table('asterisk.ps_auths')->where('id', $authId)->value('password');
 
         return $password === '' ? null : $password;

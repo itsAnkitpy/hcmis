@@ -140,7 +140,7 @@ it('destroys the key and leaves the number standing', function () {
     $this->writer->retireFor($user->fresh());
     $rows = phoneRowsFor($extension);
 
-    expect($rows['auth']->password)->toBe('')
+    expect($rows['auth'])->toBeNull()
         ->and($user->fresh()->sip_extension)->toBe($extension)
         ->and($rows['endpoint'])->not->toBeNull()
         ->and($rows['aor'])->not->toBeNull();
