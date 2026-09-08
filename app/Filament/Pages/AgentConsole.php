@@ -730,11 +730,18 @@ class AgentConsole extends Page
      *  - 'dialed'  + lead   : the call was placed (show the call card).
      *  - 'blocked' + phone  : on the do-not-call list, not dialed (show the notice).
      *  - 'none'             : nothing callable in the campaign (back to ready).
+     *  - 'nophone'          : this agent holds no phone of their own (SEC-1 PP-12).
      *
-     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}|array{outcome: 'nophone'}
      */
     public function dial(): array
     {
+        $agentEndpoint = $this->ownEndpoint();
+
+        if ($agentEndpoint === null) {
+            return ['outcome' => 'nophone'];
+        }
+
         $lead = $this->nextCallableLead();
 
         if ($lead === null) {
@@ -748,7 +755,7 @@ class AgentConsole extends Page
         $this->matchedLeadId = $lead->id;
         $this->matchedCampaignId = $lead->campaign_id;
 
-        $this->originateAgentLeg($lead->phone);
+        $this->originateAgentLeg($lead->phone, $agentEndpoint);
 
         return ['outcome' => 'dialed', 'lead' => $this->presentLead($lead)];
     }
@@ -776,10 +783,20 @@ class AgentConsole extends Page
      * wrap-up. On a clean number the lead ids are stashed #[Locked] and the agent
      * leg is originated, exactly like a served-lead dial.
      *
-     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}
+     * 🔴 The phone guard comes FIRST, before the callback is consumed: refusing after
+     * the flip to done would drop a due callback off the list for a call that never
+     * happened.
+     *
+     * @return array{outcome: 'dialed', lead: array{id: int, name: ?string, phone: string, email: ?string, city: ?string, campaign: ?string, status: string, lastDisposition: ?string, customFields: array<string, mixed>}}|array{outcome: 'blocked', phone: string}|array{outcome: 'none'}|array{outcome: 'nophone'}
      */
     public function dialCallback(int $callbackId): array
     {
+        $agentEndpoint = $this->ownEndpoint();
+
+        if ($agentEndpoint === null) {
+            return ['outcome' => 'nophone'];
+        }
+
         $callback = Callback::query()
             ->with('lead')
             ->where('owner_agent_id', auth()->id())
@@ -802,7 +819,7 @@ class AgentConsole extends Page
         $this->matchedLeadId = $lead->id;
         $this->matchedCampaignId = $lead->campaign_id;
 
-        $this->originateAgentLeg($lead->phone);
+        $this->originateAgentLeg($lead->phone, $agentEndpoint);
 
         return ['outcome' => 'dialed', 'lead' => $this->presentLead($lead)];
     }
@@ -819,11 +836,17 @@ class AgentConsole extends Page
      * row (B3 D5). A do-not-call number is blocked with only an audit line (no lead
      * to close) — and so writes no calls row.
      *
-     * @return array{outcome: 'dialed'|'blocked', phone: string}|array{outcome: 'invalid'}
+     * @return array{outcome: 'dialed'|'blocked', phone: string}|array{outcome: 'invalid'}|array{outcome: 'nophone'}
      */
     public function dialAdhoc(string $number): array
     {
         Gate::authorize('dial-adhoc');
+
+        $agentEndpoint = $this->ownEndpoint();
+
+        if ($agentEndpoint === null) {
+            return ['outcome' => 'nophone'];
+        }
 
         $phone = PhoneNumber::normalize($number);
 
@@ -841,7 +864,7 @@ class AgentConsole extends Page
             return ['outcome' => 'blocked', 'phone' => $phone];
         }
 
-        $this->originateAgentLeg($phone);
+        $this->originateAgentLeg($phone, $agentEndpoint);
 
         // 🔴 A typed number is NOT automatically a stranger, and used to be treated
         // as one. CP-3 lets an agent save a customer in the middle of an ad-hoc call,
@@ -911,12 +934,30 @@ class AgentConsole extends Page
     }
 
     /**
+     * This agent's OWN dial endpoint, or null when they hold no phone (SEC-1 PP-12).
+     *
+     * Every dial entry point asks this before it changes anything, because the answer
+     * decides whether a call can happen at all. It used to be unaskable: the directory
+     * fell back to one shared extension, so a phoneless agent's outbound leg rang
+     * agent 1003's desk instead of theirs. Now it is null, and a null refusal the
+     * agent can read beats a TypeError in the listener.
+     */
+    private function ownEndpoint(): ?string
+    {
+        return app(AgentDirectory::class)->endpointFor((int) auth()->id());
+    }
+
+    /**
      * Originate the AGENT leg first (agent-first), carrying the customer number as
      * the leg's tag detail so the flow reads it back and dials the customer
      * (CP-O0 transport). Shared by the served-lead dial and the ad-hoc dial — the
      * only difference between them is where the number comes from.
+     *
+     * The endpoint arrives already resolved, as a plain string: its caller had to ask
+     * for it anyway to decide whether to dial at all, and taking it here rather than
+     * looking it up again is what keeps a null out of `placeCall()`.
      */
-    private function originateAgentLeg(string $customerNumber): void
+    private function originateAgentLeg(string $customerNumber, string $agentEndpoint): void
     {
         // The single outbound dial path (served lead, callback, ad-hoc all route
         // here) — so it's the one place that stamps the B3 call as Outbound,
@@ -945,11 +986,12 @@ class AgentConsole extends Page
 
         app(TelephonyProvider::class)->placeCall(
             // Ring the LOGGED-IN agent's OWN phone (B2.2b Fold A directory), not the one
-            // fixed endpoint — so a 2nd agent's outbound leg rings 1004, not 1003 (closes
-            // the §7 outbound-per-agent gap). Falls back to the single-agent config for a
-            // user not in the directory, so the one-agent lab path stays unbroken. With
-            // the agent id now threaded below, an outbound call is fully transferable too.
-            app(AgentDirectory::class)->endpointFor((int) auth()->id()),
+            // fixed endpoint — so a 2nd agent's outbound leg rings their own desk (closes
+            // the §7 outbound-per-agent gap). SEC-1 slice 4: it comes from their own
+            // `users.sip_extension`, and an agent without one is refused at the door
+            // above rather than silently ringing somebody else's phone. With the agent
+            // id threaded below, an outbound call is fully transferable too.
+            $agentEndpoint,
             'agent',
             // B2.4a (TD-4 fold): thread the dialing agent's user id onto the agent leg
             // (the 4th ordered tag value) so the handler retains WHO is serving and an

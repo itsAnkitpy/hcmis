@@ -230,6 +230,9 @@ it('writes no history from a heartbeat — "still here" is not a status', functi
 it('writes no history from the router\'s ring-time reservation — a routing lock, not a stint', function () {
     $tenant = Tenant::factory()->create();
     $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    // SEC-1 slice 4: the router only offers agents who hold a phone. forceFill because
+    // sip_extension is deliberately not fillable (PP-1).
+    $agent->forceFill(['sip_extension' => '1100'])->save();
 
     // Agent genuinely Ready through the door (board row + open Ready stint).
     $this->actingAs($agent);

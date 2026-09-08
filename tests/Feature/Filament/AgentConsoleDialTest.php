@@ -9,6 +9,7 @@ use App\Models\Disposition;
 use App\Models\DncEntry;
 use App\Models\Lead;
 use App\Models\Tenant;
+use App\Telephony\AgentDirectory;
 use App\Tenancy\TenantContext;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -18,6 +19,8 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
+
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
 
 afterEach(function () {
     TenantContext::forget();
@@ -465,16 +468,19 @@ it('threads the dialing agent user id as the 4th app-arg so an outbound call is 
 });
 
 it('rings the logged-in agent own phone on outbound, not the one fixed endpoint (B2.4a §7 outbound-per-agent)', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');   // the fixed fallback (agent A)
+    // 🔴 The one test in this file that runs the REAL directory (SEC-1 slice 4): its
+    // whole claim is that the leg rings THIS agent's own phone, so the stub that hands
+    // every agent one endpoint would prove nothing.
+    app()->forgetInstance(AgentDirectory::class);
+    config()->set('telephony.agent.endpoint', 'PJSIP/1003');   // the dead fallback (agent A)
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();
     $agent = clientUserWithRole($tenant, RoleName::Agent->value);
 
-    // This agent's OWN phone, keyed by their user id (the B2.2b Fold A directory).
-    config()->set('telephony.agent.directory', [
-        $agent->id => ['endpoint' => 'PJSIP/1004'],
-    ]);
+    // This agent's OWN phone, on their OWN record. forceFill because sip_extension is
+    // deliberately not fillable (PP-1).
+    $agent->forceFill(['sip_extension' => '1004'])->save();
 
     $campaignId = TenantContext::run($tenant->id, function (): int {
         $campaign = Campaign::factory()->create(['is_active' => true]);

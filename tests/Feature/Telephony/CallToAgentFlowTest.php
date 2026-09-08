@@ -8,6 +8,8 @@ use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
+
 /**
  * The call-to-agent flow, event-driven, both directions. Inbound: an outside
  * caller reaches a browser agent (B4 CP2a). Outbound: the agent's leg arrives

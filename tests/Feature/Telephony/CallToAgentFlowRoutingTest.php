@@ -1,10 +1,14 @@
 <?php
 
+use App\Telephony\AgentDirectory;
+use App\Telephony\AgentPhoneWriter;
 use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\Flows\Switchboard;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
+
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
 
 /**
  * B2.2b — the inbound flow picks a free agent and rings THEM (RD-1..RD-5 + Fold B).
@@ -20,11 +24,25 @@ beforeEach(function () {
     Queue::fake();
 });
 
+/**
+ * 🔴 The one test here that runs the REAL directory (SEC-1 slice 4): its whole claim
+ * is that the endpoint comes from the RESERVED agent's own record, so a stub handing
+ * back one endpoint for everyone would prove nothing. Every other test in this file
+ * stubs it, because they are about call mechanics rather than whose phone rings.
+ */
 it('reserves a free agent and rings THAT agent\'s resolved endpoint (RD-2/RD-4)', function () {
-    config()->set('telephony.agent.directory', [
-        7 => ['extension' => '1004', 'endpoint' => 'PJSIP/1004', 'password' => 's'],
-    ]);
-    $router = fakeAgentRouter(7);   // the board hands back agent 7
+    // A directory that answers with the agent id it was ASKED about, so the assertion
+    // below can only pass if the flow resolved the endpoint for the RESERVED agent.
+    // (Which record the real directory reads is AgentDirectoryTest's claim, not this
+    // file's — these tests carry no database.)
+    app()->instance(AgentDirectory::class, new class(app(AgentPhoneWriter::class)) extends AgentDirectory
+    {
+        public function endpointFor(int $userId): ?string
+        {
+            return 'PJSIP/'.$userId;
+        }
+    });
+    $router = fakeAgentRouter(1004);   // the board hands back agent 1004
 
     $telephony = fakeTelephony();
     $telephony->shouldReceive('answer')->once()->with('caller-leg');

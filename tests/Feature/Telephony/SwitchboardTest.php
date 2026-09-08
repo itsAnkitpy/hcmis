@@ -8,6 +8,8 @@ use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
+
 /**
  * The B2.1 foundation: the switchboard holds MANY calls at once and keeps them apart.
  * These feed the switchboard the same raw event shapes the listener reads off ARI

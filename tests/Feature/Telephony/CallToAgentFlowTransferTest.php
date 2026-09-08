@@ -8,6 +8,8 @@ use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
 use Illuminate\Support\Facades\Queue;
 
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
+
 /**
  * B2.4a cold transfer — the handler mechanics, event-driven, against a mocked
  * provider (no Asterisk, no network). A is on a live inbound call; a transfer

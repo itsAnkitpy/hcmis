@@ -22,9 +22,19 @@ afterEach(fn () => TenantContext::forget());
  * the 2-phone live routing is verified at CP-B2.2b.
  */
 if (! function_exists('seedPresenceRow')) {
-    function seedPresenceRow(Tenant $tenant, PresenceStatus $status, bool $stale = false): User
+    /**
+     * An agent on this company's board. They hold a phone unless the test says
+     * otherwise: SEC-1 slice 4 made an extension the price of being reservable, and
+     * in the app every agent gets one the moment they are made one.
+     */
+    function seedPresenceRow(Tenant $tenant, PresenceStatus $status, bool $stale = false, bool $withPhone = true): User
     {
         $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+        if ($withPhone) {
+            // forceFill, not fill: sip_extension is deliberately not fillable (PP-1).
+            $agent->forceFill(['sip_extension' => (string) (1100 + $agent->id)])->save();
+        }
 
         TenantContext::run($tenant->id, function () use ($agent, $status, $stale): void {
             $factory = AgentPresence::factory()->forUser($agent)->status($status);
@@ -167,4 +177,30 @@ it('reports nobody free once this caller has been rung out on everyone (QD-4)', 
 
     expect((new AgentRouter)->reserveFreeAgent($tenant->id, [$only->id]))->toBeNull()
         ->and(statusOf($tenant, $only))->toBe(PresenceStatus::Ready);
+});
+
+/**
+ * 🔴 SEC-1 slice 4 — an agent with no phone is not a free agent.
+ *
+ * The phone directory stopped falling back to one shared extension, so ringing
+ * someone who holds none would hand a null to `placeCall()` and kill the listener
+ * mid-call. The guard sits here, in the one place that decides who can be rung,
+ * rather than at each of the three ring sites — so a phoneless agent is simply never
+ * a candidate and the caller waits exactly as they do when nobody is free.
+ */
+it('never reserves a Ready agent who holds no phone (SEC-1 PP-12)', function () {
+    $tenant = Tenant::factory()->create();
+    $phoneless = seedPresenceRow($tenant, PresenceStatus::Ready, withPhone: false);
+
+    expect((new AgentRouter)->reserveFreeAgent($tenant->id))->toBeNull()
+        ->and(statusOf($tenant, $phoneless))->toBe(PresenceStatus::Ready);   // never tagged, so never rung
+});
+
+it('rings past a phoneless agent to the next free one who does hold a phone', function () {
+    $tenant = Tenant::factory()->create();
+    $phoneless = seedPresenceRow($tenant, PresenceStatus::Ready, withPhone: false);
+    $withPhone = seedPresenceRow($tenant, PresenceStatus::Ready);
+
+    expect((new AgentRouter)->reserveFreeAgent($tenant->id))->toBe($withPhone->id)
+        ->and(statusOf($tenant, $phoneless))->toBe(PresenceStatus::Ready);
 });

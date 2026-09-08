@@ -17,6 +17,8 @@ use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
 
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
+
 afterEach(function () {
     TenantContext::forget();
 });

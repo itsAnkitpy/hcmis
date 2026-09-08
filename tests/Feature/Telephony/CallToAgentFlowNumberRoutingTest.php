@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\Queue;
 
 uses(RefreshDatabase::class);
 
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
+
 /**
  * B2.3a — which client is this call for?
  *

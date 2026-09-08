@@ -7,6 +7,8 @@ use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
 use Illuminate\Support\Facades\Queue;
 
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
+
 /**
  * B2.3b-i — the waiting room. The system used to hang up on a caller nobody could
  * take; now they hold with music until a desk frees up, they give up, or the client's

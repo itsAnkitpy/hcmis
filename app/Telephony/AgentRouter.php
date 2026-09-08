@@ -6,6 +6,7 @@ namespace App\Telephony;
 
 use App\Enums\PresenceStatus;
 use App\Models\AgentPresence;
+use App\Models\User;
 use App\Tenancy\TenantContext;
 
 /**
@@ -51,6 +52,15 @@ class AgentRouter
      * call and lives on the call's handler, deliberately NOT a board-wide "pause
      * this agent" (that needs a sixth presence state and a screen to clear it).
      *
+     * 🔴 SEC-1 slice 4: AN AGENT WITH NO PHONE IS NOT A FREE AGENT. Since the phone
+     * directory stopped falling back to one shared extension (PP-12), `endpointFor()`
+     * returns null for someone holding no `sip_extension` — and `placeCall()` takes a
+     * non-nullable string, so reserving them would kill the listener mid-call. The
+     * guard belongs here, in the one place that decides who can be rung, rather than
+     * at each of the three ring sites. A phoneless agent simply never becomes a
+     * candidate, so the caller waits exactly as they do when nobody is free (RD-5) —
+     * a path that was already built and proven.
+     *
      * @param  array<int, int>  $skipUserIds
      */
     public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
@@ -63,6 +73,7 @@ class AgentRouter
             $candidates = AgentPresence::query()
                 ->where('status', PresenceStatus::Ready->value)
                 ->where('last_seen_at', '>=', $freshThreshold)
+                ->whereIn('user_id', User::query()->whereNotNull('sip_extension')->select('id'))
                 ->when($skipUserIds !== [], fn ($query) => $query->whereNotIn('user_id', $skipUserIds))
                 ->orderBy('user_id')
                 ->pluck('user_id');

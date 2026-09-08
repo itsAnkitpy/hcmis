@@ -8,6 +8,8 @@ use App\Models\Disposition;
 use App\Models\PhoneNumber;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Telephony\AgentDirectory;
+use App\Telephony\AgentPhoneWriter;
 use App\Telephony\AgentRouter;
 use App\Telephony\NumberDirectory;
 use App\Telephony\TelephonyProvider;
@@ -297,6 +299,43 @@ function fakeAgentRouter(?int $agentId = 6): AgentRouter
     app()->instance(AgentRouter::class, $router);
 
     return $router;
+}
+
+/**
+ * Bind a stub AgentDirectory (SEC-1 slice 4) that hands back one dial endpoint for
+ * any agent, the way `config('telephony.agent.endpoint')` used to before the lookup
+ * moved to `users.sip_extension`. The `fakeNumberDirectory` shape, for the same
+ * reason: it lets the flow + console tests stay about call MECHANICS while the real
+ * database-backed lookup is proven in AgentDirectoryTest.
+ *
+ * 🔴 It encodes an invariant the code now guarantees rather than papering over one.
+ * `AgentRouter` no longer offers an agent who holds no extension, so a reserved
+ * agent always has an endpoint — which is what these tests assume. That guard is
+ * proven for real in AgentRouterTest; the console's own "I have no phone" refusal is
+ * proven in AgentConsoleNoPhoneTest, both against the real directory.
+ *
+ * `browserIdentityFor` is deliberately NOT stubbed: it reads the database already and
+ * an agent with no extension never touches Asterisk's tables, so a rendered console
+ * in a test simply shows the refusal.
+ */
+function fakeAgentDirectory(string $endpoint = 'PJSIP/1003'): AgentDirectory
+{
+    $directory = new class($endpoint) extends AgentDirectory
+    {
+        public function __construct(private readonly string $endpoint)
+        {
+            parent::__construct(app(AgentPhoneWriter::class));
+        }
+
+        public function endpointFor(int $userId): ?string
+        {
+            return $this->endpoint;
+        }
+    };
+
+    app()->instance(AgentDirectory::class, $directory);
+
+    return $directory;
 }
 
 /**

@@ -6,6 +6,8 @@ use App\Telephony\RecordingSession;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Queue;
 
+beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agent has a phone
+
 /**
  * Call Stats CS-1/CS-2/CS-3 — the three numbers a team leader watches: how many calls
  * are connected, how many are ringing, and how many callers are holding.

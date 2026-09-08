@@ -113,17 +113,34 @@ class AgentPhoneWriter
     }
 
     /**
-     * Does this person hold a working key right now?
+     * This person's key, or null when they hold none — no extension at all, or a
+     * number whose auth row PP-19 destroyed.
      *
-     * The screen needs it to choose between offering "retire" and offering
-     * "re-issue" (PP-19). It lives here rather than in the page so that the schema
-     * qualifier and the `auth1100` naming stay in the one file that knows them —
-     * a bare `ps_auths` anywhere else does not resolve at all (RV-3).
+     * Reading a credential out of a second schema belongs here rather than in the
+     * caller for the same reason writing it does: the schema qualifier and the
+     * `auth1100` naming stay in the one file that knows them, and a bare `ps_auths`
+     * anywhere else does not resolve at all (RV-3).
+     *
+     * 🔴 The one legitimate caller is AgentDirectory, handing an agent's own browser
+     * its own registration key (SEC-1 slice 4). It must never reach a screen — S138
+     * put the extension on the Users list precisely because the number is safe to
+     * show and the key is not.
+     */
+    public function keyFor(User $user): ?string
+    {
+        return $user->sip_extension === null
+            ? null
+            : $this->existingPassword($this->authIdFor($user->sip_extension));
+    }
+
+    /**
+     * Does this person hold a working key right now? The screen needs it to choose
+     * between offering "retire" and offering "re-issue" (PP-19) — the bool, never
+     * the key itself.
      */
     public function hasKey(User $user): bool
     {
-        return $user->sip_extension !== null
-            && $this->existingPassword($this->authIdFor($user->sip_extension)) !== null;
+        return $this->keyFor($user) !== null;
     }
 
     /**

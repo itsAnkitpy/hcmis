@@ -326,6 +326,18 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         // state change, so no transition can silently skip the board.
         this.$watch('state', (state) => this.syncPresence(state));
 
+        // SEC-1 PP-12: no phone of their own, no registration. The directory used to
+        // hand an unmapped agent the one shared extension, so a third agent's browser
+        // quietly became agent 1003 — same desk, two people. It now returns nothing at
+        // all, and the strip says so in words instead of registering as somebody else.
+        // Covers a retired agent too (PP-19): the number survives, the key does not,
+        // and a registration with no key fails at the switch looking like a bug.
+        if (! config.extension) {
+            this.error = 'No phone is assigned to you — ask your team leader to set one up.';
+
+            return;
+        }
+
         this.phone.start();
     },
 
@@ -585,6 +597,13 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
 
         if (result?.outcome === 'blocked') {
             this.notice = `${result.phone} is on the Do-Not-Call list — not dialed.`;
+        }
+
+        // SEC-1 PP-12: the page refused because this agent holds no phone. Unreachable
+        // from a screen that never registered, and here because the page is the wall —
+        // all three dial paths return it, and all three land in this one branch.
+        if (result?.outcome === 'nophone') {
+            this.notice = 'No phone is assigned to you — ask your team leader to set one up.';
         }
     },
 
