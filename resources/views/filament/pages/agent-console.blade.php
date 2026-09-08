@@ -60,7 +60,7 @@
                                 'text-amber-800 dark:text-amber-300': ! error && state === 'wrapUp',
                                 'text-orange-800 dark:text-orange-300': ! error && state === 'onBreak' && ! isBreakOverdue(),
                             }"
-                            x-text="error ? 'Registration failed' : stripTitle()"
+                            x-text="error ? errorTitle : stripTitle()"
                         ></p>
                         <p x-show="state !== 'onBreak'" class="text-sm text-gray-500 dark:text-gray-400">
                             Extension {{ $this->getPhoneConfig()['extension'] ?? '—' }}

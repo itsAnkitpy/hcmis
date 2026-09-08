@@ -32,6 +32,11 @@ import { AgentPhone } from './telephony/agent-phone';
 const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     state: 'offline',
     error: null,
+    // The red strip's heading. Almost every error here IS a failed registration, so
+    // that stays the default; the no-phone refusal below is the one case where
+    // nothing was ever attempted and saying "failed" would send someone hunting a
+    // fault that does not exist.
+    errorTitle: 'Registration failed',
     callerNumber: null,
     lead: null,
     leadResolved: false,
@@ -333,6 +338,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         // Covers a retired agent too (PP-19): the number survives, the key does not,
         // and a registration with no key fails at the switch looking like a bug.
         if (! config.extension) {
+            this.errorTitle = 'No phone assigned';
             this.error = 'No phone is assigned to you — ask your team leader to set one up.';
 
             return;
