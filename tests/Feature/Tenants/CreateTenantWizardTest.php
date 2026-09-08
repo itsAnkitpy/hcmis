@@ -29,6 +29,8 @@ afterEach(function () {
 });
 
 it('creates a tenant via the wizard, provisions per-tenant roles, and attaches agents with the right team', function () {
+    createAsteriskPhoneTables();
+
     Livewire::test(CreateTenant::class)
         ->fillForm([
             'name' => 'PW Acquisition',
@@ -91,6 +93,13 @@ it('creates a tenant via the wizard, provisions per-tenant roles, and attaches a
         expect($riya->fresh()->hasRole(RoleName::TeamLeader->value))->toBeTrue()
             ->and($arjun->fresh()->hasRole(RoleName::Agent->value))->toBeTrue();
     });
+
+    // The wizard's agents step is a role-write path like any other, so the agent
+    // walks out of onboarding with a working phone and the team leader does not.
+    expect($arjun->fresh()->sip_extension)->toBe('1100')
+        ->and($riya->fresh()->sip_extension)->toBeNull()
+        ->and(DB::table('asterisk.ps_endpoints')->where('id', '1100')->exists())->toBeTrue()
+        ->and(DB::table('asterisk.ps_endpoints')->count())->toBe(1);
 
     // Cross-check the model_has_roles rows land in the tenant team, not team 0.
     $teamZeroAssignments = DB::table('model_has_roles')

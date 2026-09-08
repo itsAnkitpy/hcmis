@@ -2,12 +2,12 @@
 
 namespace App\Filament\Resources\Tenants\Pages;
 
-use App\Audit\Audit;
 use App\Enums\CampaignTemplate;
 use App\Enums\RoleName;
 use App\Filament\Resources\Tenants\TenantResource;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Tenancy\Actions\AssignTenantRole;
 use App\Tenancy\Actions\SendUserInvite;
 use App\Tenancy\Settings\BusinessHoursForm;
 use App\Tenancy\TenantContext;
@@ -216,8 +216,7 @@ class CreateTenant extends CreateRecord
                 ]);
 
                 $user->tenants()->attach($tenant->getKey());
-                $user->assignRole($agent['role_name']);
-                Audit::roleGranted($user, $agent['role_name'], $tenant->getKey());
+                app(AssignTenantRole::class)($user, $agent['role_name']);
 
                 $newUsers[] = $user;
             }

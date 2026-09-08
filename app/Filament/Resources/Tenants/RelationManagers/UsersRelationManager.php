@@ -6,6 +6,8 @@ use App\Audit\Audit;
 use App\Enums\RoleName;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Tenancy\Actions\AssignTenantRole;
+use App\Tenancy\Actions\ClearTenantRoles;
 use App\Tenancy\Actions\SendUserInvite;
 use App\Tenancy\TenantContext;
 use Filament\Actions\Action;
@@ -23,7 +25,6 @@ use Filament\Tables\Table;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
-use Spatie\Permission\PermissionRegistrar;
 
 /**
  * Per-tenant agent management (M3 B.5.2).
@@ -100,7 +101,7 @@ class UsersRelationManager extends RelationManager
                             ]);
 
                             $tenant->users()->attach($created->getKey());
-                            $created->assignRole($data['role_name']);
+                            app(AssignTenantRole::class)($created, $data['role_name']);
                         });
 
                         if ($created !== null && ! SendUserInvite::trySend($created, $tenant)) {
@@ -135,7 +136,7 @@ class UsersRelationManager extends RelationManager
                         }
 
                         TenantContext::run($tenant->getKey(), function () use ($user, $data): void {
-                            self::replaceRole($user, $data['role_name']);
+                            app(AssignTenantRole::class)($user, $data['role_name']);
                         });
                     }),
             ])
@@ -181,7 +182,7 @@ class UsersRelationManager extends RelationManager
                         $tenant = $this->getOwnerRecord();
 
                         TenantContext::run($tenant->getKey(), function () use ($record, $data): void {
-                            self::replaceRole($record, $data['role_name']);
+                            app(AssignTenantRole::class)($record, $data['role_name']);
                         });
                     }),
 
@@ -194,7 +195,7 @@ class UsersRelationManager extends RelationManager
                         $tenant = $this->getOwnerRecord();
 
                         TenantContext::run($tenant->getKey(), function () use ($record, $tenant): void {
-                            self::clearPerTenantRoles($record);
+                            app(ClearTenantRoles::class)($record);
                             Audit::roleRemoved($record, $tenant->getKey());
                         });
                     }),
@@ -218,41 +219,6 @@ class UsersRelationManager extends RelationManager
             ->value('roles.name');
 
         return $name ?? '—';
-    }
-
-    /**
-     * Replace the user's per-tenant role assignment. Caller must wrap in
-     * TenantContext::run($tenant->id, …) so $user->assignRole() resolves to
-     * the correct team via TenantTeamResolver.
-     */
-    private static function replaceRole(User $user, string $roleName): void
-    {
-        self::clearPerTenantRoles($user);
-        $user->assignRole($roleName);
-        Audit::roleGranted($user, $roleName, TenantContext::id());
-    }
-
-    /**
-     * Strip every per-client role assignment the user holds in the current
-     * TenantContext's team. Direct delete on model_has_roles — bypasses
-     * spatie's removeRole() to avoid double team scoping confusion, then
-     * invalidates the permission cache so subsequent reads see the change.
-     */
-    private static function clearPerTenantRoles(User $user): void
-    {
-        $teamId = TenantContext::id();
-
-        if ($teamId === null) {
-            return;
-        }
-
-        DB::table('model_has_roles')
-            ->where('model_id', $user->getKey())
-            ->where('model_type', User::class)
-            ->where('team_id', $teamId)
-            ->delete();
-
-        app(PermissionRegistrar::class)->forgetCachedPermissions();
     }
 
     /**

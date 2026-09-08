@@ -151,6 +151,7 @@ it('fires an invite when the global Users Create action runs', function () {
 it('fires an invite from the per-tenant Add new user action', function () {
     Mail::fake();
     TenantContext::forget();
+    createAsteriskPhoneTables();
 
     $admin = User::factory()->create(['email_verified_at' => now()]);
     Role::findOrCreate(RoleName::SuperAdmin->value, 'web');
