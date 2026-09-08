@@ -148,3 +148,15 @@ it('allows removing super_admin when another super admin remains', function () {
 
     expect($secondStillSuperAdmin)->toBeFalse();
 });
+
+it('shows an agent\'s extension on the Users list and leaves it blank for everyone else', function () {
+    $agent = User::factory()->create(['name' => 'Priya Nair']);
+    $agent->forceFill(['sip_extension' => '1101'])->save();
+
+    $other = User::factory()->create(['name' => 'Rahul Menon']);
+
+    Livewire::test(ListUsers::class)
+        ->assertCanSeeTableRecords([$agent, $other])
+        ->assertTableColumnStateSet('sip_extension', '1101', $agent)
+        ->assertTableColumnStateNotSet('sip_extension', '1101', $other);
+});

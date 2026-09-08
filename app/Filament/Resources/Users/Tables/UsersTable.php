@@ -44,6 +44,11 @@ class UsersTable
                     ->counts('tenants')
                     ->badge()
                     ->color('gray'),
+                TextColumn::make('sip_extension')
+                    ->label('Extension')
+                    ->placeholder('—')
+                    ->searchable()
+                    ->sortable(),
                 TextColumn::make('created_at')
                     ->dateTime()
                     ->sortable()
