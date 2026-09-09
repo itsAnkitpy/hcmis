@@ -26,8 +26,6 @@ afterEach(function () {
 });
 
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);
     fakeNumberDirectory();   // resolves the call's dialled number to its company (B2.3a)
     Queue::fake();
 });

@@ -20,8 +20,6 @@ beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agen
  * routing lives in SwitchboardTest; here we drive one handler via beginConference().
  */
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);   // the single-endpoint fallback rings 'PJSIP/1003'
     fakeNumberDirectory();   // resolves the call's dialled number to its company (B2.3a)
     Queue::fake();
 });

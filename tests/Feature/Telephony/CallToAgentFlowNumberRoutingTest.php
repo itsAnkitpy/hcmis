@@ -28,8 +28,6 @@ beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agen
  * really a missing company label.
  */
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);
     TenantContext::forget();   // the listener has no client in scope — the lookup finds it
     Queue::fake();
 });

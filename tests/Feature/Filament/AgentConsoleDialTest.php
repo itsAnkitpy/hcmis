@@ -46,7 +46,6 @@ function dialParams(Request $request): array
 }
 
 it('serves the next callable lead, stashes its locked ids at dial, and originates the agent leg carrying the customer number', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();
@@ -94,7 +93,6 @@ it('serves the next callable lead, stashes its locked ids at dial, and originate
 });
 
 it('writes a no-answer (non-contact) outcome on an unanswered outbound — attempts +1, status forward, audited (CP-O2 / D5)', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();
@@ -248,7 +246,6 @@ it('blocks a served lead on the do-not-call list — never dials, closes it, aud
 });
 
 it('does not block when the do-not-call entry belongs to another client (tenant wall, O1)', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $clientA = Tenant::factory()->create();
@@ -305,7 +302,6 @@ it('never serves a lead that belongs to another client (tenant wall)', function 
 });
 
 it('dials an ad-hoc typed number, stashing no lead, carrying the typed number on the agent leg (D3)', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();
@@ -434,7 +430,6 @@ it('signals a conference carrying the agent user id and the server-derived tenan
 });
 
 it('threads the dialing agent user id as the 4th app-arg so an outbound call is transferable (B2.4a)', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();
@@ -472,6 +467,8 @@ it('rings the logged-in agent own phone on outbound, not the one fixed endpoint 
     // whole claim is that the leg rings THIS agent's own phone, so the stub that hands
     // every agent one endpoint would prove nothing.
     app()->forgetInstance(AgentDirectory::class);
+    // Gone from config since PP-15; set here so the refusal is proven against a value
+    // that is present, not one that is missing.
     config()->set('telephony.agent.endpoint', 'PJSIP/1003');   // the dead fallback (agent A)
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 

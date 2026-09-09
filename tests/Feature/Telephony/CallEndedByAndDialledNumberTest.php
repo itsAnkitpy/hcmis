@@ -32,8 +32,6 @@ afterEach(function () {
 });
 
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);
     fakeNumberDirectory();
     Queue::fake();
 });

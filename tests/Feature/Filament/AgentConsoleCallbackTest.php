@@ -59,7 +59,6 @@ function seedCallbackCampaign(Tenant $tenant): array
 }
 
 it('creates a sticky callback owned by the agent and still runs the normal lead write', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();
@@ -96,7 +95,6 @@ it('creates a sticky callback owned by the agent and still runs the normal lead 
 });
 
 it('records a non-callback outcome without creating a callback row', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();
@@ -230,7 +228,6 @@ it('lists only the agent\'s own due, pending callbacks (cross-agent + cross-tena
 });
 
 it('dials a specific due callback, stashes its lead, originates, and marks it done', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();

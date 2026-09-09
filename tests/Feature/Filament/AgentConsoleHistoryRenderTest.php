@@ -38,7 +38,6 @@ afterEach(function () {
  */
 function consoleAfterAdhocDial(Tenant $tenant, User $agent, string $number): Testable
 {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     test()->actingAs($agent);

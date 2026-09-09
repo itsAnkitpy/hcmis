@@ -18,8 +18,6 @@ beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agen
  * releases on both no-answer paths, and ends cleanly when nobody is free.
  */
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);
     fakeNumberDirectory();   // resolves the call's dialled number to its company (B2.3a)
     Queue::fake();
 });

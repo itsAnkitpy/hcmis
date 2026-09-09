@@ -142,7 +142,6 @@ it('moves a grabbed callback out of the pool and into the grabber\'s own due-lis
 });
 
 it('dials a grabbed callback through the existing sticky path', function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     $tenant = Tenant::factory()->create();

@@ -21,8 +21,6 @@ beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agen
  *    seconds can be tested by moving time rather than by waiting.
  */
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);
 
     fakeNumberDirectory();
     Queue::fake();

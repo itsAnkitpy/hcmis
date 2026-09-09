@@ -60,7 +60,6 @@ function seedCallCampaign(Tenant $tenant, string $code, bool $isContact, string 
 
 function fakeOriginate(): void
 {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     config()->set('telephony.outbound.caller_id', OUTBOUND_CALLER_ID);
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 }

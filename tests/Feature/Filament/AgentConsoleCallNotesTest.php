@@ -50,7 +50,6 @@ function seedNotesCampaign(Tenant $tenant): array
 
 function fakeDial(): void
 {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     config()->set('telephony.outbound.caller_id', '18001234567');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 }

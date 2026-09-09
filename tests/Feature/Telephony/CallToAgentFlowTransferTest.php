@@ -21,8 +21,6 @@ beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agen
  * SwitchboardTest; here we drive one handler directly via beginTransfer().
  */
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);   // the single-endpoint fallback rings 'PJSIP/1003'
     fakeAgentRouter();                                  // reserves agent 6 for both A and B by default
     fakeNumberDirectory();                              // resolves the call's dialled number to its company
     Queue::fake();

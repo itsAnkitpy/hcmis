@@ -31,8 +31,9 @@ beforeEach(function () {
     createAsteriskPhoneTables();
     config()->set('telephony.agent.ws_url', 'ws://127.0.0.1:8088/ws');
     config()->set('telephony.agent.sip_domain', 'asterisk.lab');
-    // The dead fallback, left populated so every refusal below is asserted with a real
-    // extension and a real password sitting right there to be handed out.
+    // The dead fallback. These keys are gone from config/telephony.php (PP-15) and are
+    // set here on purpose, so every refusal below is asserted with a real extension and a
+    // real password sitting right there to be handed out, not merely absent.
     config()->set('telephony.agent.extension', '1003');
     config()->set('telephony.agent.password', 'legacy-secret');
     config()->set('telephony.agent.endpoint', 'PJSIP/1003');

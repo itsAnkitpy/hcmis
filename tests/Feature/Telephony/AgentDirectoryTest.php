@@ -10,10 +10,13 @@ use Illuminate\Support\Facades\DB;
  * SEC-1 slice 4 (PP-11/PP-12) — the agent->phone directory now reads
  * `users.sip_extension`, and neither of its two lookups falls back any more.
  *
- * 🔴 The old single-agent config is deliberately still populated below. Every
- * refusal here is asserted with `1003` and `legacy-secret` sitting right there
- * to be handed out, which is exactly what the removed fallback used to do: an
- * unmapped agent's browser registered as 1003 and their calls rang 1003.
+ * 🔴 Those config keys no longer exist — SEC-1 slice 5 (PP-15) deleted them from
+ * `config/telephony.php`. Setting them below is deliberate, and the point: every
+ * refusal here is asserted with `1003` and `legacy-secret` sitting right there to
+ * be handed out, which is exactly what the removed fallback used to do (an
+ * unmapped agent's browser registered as 1003 and their calls rang 1003). Put a
+ * fallback back and these tests go red; delete these lines and they only prove
+ * there was nothing to find.
  */
 uses(RefreshDatabase::class);
 

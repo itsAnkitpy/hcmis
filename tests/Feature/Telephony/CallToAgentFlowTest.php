@@ -28,8 +28,6 @@ beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agen
  * builders (stasisStart/channelDestroyed/recordingFinished) live in tests/Pest.php.
  */
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);   // these tests use the single-endpoint fallback
 
     // B2.2b: the inbound flow now reserves a free agent before ringing. These mechanics
     // tests stub the router to always hand back one agent (so the resolver's fallback

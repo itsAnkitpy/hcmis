@@ -20,8 +20,6 @@ beforeEach(fn () => fakeAgentDirectory());   // SEC-1 slice 4: the reserved agen
  * CallToAgentFlowTest; here we prove the multiplexing on top of it.
  */
 beforeEach(function () {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
-    config()->set('telephony.agent.directory', []);   // the single-endpoint fallback rings 'PJSIP/1003'
 
     // B2.2b: each per-call handler reserves a free agent before ringing. The switchboard
     // tests prove the multiplexing/isolation, not the routing DB, so the router is stubbed

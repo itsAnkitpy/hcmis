@@ -35,7 +35,6 @@ afterEach(function () {
  */
 function consoleDialing(Tenant $tenant, string $number): Testable
 {
-    config()->set('telephony.agent.endpoint', 'PJSIP/1003');
     Http::fake(['*' => Http::response(['id' => 'agent-leg'])]);
 
     return Livewire::test(AgentConsole::class)->call('dialAdhoc', $number);
