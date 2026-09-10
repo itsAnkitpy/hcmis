@@ -18,7 +18,8 @@ use Illuminate\Support\Carbon;
  * TRAI register is a separate, non-tenant table (national_dnc_entries), so this
  * model never holds a "global" row (M6 D-M6-1).
  *
- * Data only: nothing here blocks a dial — scrub-before-dial enforcement is
+ * blocks() is the one question every caller asks of this list before dialing —
+ * the console today, the dialer next (DIAL-1 A1). The NATIONAL scrub is still
  * Phase 3. expires_at is stored and displayed but not enforced (D-M6-8).
  *
  * @property int $id
@@ -50,6 +51,24 @@ class DncEntry extends Model
             'source' => DncSource::class,
             'expires_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Whether a (normalized) number is on the current client's do-not-call list
+     * (M6 O1). Tenant-walled for free by BelongsToTenant + RLS, so it answers only
+     * for the client whose context is running — another client's list never blocks
+     * here. Presence is the block: expiry is stored but not enforced (D-M6-8), so
+     * the safe compliance default is to block on any match.
+     *
+     * It lived as a private method on the agent console, so a background program
+     * could not ask the same question. Both callers — the console and the coming
+     * dialer (DIAL-1 A1) — now read the identical rule, which is the point: two
+     * definitions of "must not call this person" is the one duplication in this
+     * module with a legal consequence.
+     */
+    public static function blocks(string $phone): bool
+    {
+        return static::query()->where('phone', $phone)->exists();
     }
 
     /**

@@ -8,10 +8,13 @@ use App\Enums\CampaignCategory;
 use App\Enums\CampaignTemplate;
 use App\Enums\DialMode;
 use App\Tenancy\BelongsToTenant;
+use App\Tenancy\TenantContext;
 use Database\Factories\CampaignFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
 /**
  * A calling drive a client runs (FR-LC01). Tenant-owned: every campaign carries
@@ -108,6 +111,42 @@ class Campaign extends Model
         SeedCampaignDispositions::run($campaign);
 
         return $campaign;
+    }
+
+    /**
+     * The campaigns the dialer should be working RIGHT NOW (DIAL-1 A2): active,
+     * progressive, switched on, and inside their own calling window. One place, so
+     * the stop switch and the calling window can never disagree — "is_dialing off"
+     * and "past the stop time" are the same answer to the same question, which is
+     * half of DP-10 before any dialing exists.
+     *
+     * 🔴 The window is compared against the CLIENT's clock, not the app's. `app.timezone`
+     * is UTC, but the panel reads in TenantContext::reportTimezone() and both TimePickers
+     * are pinned so nothing is converted on save (S118) — so the stored digits ARE the
+     * client's wall clock. Against a UTC now(), a 10:00–21:00 window would dial from
+     * 15:30 to 02:30 India time: the exact thing G2's promotional clamp exists to stop,
+     * with a legal-looking window still showing on the form.
+     *
+     * The end is strict: a window that stops at 21:00 places no call AT 21:00:00. No
+     * wrap-around case to handle — the form refuses a window that ends before it starts
+     * (F5), and if that check is ever dropped this scope matches nothing rather than
+     * dialing at the wrong hour.
+     *
+     * Tenant-walled for free by BelongsToTenant + RLS, exactly like Lead::callable.
+     *
+     * @param  Builder<Campaign>  $query
+     * @return Builder<Campaign>
+     */
+    public function scopeDialable(Builder $query): Builder
+    {
+        $now = Carbon::now(TenantContext::reportTimezone())->format('H:i:s');
+
+        return $query
+            ->where('is_active', true)
+            ->where('dial_mode', DialMode::Progressive->value)
+            ->where('is_dialing', true)
+            ->where('dial_start_time', '<=', $now)
+            ->where('dial_end_time', '>', $now);
     }
 
     /**

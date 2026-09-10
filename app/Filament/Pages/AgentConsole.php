@@ -759,7 +759,7 @@ class AgentConsole extends Page
             return ['outcome' => 'none'];
         }
 
-        if ($this->isDncListed($lead->phone)) {
+        if (DncEntry::blocks($lead->phone)) {
             return $this->blockServedLead($lead);
         }
 
@@ -820,7 +820,7 @@ class AgentConsole extends Page
 
         $lead = $callback->lead;
 
-        if ($this->isDncListed($lead->phone)) {
+        if (DncEntry::blocks($lead->phone)) {
             return $this->blockCallback($callback, $lead);
         }
 
@@ -869,7 +869,7 @@ class AgentConsole extends Page
         // call's customer (decision C). Re-matched below, once the number is known.
         $this->resetMatch();
 
-        if ($this->isDncListed($phone)) {
+        if (DncEntry::blocks($phone)) {
             Audit::dncBlocked(null, $phone);
 
             return ['outcome' => 'blocked', 'phone' => $phone];
@@ -1125,18 +1125,6 @@ class AgentConsole extends Page
     public function resumeCall(): void
     {
         app(TelephonyProvider::class)->signal('resume', ['agentUserId' => (string) auth()->id()]);
-    }
-
-    /**
-     * Whether a (normalized) number is on the agent's own client's Do-Not-Call
-     * list (O1). Runs in the web request's tenant context, so BelongsToTenant +
-     * RLS wall the check to this client — another client's list never blocks here.
-     * Presence is the block: expiry is stored but not enforced (M6 D-M6-8), so the
-     * safe compliance default is to block on any match.
-     */
-    private function isDncListed(string $phone): bool
-    {
-        return DncEntry::query()->where('phone', $phone)->exists();
     }
 
     /**

@@ -10,6 +10,7 @@ use App\Models\Lead;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Livewire\Features\SupportTesting\Testable;
 use Livewire\Livewire;
 
@@ -220,4 +221,98 @@ it('refuses a window that ends before it starts instead of saving one that never
         'dial_start_time' => '21:00',
         'dial_end_time' => '06:00',
     ])->assertHasFormErrors(['dial_end_time']);
+});
+
+// --- A2: Campaign::dialable() — should this campaign be dialing right now? ---
+
+/**
+ * The four switches, asked once. A campaign comes back only when every one of them
+ * says yes, which is what stops the stop switch and the calling window from ever
+ * disagreeing (DP-10, half of it, before any dialing exists).
+ */
+it('returns only the campaign that is active, progressive, switched on and inside its window', function () {
+    $this->travelTo(Carbon::parse('2026-09-10 12:00:00', 'Asia/Kolkata'));
+
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function () {
+        $on = ['dial_mode' => DialMode::Progressive, 'is_dialing' => true];
+
+        $dialing = Campaign::factory()->create($on);
+        Campaign::factory()->create($on + ['is_active' => false]);
+        Campaign::factory()->create(['dial_mode' => DialMode::Manual, 'is_dialing' => true]);
+        Campaign::factory()->create(['dial_mode' => DialMode::Progressive, 'is_dialing' => false]);
+
+        expect(Campaign::dialable()->pluck('id')->all())->toBe([$dialing->id]);
+    });
+});
+
+/**
+ * Both edges of the default 10:00–21:00 band. The stop time is STRICT: a window that
+ * says stop at 21:00 places no call AT 21:00:00 — the cheap side to be wrong on when
+ * the boundary is a legal one (G2).
+ */
+it('opens the window at the start time and closes it ON the stop time', function () {
+    $tenant = Tenant::factory()->create();
+
+    $campaignId = TenantContext::run($tenant->id, fn (): int => Campaign::factory()->create([
+        'dial_mode' => DialMode::Progressive,
+        'is_dialing' => true,
+    ])->id);
+
+    $dialableAt = function (string $time) use ($tenant): bool {
+        $this->travelTo(Carbon::parse('2026-09-10 '.$time, 'Asia/Kolkata'));
+
+        return TenantContext::run($tenant->id, fn (): bool => Campaign::dialable()->exists());
+    };
+
+    expect($dialableAt('09:59:59'))->toBeFalse()
+        ->and($dialableAt('10:00:00'))->toBeTrue()
+        ->and($dialableAt('20:59:59'))->toBeTrue()
+        ->and($dialableAt('21:00:00'))->toBeFalse();
+
+    expect($campaignId)->toBeInt();
+});
+
+/**
+ * 🔴 F7 — the window is the CLIENT's wall clock, not the app's. `app.timezone` is UTC
+ * and the TimePickers are pinned so nothing is converted on save (S118), so a stored
+ * 10:00 means 10:00 in India. Read against a UTC now(), BOTH answers below invert: the
+ * dialer would sit idle all morning and then call customers at quarter past nine at
+ * night, with a legal-looking window still showing on the form.
+ */
+it('reads the window in India time, not the UTC application clock', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, fn () => Campaign::factory()->create([
+        'dial_mode' => DialMode::Progressive,
+        'is_dialing' => true,
+    ]));
+
+    // 04:35 UTC is 10:05 in India — inside the window. Against UTC it reads as 04:35, outside.
+    $this->travelTo(Carbon::parse('2026-09-10 04:35:00', 'UTC'));
+    expect(TenantContext::run($tenant->id, fn (): bool => Campaign::dialable()->exists()))->toBeTrue();
+
+    // 15:45 UTC is 21:15 in India — past the stop time. Against UTC it reads as 15:45, inside.
+    $this->travelTo(Carbon::parse('2026-09-10 15:45:00', 'UTC'));
+    expect(TenantContext::run($tenant->id, fn (): bool => Campaign::dialable()->exists()))->toBeFalse();
+});
+
+/**
+ * And it is the client's OWN zone, not a hardcoded India — a client who set their
+ * timezone (CE-10) gets their window read in it. Guards against anyone "simplifying"
+ * TenantContext::reportTimezone() down to a constant.
+ */
+it('reads the window in a client\'s own timezone when they have set one', function () {
+    $tenant = Tenant::factory()->create(['timezone' => 'Asia/Dubai']);
+
+    TenantContext::run($tenant->id, fn () => Campaign::factory()->create([
+        'dial_mode' => DialMode::Progressive,
+        'is_dialing' => true,
+    ]));
+
+    // 16:30 UTC is 20:30 in Dubai — inside. It is 22:00 in India, which is not.
+    $this->travelTo(Carbon::parse('2026-09-10 16:30:00', 'UTC'));
+
+    expect(TenantContext::run($tenant->id, fn (): bool => Campaign::dialable()->exists()))->toBeTrue();
 });
