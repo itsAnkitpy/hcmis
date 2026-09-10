@@ -286,6 +286,17 @@ class AgentConsole extends Page
         AgentPresence::query()
             ->where('user_id', auth()->id())
             ->update(['last_seen_at' => now()]);
+
+        // DIAL-1 DP-3a: the same tick re-stamps the claim on the lead this screen is
+        // holding. A claim expires in 90 seconds (Lead::CLAIM_TTL_SECONDS) — right for
+        // a dial that is still ringing, far too short for a conversation, so without
+        // this a ten-minute call would be served to a second agent at second 91. The
+        // browser already sends this every ~15s, so it costs no new timer and no new
+        // round trip, and a closed laptop stops sending it — which is exactly when the
+        // lead SHOULD be released.
+        if ($this->matchedLeadId !== null) {
+            Lead::whereKey($this->matchedLeadId)->update(['claimed_at' => now()]);
+        }
     }
 
     /**
@@ -742,7 +753,7 @@ class AgentConsole extends Page
             return ['outcome' => 'nophone'];
         }
 
-        $lead = $this->nextCallableLead();
+        $lead = $this->claimNextCallableLead();
 
         if ($lead === null) {
             return ['outcome' => 'none'];
@@ -912,25 +923,52 @@ class AgentConsole extends Page
      * The serving query, shared by servedLead() (presentation) and dial()
      * (origination) so both always agree on "the next lead". Runs in tenant
      * context, so the tenant wall is automatic.
+     *
+     * The rule itself now lives on the model (Lead::callable, DIAL-1 DP-1) because
+     * the dialer has to ask the same question and cannot call a private method on a
+     * Livewire page. What stays here is what is genuinely the console's: its selected
+     * campaign, its per-session skip list, and the eager loads the lead card needs.
+     *
+     * @param  array<int, int>  $alsoExclude  leads THIS call has already passed on
      */
-    private function nextCallableLead(): ?Lead
+    private function nextCallableLead(array $alsoExclude = []): ?Lead
     {
         if ($this->selectedCampaignId === null) {
             return null;
         }
 
-        return Lead::query()
+        return Lead::callable($this->selectedCampaignId, [...$this->skippedLeadIds, ...$alsoExclude])
             ->with(['campaign', 'lastDisposition'])
-            ->where('campaign_id', $this->selectedCampaignId)
-            ->where('status', '!=', LeadStatus::Closed->value)
-            ->whereNotIn('id', $this->skippedLeadIds)
-            // A lead with a pending callback is parked (PR2): it surfaces only via
-            // the agent's due-list when due, never the normal preview. Once dialed
-            // (callback -> done), it returns to the pool.
-            ->whereDoesntHave('callbacks', fn ($query) => $query->where('status', CallbackStatus::Pending))
-            ->orderBy('attempts')
-            ->orderBy('id')
             ->first();
+    }
+
+    /**
+     * The next callable lead this agent actually HOLDS — serve, claim, and if
+     * somebody beat us to it, move to the next one (DIAL-1 DP-3a).
+     *
+     * Claiming happens here, at dial, and deliberately not in servedLead(): the
+     * preview polls, so claiming on display would let an agent who is only looking
+     * at the screen sit on a lead nobody can work.
+     *
+     * A lost claim adds that lead to this call's own exclude list rather than
+     * trusting the next serve to skip it. Same result while the two queries agree,
+     * but termination is then structural: each pass drops one lead, so the worst
+     * case walks the campaign once. Leaving it to the serving rule spins on a live
+     * CPU for as long as the claim lasts the day those two ever disagree.
+     */
+    private function claimNextCallableLead(): ?Lead
+    {
+        $lost = [];
+
+        while (($lead = $this->nextCallableLead($lost)) !== null) {
+            if ($lead->claim()) {
+                return $lead;
+            }
+
+            $lost[] = $lead->id;
+        }
+
+        return null;
     }
 
     /**
@@ -1334,6 +1372,10 @@ class AgentConsole extends Page
             $lead->update([
                 'last_disposition_id' => $disposition->id,
                 'attempts' => $lead->attempts + 1,
+                // DIAL-1 DP-3: the call is over, so the lead goes back in the pool.
+                // Its claim would expire on its own; releasing it here is what makes
+                // a re-dial immediate rather than 90 seconds away.
+                'claimed_at' => null,
                 'status' => (new AdvanceLeadStatus)($lead->status, $disposition->is_contact),
                 // CF-6: MERGE, for the same reason saveCustomer merges — a box this
                 // screen never drew, or one added to the campaign an hour ago, must not

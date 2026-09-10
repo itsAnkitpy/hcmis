@@ -3,15 +3,18 @@
 namespace App\Models;
 
 use App\Audit\LogsModelActivity;
+use App\Enums\CallbackStatus;
 use App\Enums\LeadStatus;
 use App\Support\PhoneNumber;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\LeadFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
 /**
  * A contact record an agent works (FR-LC01–04). Tenant-owned and bound to one
@@ -29,12 +32,24 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property LeadStatus $status
  * @property int|null $last_disposition_id
  * @property int $attempts
+ * @property Carbon|null $claimed_at
  * @property array<string, mixed> $custom_fields
  */
 class Lead extends Model
 {
     /** @use HasFactory<LeadFactory> */
     use BelongsToTenant, HasFactory, LogsModelActivity;
+
+    /**
+     * How long a claim holds a lead before the serving query treats it as expired
+     * (DIAL-1 DP-3). Long enough to cover a dial that is still ringing, short
+     * enough that a crashed dialer or a closed browser tab frees the lead without
+     * a release job — the expiry is a WHERE clause, not a worker.
+     *
+     * A console holding a lead through a longer conversation re-stamps it on the
+     * heartbeat it already sends every ~15s, so a real call never outlives it.
+     */
+    public const CLAIM_TTL_SECONDS = 90;
 
     protected $fillable = [
         'campaign_id',
@@ -46,6 +61,7 @@ class Lead extends Model
         'status',
         'last_disposition_id',
         'attempts',
+        'claimed_at',
         'custom_fields',
     ];
 
@@ -57,6 +73,7 @@ class Lead extends Model
         return [
             'status' => LeadStatus::class,
             'attempts' => 'integer',
+            'claimed_at' => 'datetime',
             'custom_fields' => 'array',
         ];
     }
@@ -110,6 +127,77 @@ class Lead extends Model
     public function callbacks(): HasMany
     {
         return $this->hasMany(Callback::class);
+    }
+
+    /**
+     * The one serving rule: the next lead worth working on a campaign (DIAL-1
+     * DP-1). Not Closed, fewest attempts first then oldest, never one parked by a
+     * pending callback, never one another caller is already holding.
+     *
+     * It lived as a private method on the agent console, so a background program
+     * could not ask the same question. Both callers — the console and the coming
+     * dialer — now read the identical rule, which is the point: two definitions of
+     * "next lead" is how a floor and a dialer end up dialing different people.
+     *
+     * $excludeIds is the caller's own skip list (the console's per-session passes).
+     * Tenant-walled for free by BelongsToTenant + RLS.
+     *
+     * @param  array<int, int>  $excludeIds
+     * @param  Builder<Lead>  $query
+     * @return Builder<Lead>
+     */
+    public function scopeCallable(Builder $query, int $campaignId, array $excludeIds = []): Builder
+    {
+        return $query
+            ->where('campaign_id', $campaignId)
+            ->where('status', '!=', LeadStatus::Closed->value)
+            ->when($excludeIds !== [], fn (Builder $query) => $query->whereNotIn('id', $excludeIds))
+            ->unclaimed()
+            // A lead with a pending callback is parked (PR2): it surfaces only via
+            // the agent's due-list when due, never the normal preview. Once dialed
+            // (callback -> done), it returns to the pool.
+            ->whereDoesntHave('callbacks', fn ($query) => $query->where('status', CallbackStatus::Pending))
+            ->orderBy('attempts')
+            ->orderBy('id');
+    }
+
+    /**
+     * Free to take: nobody holds it, or whoever did has gone quiet for longer than
+     * CLAIM_TTL_SECONDS. One definition of "expired", shared by the serving rule and
+     * by claim() itself, so a lead can never be served by one test and refused by the
+     * other.
+     *
+     * @param  Builder<Lead>  $query
+     * @return Builder<Lead>
+     */
+    public function scopeUnclaimed(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $query) => $query
+            ->whereNull('claimed_at')
+            ->orWhere('claimed_at', '<', now()->subSeconds(self::CLAIM_TTL_SECONDS)));
+    }
+
+    /**
+     * Take this lead, or find out somebody else already did (DIAL-1 DP-3).
+     *
+     * The conditional-update shape AgentRouter::reserveFreeAgent uses for desks:
+     * update only the row that still matches, then check exactly one row changed.
+     * The database decides the winner, so two agents pressing Dial in the same
+     * second cannot both be handed this lead — which they can TODAY, because
+     * `attempts` is only bumped at wrap-up and the console's skip list is
+     * per-session.
+     *
+     * Released by setting `claimed_at` null at wrap-up. A claim nobody releases
+     * expires on its own (scopeUnclaimed), so there is no timeout worker.
+     */
+    public function claim(): bool
+    {
+        $claimed = static::query()
+            ->whereKey($this->getKey())
+            ->unclaimed()
+            ->update(['claimed_at' => now()]);
+
+        return $claimed === 1;
     }
 
     /**
