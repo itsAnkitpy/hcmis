@@ -157,7 +157,10 @@ class CampaignForm
                             ->suffix('attempts')
                             ->helperText('Stop serving a number that never answers. Blank keeps trying, which is what every campaign does today.'),
                     ])
-                    ->columns(2),
+                    // The resource form is a 2-column grid, so without this the whole
+                    // section is squeezed into one half-width slot next to Template.
+                    ->columnSpanFull()
+                    ->columns(3),
 
                 CampaignCustomFields::definitionRepeater()
                     ->columnSpanFull(),
