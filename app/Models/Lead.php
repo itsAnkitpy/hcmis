@@ -153,6 +153,17 @@ class Lead extends Model
             ->where('status', '!=', LeadStatus::Closed->value)
             ->when($excludeIds !== [], fn (Builder $query) => $query->whereNotIn('id', $excludeIds))
             ->unclaimed()
+            // DIAL-1 DP-6: a number that has been tried its campaign's limit of times
+            // stops being served. Read live off the campaign rather than copied onto the
+            // lead, so raising the cap puts every capped-out lead straight back in the
+            // pool with no backfill.
+            //
+            // A null max_attempts is no cap — which is every campaign today — and needs
+            // no clause of its own: `attempts >= NULL` is NULL, never true, so the inner
+            // EXISTS finds nothing and the lead stays servable. An explicit whereNotNull
+            // was here and removed once a break test proved no change could make it fail.
+            ->whereDoesntHave('campaign', fn (Builder $query) => $query
+                ->whereColumn('leads.attempts', '>=', 'campaigns.max_attempts'))
             // A lead with a pending callback is parked (PR2): it surfaces only via
             // the agent's due-list when due, never the normal preview. Once dialed
             // (callback -> done), it returns to the pool.
