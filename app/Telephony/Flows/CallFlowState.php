@@ -32,6 +32,20 @@ enum CallFlowState
     /** Outbound: agent leg is up; the customer's phone is ringing (awaiting pickup or timeout). */
     case RingingCustomer;
 
+    /**
+     * Progressive dial (DIAL-1 A3): the DIALER placed the customer leg and nobody is on
+     * our side of it yet — a desk is booked on the board, but no agent leg exists. The
+     * customer answering is what starts the ring (A4); the leg ending first is a plain
+     * no-answer.
+     *
+     * 🔴 Deliberately NOT RingingCustomer, which looks identical and is not. That state
+     * means an agent is already on the line, so a leg ending there is a customer who
+     * abandoned, and it writes CallOutcome::Abandoned. Abandoned is the number DP-12a
+     * counts against the 3% legal cap — filing ordinary no-answers there would put a
+     * compliant floor over the line on paper. Most progressive dials go unanswered.
+     */
+    case DialingCustomer;
+
     /** The caller is joined to one or more connected agents and being recorded. */
     case InCall;
 

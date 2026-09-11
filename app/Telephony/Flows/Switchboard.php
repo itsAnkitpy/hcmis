@@ -102,7 +102,10 @@ class Switchboard implements HandlerRegistry
      *  - []  (untagged outside caller)          -> a NEW inbound call: make a handler.
      *  - ['agent', <number>, <uuid?>]           -> a NEW outbound call (the agent-first leg):
      *                                              make a handler.
-     *  - anything else with no known leg        -> dropped (harmless).
+     *  - ['dialer'] / ['agent'] / ['outbound'] with no known leg
+     *                                           -> a leg WE placed whose handler is gone
+     *                                              (a restart mid-call): hung up, R8.
+     *  - anything else with no known leg        -> dropped (not ours to end).
      *
      * Handlers register the legs they place BEFORE those legs' StasisStart arrives, so
      * the only un-registered arrivals are genuinely new calls.
@@ -131,6 +134,31 @@ class Switchboard implements HandlerRegistry
             $handler = new CallToAgentFlow($this->telephony, $this);
             $this->registerLeg($legId, $handler);
             $this->dispatch($handler, $event);
+
+            return;
+        }
+
+        // 🔴 A LEG WE PLACED, WHOSE HANDLER WE HAVE LOST (DIAL-1 R8). Handlers register
+        // every leg they place BEFORE its arrival, so one of our own tags reaching here
+        // unregistered means the handler that placed it is gone — a listener restart
+        // mid-call, which Asterisk survives without hanging anything up (it deactivates
+        // the application and reactivates it on reconnect).
+        //
+        // Dropping it, which is what used to happen, strands whoever is on that line in
+        // silence: no music, no agent, no hangup, until they give up. The dialer makes one
+        // of these per campaign per second, but it was never dialer-only — an inbound
+        // ring's `agent` leg and the console's `outbound` leg orphan exactly the same way.
+        //
+        // Ending it is the honest outcome. Nothing in this process can serve that call:
+        // its client, its lead, its booked desk and its ticket all died with the handler.
+        // The desk is put back by the reservation reaper within the minute.
+        if (in_array($args, [['dialer'], ['agent'], ['outbound']], true)) {
+            Log::warning('A leg we placed arrived with no handler to receive it — ending it rather than leaving the line silent.', [
+                'leg' => $legId,
+                'tag' => $args[0],
+            ]);
+
+            rescue(fn () => $this->telephony->hangup($legId), report: false);
         }
     }
 
@@ -349,6 +377,13 @@ class Switchboard implements HandlerRegistry
                 CallFlowState::InCall, CallFlowState::AddingAgent => 'active',
                 CallFlowState::RingingAgent, CallFlowState::RingingCustomer => 'ringing',
                 CallFlowState::Waiting => 'waiting',
+                // A progressive dial nobody has answered yet belongs in no column: there
+                // is no caller on the line and no desk's phone is ringing (DIAL-1 A4).
+                // 🔴 An arm, not a default. This match is exhaustive on purpose, so the
+                // NEXT state added still has to be given a home here deliberately — and
+                // adding one without it throws on every publish, which rescue() swallows
+                // into a log while the whole box's board silently stops updating.
+                CallFlowState::DialingCustomer => null,
                 CallFlowState::Idle => null,
             };
 
@@ -379,6 +414,60 @@ class Switchboard implements HandlerRegistry
     public function activeCallCount(): int
     {
         return count($this->uniqueHandlers());
+    }
+
+    /**
+     * Close the switchboard down: end every live call, hand back every desk, and write
+     * the row for anyone who never reached an agent (DIAL-1 R8). Called when the process
+     * is asked to stop — a deploy or a systemd restart — while the line to Asterisk is
+     * still up.
+     *
+     * 🔴 The alternative is not "nothing happens", it is a phone that goes on ringing a
+     * customer nobody will answer for. Asterisk keeps the channels when our connection
+     * goes, so without this a dial in flight rings on, the customer says hello, and the
+     * NEXT listener hangs up on them — an answered call ended in a second, which is
+     * exactly what DP-12a counts against the 3% cap. Ending the ring before it is
+     * answered leaves nothing to count.
+     *
+     * Best-effort per call, so one stubborn leg cannot keep the rest ringing. Ordinary
+     * teardown otherwise: discard() is the same tidy-up the failure backstop uses.
+     */
+    public function drain(): void
+    {
+        foreach ($this->uniqueHandlers() as $handler) {
+            rescue(fn () => $handler->discard(), report: false);
+            $this->release($handler);
+        }
+    }
+
+    /**
+     * Every desk held by a live call, by client (DIAL-1 R8). The reaper's safe list: an
+     * agent tagged On a call who appears here is genuinely busy on a call this process is
+     * running, and one who does not appear is held by nothing we know of.
+     *
+     * A handler with no client yet (an inbound leg whose dialled number was not
+     * recognised) is skipped — it holds no reservation either, because booking a desk
+     * needs a client to book it in.
+     *
+     * @return array<int, array<int, int>>
+     */
+    public function heldDesksByTenant(): array
+    {
+        $held = [];
+
+        foreach ($this->uniqueHandlers() as $handler) {
+            $tenantId = $handler->tenantId();
+
+            if ($tenantId === null) {
+                continue;
+            }
+
+            foreach ($handler->heldAgentIds() as $agentUserId) {
+                $held[$tenantId][$agentUserId] = $agentUserId;
+            }
+        }
+
+        return array_map(array_values(...), $held);
     }
 
     /**

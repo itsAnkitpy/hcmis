@@ -48,8 +48,11 @@ use Illuminate\Support\Carbon;
  *
  * "The far end" because the middle three read the same way in both directions: inbound
  * it is the agent's phone ringing and the agent picking up, outbound it is the
- * customer's (CT-16). `started_at` is the one that is inbound-only — an outbound call
- * has no arrival because nobody waited, we placed it (CT-8), so its "waited" is blank.
+ * customer's (CT-16). `started_at` is the odd one out: a CONSOLE outbound call has no
+ * arrival because nobody waited, the agent placed it (CT-8), so its "waited" is blank.
+ * A call the progressive dialer placed and the customer ANSWERED does carry one (F16) —
+ * they were on the line, holding, while the desk we promised them rang — measured from
+ * their hello, never from the dial. An unanswered dial writes no row at all.
  *
  * All four are stamped by the listener onto the handoff note and copied here by the
  * wrap-up (CT-3), so they share one clock. Any of them may be null — a missing moment

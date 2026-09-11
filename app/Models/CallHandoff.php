@@ -48,6 +48,7 @@ use Illuminate\Support\Carbon;
  * @property int $agent_user_id
  * @property string $ticket
  * @property string|null $dialled_number
+ * @property bool $was_dialled
  * @property Carbon|null $arrived_at
  * @property Carbon|null $answered_at
  * @property Carbon|null $ended_at
@@ -65,6 +66,10 @@ class CallHandoff extends Model
         'agent_user_id',
         'ticket',
         'dialled_number',
+        // DIAL-1 F15: did WE place this call? The dialer's customer reaches the agent as
+        // a ring and a screen pop, exactly like an inbound caller, so the console cannot
+        // tell them apart without being told — and it writes the row's direction.
+        'was_dialled',
         'arrived_at',
         'answered_at',
         'ended_at',
@@ -81,6 +86,7 @@ class CallHandoff extends Model
     protected function casts(): array
     {
         return [
+            'was_dialled' => 'boolean',
             'arrived_at' => 'datetime',
             'answered_at' => 'datetime',
             'ended_at' => 'datetime',

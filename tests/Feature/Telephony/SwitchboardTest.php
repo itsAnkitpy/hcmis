@@ -461,3 +461,76 @@ it('sweeps an empty switchboard without complaint', function () {
 
     expect($switchboard->activeCallCount())->toBe(0);
 });
+
+/**
+ * 🔴 DIAL-1 R8 — a leg WE placed, arriving at a switchboard that has lost its handler.
+ * That is what a listener restart mid-call looks like from the other side: Asterisk keeps
+ * the channels when our connection drops (it deactivates the application and reactivates
+ * it on reconnect), so the customer's phone is still ringing and the new process has no
+ * memory of why. Dropping the arrival, which is what used to happen, leaves whoever
+ * answers in silence — no music, no agent, no hangup — until they give up.
+ *
+ * Never dialer-only: an inbound ring's `agent` leg and the console's `outbound` leg orphan
+ * exactly the same way. The dialer is what makes it one per campaign per second.
+ */
+it('ends a leg we placed when its handler is gone, instead of leaving the line silent', function (string $tag) {
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('hangup')->once()->with('orphan-leg');
+    // 🔴 And makes no attempt to serve it: nothing in this process can. Its client, lead,
+    // booked desk and ticket all died with the handler.
+    $telephony->shouldNotReceive('placeCall');
+    $telephony->shouldNotReceive('answer');
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('orphan-leg', [$tag]));
+
+    expect($switchboard->activeCallCount())->toBe(0);
+})->with(['dialer', 'agent', 'outbound']);
+
+/**
+ * The other side of the same coin: a tag that is not one of ours is left alone. Ending a
+ * channel some other application put in this app would be us reaching outside our own
+ * calls, which is a worse habit than a dropped event.
+ */
+it('leaves a leg alone when the tag is not one we place', function () {
+    $telephony = fakeTelephony();
+    $telephony->shouldNotReceive('hangup');
+
+    (new Switchboard($telephony))->handle(stasisStart('somebody-elses-leg', ['weather-line']));
+});
+
+/**
+ * 🔴 The deploy path (R8). Asked to stop, the switchboard ends what it is holding rather
+ * than leaving it for the next process to find. Without this a dial in flight rings on,
+ * the customer says hello, and the NEXT listener hangs up on them — an answered call ended
+ * in a second, which is exactly what DP-12a counts against the 3% legal cap. Ending the
+ * ring before anyone answers leaves nothing to count.
+ */
+it('ends every live call and hands back every desk when the process is asked to stop', function () {
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('answer')->once()->with('caller-A');
+    $telephony->shouldReceive('placeCall')->once()->andReturn('agent-A');
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-A', []));
+
+    expect($switchboard->activeCallCount())->toBe(1);
+
+    // Both legs go: the caller's and the desk phone still ringing for them.
+    $telephony->shouldReceive('hangup')->once()->with('caller-A');
+    $telephony->shouldReceive('hangup')->once()->with('agent-A');
+
+    $switchboard->drain();
+
+    expect($switchboard->activeCallCount())->toBe(0)
+        ->and($switchboard->heldDesksByTenant())->toBe([]);
+});
+
+it('drains an empty switchboard without complaint', function () {
+    $telephony = fakeTelephony();
+    $telephony->shouldNotReceive('hangup');
+
+    (new Switchboard($telephony))->drain();
+
+    expect(true)->toBeTrue();
+});

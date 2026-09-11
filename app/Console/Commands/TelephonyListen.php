@@ -12,8 +12,11 @@ use App\Telephony\AriConnectionLost;
 use App\Telephony\AriWebSocket;
 use App\Telephony\Flows\Switchboard;
 use App\Telephony\LiveCallCounts;
+use App\Telephony\ProgressiveDialer;
+use App\Telephony\ReservationReaper;
 use App\Telephony\TelephonyException;
 use App\Telephony\TelephonyProvider;
+use ErrorException;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
@@ -85,6 +88,23 @@ class TelephonyListen extends Command
     private const PUBLISH_EVERY_SECONDS = 5.0;
 
     /**
+     * How often the progressive dialer takes a pass (DIAL-1 DP-7). Gated like the two
+     * above, and for one more reason of its own: this gate IS how fast a desk fills after
+     * wrap-up. A second is short enough that an agent going Ready barely waits, and long
+     * enough that a busy line is not asking the same question hundreds of times a second.
+     */
+    private const DIAL_EVERY_SECONDS = 1.0;
+
+    /**
+     * How often a desk tagged On a call is checked against the calls actually running
+     * (DIAL-1 R8). Minutes-scale on purpose, and much slower than every other gate here:
+     * the thing it repairs is a leak that would otherwise last the rest of the shift, so
+     * a minute of lag costs nothing, and the pass asks the voice box a question whenever
+     * it finds a candidate — that belongs nowhere near the once-a-second work.
+     */
+    private const REAP_EVERY_SECONDS = 60.0;
+
+    /**
      * How often this process leaves a mark saying it is still turning (S119 A1). Read from
      * outside by deploy/telephony-watchdog.sh, which restarts a listener whose mark has gone
      * stale. Gated for the same reason the two above are: on a busy line the loop turns per
@@ -101,9 +121,25 @@ class TelephonyListen extends Command
     /** When the heartbeat file was last touched (the same kind of clock, same job). */
     private float $lastBeatAt = 0.0;
 
+    /** When the dialer last took a pass (the same kind of clock, same job). */
+    private float $lastDialedAt = 0.0;
+
+    /** When the reaper last took a pass (the same kind of clock, same job). */
+    private float $lastReapedAt = 0.0;
+
+    /**
+     * Has this process been asked to stop (DIAL-1 R8)? Set by the signal trap, read at
+     * the top of both loops. A flag rather than an exception because a signal can land
+     * anywhere — mid-dial, mid-bridge — and the only safe place to act on it is between
+     * two whole passes of the loop.
+     */
+    private bool $draining = false;
+
     public function __construct(
         private readonly TelephonyProvider $telephony,
         private readonly LiveCallCounts $counts,
+        private readonly ProgressiveDialer $dialer,
+        private readonly ReservationReaper $reaper,
     ) {
         parent::__construct();
     }
@@ -111,11 +147,17 @@ class TelephonyListen extends Command
     public function handle(): void
     {
         $backoff = self::BACKOFF_INITIAL_SECONDS;
+        // A deploy or a systemd restart arrives as a signal. Take it as "finish this pass,
+        // then close the switchboard down" — see Switchboard::drain for why the calls must
+        // be ended here rather than left ringing for the next process to hang up on.
+        $this->trap([SIGTERM, SIGINT], function (): void {
+            $this->draining = true;
+        });
         // Built ONCE, outside the reconnect loop: the calls survive a dropped pipe, so our
         // memory of them has to as well (S88 review #2 — see the note on this class).
         $switchboard = new Switchboard($this->telephony);
 
-        while (true) {
+        while (! $this->draining) {
             // Beat here as well as in listen(): a process sitting out a reconnect backoff is
             // healthy, and restarting it would throw away every live call the switchboard holds.
             $this->beat();
@@ -136,8 +178,18 @@ class TelephonyListen extends Command
                 $pipe->close();
                 sleep($backoff);
                 $backoff = min($backoff * 2, self::BACKOFF_MAX_SECONDS);
+            } catch (ErrorException $exception) {
+                // F18: SIGTERM mid-wait interrupts stream_select, and Laravel turns that
+                // warning into an ErrorException. The trap has already asked us to stop, so
+                // fall out to drain() rather than exit with the live calls still up.
+                if (! $this->draining) {
+                    throw $exception;
+                }
             }
         }
+
+        $this->info('Stopping — ending live calls and handing back their desks.');
+        $switchboard->drain();
     }
 
     private function makePipe(): AriWebSocket
@@ -163,12 +215,14 @@ class TelephonyListen extends Command
      */
     private function listen(AriWebSocket $pipe, Switchboard $switchboard): void
     {
-        while (true) {
+        while (! $this->draining) {
             $event = $pipe->readEvent(self::READ_TIMEOUT_SECONDS);
 
             $this->beat();
             $this->sweepWaitingCallers($switchboard);
             $this->publishCallCounts($switchboard);
+            $this->dialCampaigns($switchboard);
+            $this->reapStrandedDesks($switchboard);
 
             if ($event === null) {
                 $this->assertPipeAlive($pipe);
@@ -178,6 +232,65 @@ class TelephonyListen extends Command
 
             $this->translate($event);
             $switchboard->handle($event);
+        }
+    }
+
+    /**
+     * Let the progressive dialer take a pass, at most once every DIAL_EVERY_SECONDS
+     * (DIAL-1 DP-7). It rides this loop for the reason the sweep does — the listener is
+     * already turning, and it is the only process that hears a dial fail (DQ-1).
+     *
+     * Best-effort, the shape the count publisher already uses: a dialer that throws must
+     * never take the listener, and every live call with it, down with it. A lost line is
+     * the one exception — that is the reconnect's business, so it goes straight up.
+     */
+    private function dialCampaigns(Switchboard $switchboard): void
+    {
+        $now = microtime(true);
+
+        if ($now - $this->lastDialedAt < self::DIAL_EVERY_SECONDS) {
+            return;
+        }
+
+        $this->lastDialedAt = $now;
+
+        try {
+            $this->dialer->tick($switchboard);
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            Log::error('The progressive dialer stumbled on this pass; live calls are unaffected.', [
+                'error' => $exception->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Put back any desk tagged On a call with no call behind it, at most once every
+     * REAP_EVERY_SECONDS (DIAL-1 R8).
+     *
+     * Best-effort, the shape the dialer and the count publisher already use: this repairs
+     * a leak, so it must never be the thing that takes a listener carrying live calls
+     * down. A lost line still goes straight up — that is the reconnect's business.
+     */
+    private function reapStrandedDesks(Switchboard $switchboard): void
+    {
+        $now = microtime(true);
+
+        if ($now - $this->lastReapedAt < self::REAP_EVERY_SECONDS) {
+            return;
+        }
+
+        $this->lastReapedAt = $now;
+
+        try {
+            $this->reaper->tick($switchboard);
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            Log::error('The reservation reaper stumbled on this pass; live calls are unaffected.', [
+                'error' => $exception->getMessage(),
+            ]);
         }
     }
 

@@ -142,11 +142,31 @@ class Campaign extends Model
         $now = Carbon::now(TenantContext::reportTimezone())->format('H:i:s');
 
         return $query
-            ->where('is_active', true)
-            ->where('dial_mode', DialMode::Progressive->value)
-            ->where('is_dialing', true)
+            ->switchedOn()
             ->where('dial_start_time', '<=', $now)
             ->where('dial_end_time', '>', $now);
+    }
+
+    /**
+     * Everything dialable() asks EXCEPT the clock (DIAL-1 A3). Split out because the two
+     * halves are asked from different places: the tick has no client in scope, so it reads
+     * "who has a campaign switched on" across every client at once, then opens each of
+     * those clients in turn to ask the window question in that client's own clock (F7).
+     * One query on a quiet night instead of one per client per second.
+     *
+     * Split rather than repeated, for the reason A1 and A2 both exist: two spellings of
+     * "this campaign is switched on" is how a stop switch ends up meaning one thing to the
+     * dialer and another to the screen.
+     *
+     * @param  Builder<Campaign>  $query
+     * @return Builder<Campaign>
+     */
+    public function scopeSwitchedOn(Builder $query): Builder
+    {
+        return $query
+            ->where('is_active', true)
+            ->where('dial_mode', DialMode::Progressive->value)
+            ->where('is_dialing', true);
     }
 
     /**

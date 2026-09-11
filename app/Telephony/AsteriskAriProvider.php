@@ -113,6 +113,23 @@ class AsteriskAriProvider implements TelephonyProvider
         $this->command('DELETE', "/bridges/{$conversationId}");
     }
 
+    /**
+     * Every channel Asterisk currently has up, by name (R8). Not scoped to our app on
+     * purpose: the question the reaper asks is "is this agent's phone busy at all", and a
+     * channel that has left our app but is still up still means their handset is engaged.
+     *
+     * @return array<int, string>
+     */
+    public function liveChannelNames(): array
+    {
+        return array_values(array_filter(array_map(
+            fn (mixed $channel): ?string => is_array($channel) && is_string($channel['name'] ?? null)
+                ? $channel['name']
+                : null,
+            (array) $this->command('GET', '/channels')->json(),
+        )));
+    }
+
     public function startRecording(string $legId, string $name): RecordingSession
     {
         $session = new RecordingSession(

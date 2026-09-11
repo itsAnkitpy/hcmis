@@ -1559,19 +1559,44 @@ class AgentConsole extends Page
             ['notes' => ['nullable', 'string', 'max:2000']],
         )->validate()['notes'];
 
-        $isOutbound = $this->callDirection === CallDirection::Outbound;
         $moments = $this->handoffMoments();
         $sibling = $this->siblingRecording();
+
+        // 🔴 WHICH WAY ROUND THIS CALL WENT (DIAL-1 F15). `callDirection` says Outbound
+        // only when THIS agent dialled (originateAgentLeg). A call the progressive dialer
+        // placed arrives here as a ring and a screen pop — identical to an inbound caller
+        // from the console's side — so it left the default alone and every answered dial
+        // was filed as a call the customer made to US. The listener knows who placed it
+        // and now says so on the handoff note, which is ticket-matched to THIS call.
+        //
+        // Direction is not cosmetic: every reader picks the customer's side of a call off
+        // it (Call::forCustomer, the export's `customer`, the calls list), and it is what
+        // an outbound-volume or abandoned-rate report counts. The listener's own abandon
+        // row already writes Outbound on a dialled call — filing the answered ones as
+        // inbound would leave the two halves of one campaign disagreeing.
+        $agentDialledIt = $this->callDirection === CallDirection::Outbound;
+        $isOutbound = $agentDialledIt || (bool) $moments?->was_dialled;
+        $direction = $isOutbound ? CallDirection::Outbound : CallDirection::Inbound;
 
         // CE-6: on inbound, OUR number is the one they rang, and the listener now says
         // which. Before this it was simply null, so an answered inbound call exported a
         // blank in the column the client reads as "which line did this come in on".
-        $ourNumber = $isOutbound
+        //
+        // 🔴 This branches on who DIALLED, not on the direction just derived, and the two
+        // are no longer the same question. A dialled call is outbound but its number lives
+        // on the note like an inbound one's does — it presents the campaign's own caller
+        // ID (DQ-5), and the config default would file every campaign under the system
+        // number. Only this agent's own dial has no note by design, and only it reads the
+        // config. Written as `$isOutbound` this loses the campaign number on a dialled
+        // call; written as `?? config(...)` it hands an inbound call with no note our
+        // outbound caller ID as the line they supposedly rang. Both were measured. A blank
+        // stays a blank (CE-4).
+        $ourNumber = $agentDialledIt
             ? config('telephony.outbound.caller_id')
             : $moments?->dialled_number;
 
         Call::create([
-            'direction' => $this->callDirection,
+            'direction' => $direction,
             'from_number' => $isOutbound ? $ourNumber : $this->callPartyNumber,
             'to_number' => $isOutbound ? $this->callPartyNumber : $ourNumber,
             'lead_id' => $lead?->id,

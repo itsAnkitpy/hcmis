@@ -108,6 +108,20 @@ interface TelephonyProvider
     public function endConversation(string $conversationId): void;
 
     /**
+     * The names of every channel the voice box currently has up, e.g. `PJSIP/1101-0000a3`
+     * (DIAL-1 R8). Asked by the reservation reaper, and by nothing on a live call's path.
+     *
+     * 🔴 This is the ONE question our own memory cannot answer. When the ARI connection
+     * drops, Asterisk does not hang the channels up — it deactivates the application and
+     * reactivates it on reconnect — so a restarted listener can be looking at an agent
+     * who is genuinely mid-conversation while holding no handler for them. Reaping their
+     * desk off "no handler" alone would hand a talking agent back to the dialer.
+     *
+     * @return array<int, string>
+     */
+    public function liveChannelNames(): array;
+
+    /**
      * Record both sides of a leg's call (B1 D4): what that person says and
      * what they hear, as two separate files — the pair a queued job later
      * merges into the stereo MP3 (caller left, agent right, PW5-4).

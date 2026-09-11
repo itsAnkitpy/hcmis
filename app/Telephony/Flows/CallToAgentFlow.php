@@ -9,6 +9,8 @@ use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Models\Call;
 use App\Models\CallHandoff;
+use App\Models\Campaign;
+use App\Models\Lead;
 // The model, aliased: App\Support\PhoneNumber (the number formatter) already owns the
 // plain name across the codebase (AgentConsole).
 use App\Models\PhoneNumber as PhoneNumberRecord;
@@ -245,6 +247,22 @@ class CallToAgentFlow
 
     private ?int $heldByAgentId = null;
 
+    /**
+     * The lead this call was dialled from (DIAL-1 A3), held so a no-answer can count the
+     * attempt against it. Null on every other kind of call — inbound has no lead until
+     * the screen matches one, and the console's outbound counts its own attempt at
+     * wrap-up.
+     */
+    private ?int $dialedLeadId = null;
+
+    /**
+     * The campaign this call was dialled for (DIAL-1 A4). Held for the one row that can
+     * still be written after a dial connects — an abandon — because that row has to name
+     * the campaign that placed the call, and our own caller-ID cannot be looked up to
+     * find it. Null on every other kind of call.
+     */
+    private ?int $dialedCampaignId = null;
+
     private readonly AgentRouter $router;
 
     private readonly AgentDirectory $directory;
@@ -293,12 +311,43 @@ class CallToAgentFlow
      * the anchor the maximum-hold cap measures from (heldTooLong), so the two agree by
      * construction rather than by a second stamp kept in step.
      *
-     * Null on an outbound call, which never waits: the console places it, and only the
-     * inbound door (beginCall) stamps this. Read-only, like state() and tenantId().
+     * Null on a CONSOLE outbound call, which never waits: the agent places it, and their
+     * customer is not held. A DIALLED customer does wait — once they answer, the desk we
+     * booked has to ring — so the dialer's arrival stamps this too (F16), from the moment
+     * they came on the line and not from the moment we started ringing them. Also null for
+     * as long as a dial is still ringing, which is why an unanswered one writes no row.
+     * Read-only, like state() and tenantId().
      */
     public function startedAt(): ?Carbon
     {
         return $this->startedAt;
+    }
+
+    /**
+     * Every desk this call is currently holding on the agent board (DIAL-1 R8): the one
+     * booked before a leg exists (pendingReserved*, the dialer's and the waiting room's
+     * gap) plus every agent leg, ringing or connected.
+     *
+     * Read by the reservation reaper to answer "is this On a call tag backed by a real
+     * call". It is the whole of what this handler would hand back at teardown, so a desk
+     * that appears here can never be reaped, and one that does not appear anywhere is
+     * held by nothing in this process.
+     *
+     * @return array<int, int>
+     */
+    public function heldAgentIds(): array
+    {
+        $held = $this->pendingReservedAgentId === null ? [] : [$this->pendingReservedAgentId];
+
+        foreach ($this->agents as $agent) {
+            foreach ([$agent->userId, $agent->reservedAgentId] as $agentUserId) {
+                if ($agentUserId !== null) {
+                    $held[] = $agentUserId;
+                }
+            }
+        }
+
+        return array_values(array_unique($held));
     }
 
     /**
@@ -411,6 +460,44 @@ class CallToAgentFlow
         if ($args === ['outbound']) {
             if ($this->state === CallFlowState::RingingCustomer && $legId === $this->callerLegId) {
                 $this->connectAgent();
+            }
+
+            return;
+        }
+
+        if ($args === ['dialer']) {
+            // The progressive dialer's customer picked up (DIAL-1 A4 / DP-8). Their line
+            // is up because THEY answered it, so nothing is answered here — the console's
+            // outbound pickup just above leaves its customer leg alone for the same
+            // reason.
+            //
+            // Ring the desk booked before the number was dialled (DQ-3). From this line
+            // on it is the inbound path unchanged — music, screen pop, no-answer release,
+            // waiting-room fallback, bridge and recording — which is what DF-2's reframe
+            // promised and why DP-8 costs almost nothing.
+            if ($this->state === CallFlowState::DialingCustomer
+                && $legId === $this->callerLegId
+                && $this->pendingReservedAgentId !== null) {
+                Log::info('Progressive dial: the customer answered — ringing the desk held for them.', [
+                    'ticket' => $this->ticketNumber,
+                    'tenant' => $this->tenantId,
+                    'customer' => $this->callerLegId,
+                    'agentUser' => $this->pendingReservedAgentId,
+                ]);
+
+                // 🔴 THE WAIT CLOCK STARTS HERE, not when the number was dialled (F16).
+                // `startedAt` means one thing everywhere that reads it — the moment this
+                // customer came onto the line — and three things measure from it: the
+                // maximum-hold cap (heldTooLong), the board's Longest Wait
+                // (Switchboard::tallyByTenant) and the abandon row's "waited for". Stamped
+                // at the dial instead, every one of them counts the seconds the phone was
+                // ringing into an empty room as hold time the customer served. Measured:
+                // on a 60-second cap, a customer who took 40 seconds to answer was hung up
+                // 21 seconds into a hold they were owed 60 of, and filed as a no-answer
+                // rather than being allowed to hold out and abandon on their own.
+                $this->startedAt = now();
+
+                $this->ringAgent($this->pendingReservedAgentId);
             }
 
             return;
@@ -582,7 +669,13 @@ class CallToAgentFlow
         // The caller's arrival travels with the ticket (CT-2/CT-3). The note's own
         // created_at is the ring moment — it is written immediately before the phone
         // rings, so that moment needs no column of its own.
-        $this->writeHandoffNote($reservedAgentId, $this->startedAt);
+        // $arrivedAt is the caller's WAIT, and a dialled customer did not have one — we
+        // rang them and they picked up (A4/D2). Passing startedAt there would file the
+        // dial-to-answer seconds as hold time on every progressive call, inflating the
+        // average wait on exactly the calls that had none. beginOutboundCall passes null
+        // for the same reason. dialedLeadId is set only by the dialer, so it is already
+        // the question "did this customer wait for us".
+        $this->writeHandoffNote($reservedAgentId, $this->dialedLeadId === null ? $this->startedAt : null);
 
         $agentLegId = $this->telephony->placeCall(
             $this->directory->endpointFor($reservedAgentId),
@@ -604,7 +697,7 @@ class CallToAgentFlow
         $this->pendingReservedAgentId = null;
         $this->state = CallFlowState::RingingAgent;
 
-        Log::info('Inbound call: reserved a free agent, caller answered, ringing them.', [
+        Log::info('Ringing a free agent: the caller is on the line and holding.', [
             'ticket' => $this->ticketNumber,
             'caller' => $this->callerLegId,
             'callerNumber' => $this->callerNumber,
@@ -662,6 +755,12 @@ class CallToAgentFlow
                     // currently export with a blank Campaign. Null on outbound, where
                     // nobody dialled in to us at all.
                     'dialled_number' => $this->dialledNumber,
+                    // 🔴 WHO PLACED THIS CALL (F15). The console writes the row's
+                    // direction, and a dialled customer arrives on the agent's screen as
+                    // an ordinary ring — so without this every answered dial was filed as
+                    // a call the customer made to us. dialedLeadId is set by the dialer
+                    // and by nothing else, so it already IS the question.
+                    'was_dialled' => $this->dialedLeadId !== null,
                     'arrived_at' => $arrivedAt,
                 ]);
             }),
@@ -893,13 +992,22 @@ class CallToAgentFlow
      * logs a warning and must never affect a live call. A no-op on an inbound call whose
      * client was never known (`tenantId` null — an unrecognised number).
      *
-     * 🔴 IT IS STILL A NO-OP ON OUTBOUND, but no longer for the reason this comment used
-     * to give (CS-4). Outbound calls now carry a client, so `tenantId` is no longer what
-     * keeps them out. Two other things do, and both still hold: `startedAt` is set only
-     * on the inbound path (beginCall), and the guard below reads it; and the one other way
-     * in, recordMissedCallIfNeverConnected(), fires only from Waiting or RingingAgent,
-     * neither of which an outbound call ever reaches. An outbound call's row belongs to
-     * the agent's own screen at wrap-up (D2) — writing one here would duplicate it.
+     * 🔴 A CONSOLE outbound call is still a no-op here, but a DIALLED one is not (A4).
+     * The console's own outbound call is kept out by two things that both still hold:
+     * `startedAt` is set only on the inbound path (beginCall) and the guard below reads
+     * it, and the other way in — recordMissedCallIfNeverConnected() — fires only from
+     * Waiting or RingingAgent, neither of which a console outbound call reaches. Its row
+     * belongs to the agent's own screen at wrap-up (D2); writing one here would duplicate
+     * it.
+     *
+     * A progressive dial breaks both of those: answering stamps `startedAt` (onArrival's
+     * `dialer` branch — F16 moved it there from the dial itself), and a dialled customer
+     * who answers DOES reach RingingAgent and the waiting room, where no agent's screen is
+     * open to write anything. So its row is written here — and written as what it is,
+     * which is the note on `direction` below.
+     *
+     * The guard below therefore still keeps UNANSWERED dials out for free: nobody came on
+     * the line, so nothing stamped `startedAt`, so there is no row.
      */
     private function recordMissedCall(CallOutcome $outcome): void
     {
@@ -910,18 +1018,37 @@ class CallToAgentFlow
         $tenantId = $this->tenantId;
         $startedAt = $this->startedAt;
         $endedAt = now();
+        // 🔴 WHICH WAY ROUND THIS CALL WENT (DIAL-1 A4/D3). A customer the dialer rang,
+        // who answered and then gave up while holding, is a genuine abandoned call — it
+        // is the number DP-12a measures against the 3% legal cap, and it has to be
+        // written. It must not be written as INBOUND. Every reader picks the customer's
+        // side of a call off this column (Call::forCustomer, the export's `customer`, the
+        // calls list), and the Missed Calls page shows inbound rows only — so filed the
+        // old way, a customer WE rang turns up on a supervisor's screen as somebody who
+        // rang US and gave up, and gets called back for a call they never made.
+        $wasDialled = $this->dialedLeadId !== null;
 
         rescue(
             fn () => TenantContext::run($tenantId, fn () => Call::query()->create([
-                'direction' => CallDirection::Inbound,
-                'from_number' => $this->callerNumber,
-                'to_number' => $this->dialledNumber,
+                'direction' => $wasDialled ? CallDirection::Outbound : CallDirection::Inbound,
+                // Ours first on a dial, theirs first on an inbound call — the pairing the
+                // console's own wrap-up writes, so one rule reads both.
+                'from_number' => $wasDialled ? $this->dialledNumber : $this->callerNumber,
+                'to_number' => $wasDialled ? $this->callerNumber : $this->dialledNumber,
+                // The lead we dialled, so the abandon can be traced back to the number it
+                // came from. Null on an inbound call — nothing has matched a lead yet.
+                'lead_id' => $this->dialedLeadId,
                 // CE-6, the half the answered path already had. A call nobody picked up
                 // still rang a known number, and "which campaign is losing callers" is
                 // the question these rows exist to answer — so leaving Campaign blank
                 // emptied the column on exactly the rows a supervisor groups by. Inside
                 // the tenant run below, so the lookup is scoped to this client.
-                'campaign_id' => PhoneNumberRecord::campaignIdFor($this->dialledNumber),
+                //
+                // A dialled call is told outright which campaign placed it, and takes
+                // that: the lookup below reads the INBOUND number map, and the number a
+                // dial presents is our outbound caller-ID, which is either missing from
+                // that map or pointing at whichever campaign happens to receive on it.
+                'campaign_id' => $this->dialedCampaignId ?? PhoneNumberRecord::campaignIdFor($this->dialledNumber),
                 'outcome' => $outcome,
                 'correlation_id' => $this->ticketNumber,
                 // CE-11, and this row is the one place we can say it without a note:
@@ -948,6 +1075,12 @@ class CallToAgentFlow
                 ]);
             },
         );
+
+        // F17: a dialled customer who came on the line but never reached an agent is a try
+        // too. Uncounted, their lead sat at attempts 0 and was rung again the moment its
+        // 90-second claim lapsed. Rescued because discard() reaches here, and a DB error
+        // must not skip hanging up the held legs. Inbound calls have no lead — a no-op.
+        rescue(fn () => $this->countDialAttempt());
     }
 
     /**
@@ -1041,6 +1174,76 @@ class CallToAgentFlow
             'agent' => $agentLegId,
             'customer' => $this->callerLegId,
             'customerNumber' => $customerNumber,
+        ]);
+    }
+
+    /**
+     * The progressive dialer placed a call (DIAL-1 A3 / DP-7). The mirror image of
+     * beginOutboundCall: there, an agent is already on the line and we ring the customer;
+     * here NOBODY is on our side yet — a desk is booked on the board and the customer's
+     * phone is ringing into an empty room. The desk is only rung once they answer (A4).
+     *
+     * 🔴 THE HANDLER IS MADE BEFORE THE CALL IS PLACED, and that ordering is the whole
+     * reason this method exists rather than the dialer calling placeCall() itself. An
+     * unanswered call never enters our app — no StasisStart — so its ONLY event is a
+     * ChannelDestroyed, and the switchboard drops legs it does not recognise. Registering
+     * the leg here, the instant it is placed, is what makes that destruction reach a
+     * handler that can hand the desk back. Without it a desk leaks on every unanswered
+     * dial, which is most of them, and nothing in this system ever gives one back
+     * (DQ-1: releaseReservation is called from a handler and there is no reaper).
+     *
+     * The booking rides on pendingReserved* — the slot S88 added for exactly this gap,
+     * an agent tagged On a call before any leg exists to carry them. releaseAllReservations
+     * already clears it, so every teardown path frees the desk with no new code.
+     *
+     * The lead is already claimed by the caller (DP-3) and stays claimed: its 90-second
+     * claim IS the attempt delay, so nothing here releases it.
+     */
+    public function beginDialedCall(int $tenantId, int $agentUserId, Lead $lead, Campaign $campaign): void
+    {
+        $this->tenantId = $tenantId;
+        $this->pendingReservedTenantId = $tenantId;
+        $this->pendingReservedAgentId = $agentUserId;
+        $this->dialedLeadId = $lead->id;
+        $this->dialedCampaignId = $campaign->id;
+        $this->correlationId = (string) Str::uuid();
+        $this->ticketNumber = $this->correlationId;
+        // The campaign's own number, because a marketing campaign must present a
+        // 140-series number and a support one a 1601-series (DQ-5). Blank falls back to
+        // the system number, which is what a manual campaign has always used.
+        $ourNumber = $campaign->caller_id ?? config('telephony.outbound.caller_id');
+        // 🔴 THE SAME WAY ROUND AS INBOUND (A4). callerNumber is the person at the other
+        // end; dialledNumber is which of OUR numbers the call is on. That is the pairing
+        // beginCall() sets and every reader downstream assumes, and here it IS the screen
+        // pop: ringAgent() hands callerNumber to the agent's phone as caller-ID and the
+        // console matches that number to a lead (lookupLead). The other way round, the
+        // agent's phone shows our own number and their screen pops nothing.
+        //
+        // Normalized for the reason beginCall normalizes (CH-5) — one clean value for the
+        // caller-ID, the handoff note and any row written later. The DIAL string keeps the
+        // raw column value; only what we hand to readers is cleaned.
+        $this->callerNumber = PhoneNumber::normalize($lead->phone);
+        $this->dialledNumber = $ourNumber;
+        // 🔴 `startedAt` is deliberately NOT stamped here (F16). It is the zero of the
+        // wait clock, and a ringing phone is not a wait — nobody is on the line yet. The
+        // stamp happens the moment they answer, in onArrival's `dialer` branch.
+        $this->loadQueueSettings($tenantId);
+
+        $this->callerLegId = $this->telephony->placeCall(
+            config('telephony.outbound.dial_prefix').$lead->phone.config('telephony.outbound.dial_suffix'),
+            'dialer',
+            $ourNumber,
+        );
+        $this->registry->registerLeg($this->callerLegId, $this);
+        $this->state = CallFlowState::DialingCustomer;
+
+        Log::info('Progressive dial: ringing the customer, a desk is held for them.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $tenantId,
+            'campaign' => $campaign->id,
+            'lead' => $lead->id,
+            'agent' => $agentUserId,
+            'customer' => $this->callerLegId,
         ]);
     }
 
@@ -1477,6 +1680,24 @@ class CallToAgentFlow
             return;
         }
 
+        if ($this->state === CallFlowState::DialingCustomer) {
+            // Nobody answered a call the dialer placed (DP-9). Hand the desk straight back
+            // and count the attempt, so the number goes to the back of its tier rather than
+            // being dialled again on the very next tick.
+            //
+            // 🔴 No `calls` row and NO CallOutcome::Abandoned. Abandoned means a person was
+            // on the line and gave up; this is a phone that rang out. That column is what
+            // DP-12a measures against the 3% cap, and filling it with no-answers would put
+            // a compliant floor over the line on paper.
+            if ($legId === $this->callerLegId) {
+                $this->releaseAllReservations();
+                $this->countDialAttempt();
+                $this->dispose();
+            }
+
+            return;
+        }
+
         if ($this->state === CallFlowState::RingingAgent || $this->state === CallFlowState::RingingCustomer) {
             // Fold B: a reserved agent never connected — release on BOTH no-answer paths
             // (the agent rang out, or the caller abandoned mid-ring). A no-op for outbound.
@@ -1773,11 +1994,35 @@ class CallToAgentFlow
         }
     }
 
+    /**
+     * Count one attempt against the lead this call was dialled from (DP-9). Straight to
+     * the database rather than through the model: nothing else on the row is being
+     * touched, and `attempts` is read by Lead::callable's ordering and by the campaign's
+     * give-up cap, so it must move by exactly one even if two ticks race.
+     *
+     * The claim is deliberately left alone — its 90 seconds ARE the attempt delay.
+     */
+    private function countDialAttempt(): void
+    {
+        if ($this->dialedLeadId === null || $this->tenantId === null) {
+            return;
+        }
+
+        $leadId = $this->dialedLeadId;
+
+        TenantContext::run(
+            $this->tenantId,
+            fn () => Lead::query()->whereKey($leadId)->increment('attempts'),
+        );
+    }
+
     /** Wipe this call's state. Part of disposal — a handler is one-per-call now (B2.1). */
     private function reset(): void
     {
         $this->state = CallFlowState::Idle;
         $this->callerLegId = null;
+        $this->dialedLeadId = null;
+        $this->dialedCampaignId = null;
         $this->agents = [];
         $this->addedAgentIntent = null;
         $this->conversationId = null;
