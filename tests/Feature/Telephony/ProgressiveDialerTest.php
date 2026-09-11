@@ -21,6 +21,7 @@ use App\Models\User;
 use App\Telephony\AgentRouter;
 use App\Telephony\Flows\Switchboard;
 use App\Telephony\ProgressiveDialer;
+use App\Telephony\RecordingSession;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -459,6 +460,45 @@ it('starts the hold clock when the dialled customer answers, not when their phon
 
     expect($call->outcome)->toBe(CallOutcome::Abandoned)
         ->and($call->waitedSeconds())->toBe(40);   // 12:00:40 hello -> 12:01:20 gave up
+});
+
+/**
+ * 🔴 F20 — found live on staging. The hold limit ran out in the same second the agent
+ * picked up the desk. The listener sweeps before it hands over the event it is holding,
+ * so the limit won: the customer was hung up on, the agent's console still saw a call and
+ * made them wrap it up, and one call left a no-answer row, an answered row and two tries.
+ * A pick-up Asterisk already reports now wins, and its own arrival connects the call.
+ */
+it('lets a desk that has already picked up win over the hold limit', function () {
+    $tenant = Tenant::factory()->create(['max_hold_seconds' => 44]);
+    readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+    $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
+    $telephony->shouldReceive('isAnswered')->with('agent-leg')->andReturnTrue();
+    $telephony->shouldReceive('join')->once()->andReturn('conv-1');
+    $telephony->shouldReceive('startRecording')->once()->andReturn(
+        new RecordingSession('customer-leg', 'call-1', 'snoop-said', 'snoop-heard')
+    );
+    $telephony->shouldReceive('hangup')->andReturnNull();
+
+    $switchboard = tickWith($telephony);
+    $switchboard->handle(stasisStart('customer-leg', ['dialer']));   // hello — the desk rings
+
+    // 45 seconds on, the limit has run out — but the desk has picked up and that event is
+    // still on its way, exactly where the sweep caught it on staging.
+    $this->travel(45)->seconds();
+    $switchboard->sweepWaiting();
+    $switchboard->handle(stasisStart('agent-leg', ['agent']));
+
+    // Still one live call, and nothing written or counted by the listener: the call is the
+    // console's to wrap up, which writes the one row and counts the one try.
+    expect($switchboard->activeCallCount())->toBe(1)
+        ->and(TenantContext::run($tenant->id, fn (): int => Call::query()->count()))->toBe(0)
+        ->and(TenantContext::run($tenant->id, fn () => $lead->fresh()->attempts))->toBe(0);
 });
 
 /**

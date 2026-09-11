@@ -876,7 +876,7 @@ class CallToAgentFlow
         // right up to the cap, because an agent picking up in its first seconds still
         // saves that call; only a ring that has already run past the cap is cut.
         if ($this->state === CallFlowState::RingingAgent) {
-            if ($this->heldTooLong()) {
+            if ($this->heldTooLong() && ! $this->deskAlreadyAnswered()) {
                 $this->giveUpOnWaitingCaller();
             }
 
@@ -945,6 +945,36 @@ class CallToAgentFlow
 
         return $this->startedAt !== null
             && $this->startedAt->copy()->addSeconds($maxHoldSeconds)->isPast();
+    }
+
+    /**
+     * F20, found live on staging: the hold limit ran out in the same second the agent
+     * picked up. The pick-up reaches us as an event, and the listener sweeps before it
+     * hands over the event it is holding — so the limit won, the customer was hung up on,
+     * the agent's console still saw a call and wrapped it up, and one call left two rows
+     * and counted two tries. Asking Asterisk lets a pick-up already made win; its own
+     * arrival then connects the call as normal.
+     *
+     * A failed lookup (the leg already gone) reads as "not picked up" — the limit's usual
+     * ending. A lost line still goes up, as everywhere. ponytail: an agent answering in
+     * the milliseconds between this answer and the hang-up still races the limit; the
+     * window was up to one listener wait (5s) and is now one round trip.
+     */
+    private function deskAlreadyAnswered(): bool
+    {
+        $agent = $this->soleAgent();
+
+        if ($agent === null) {
+            return false;
+        }
+
+        try {
+            return $this->telephony->isAnswered($agent->legId);
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException) {
+            return false;
+        }
     }
 
     /**

@@ -130,6 +130,11 @@ class AsteriskAriProvider implements TelephonyProvider
         )));
     }
 
+    public function isAnswered(string $legId): bool
+    {
+        return $this->command('GET', "/channels/{$legId}")->json('state') === 'Up';
+    }
+
     public function startRecording(string $legId, string $name): RecordingSession
     {
         $session = new RecordingSession(

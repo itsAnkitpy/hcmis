@@ -356,6 +356,8 @@ function fakeTelephony(): MockInterface
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('startHoldMusic')->zeroOrMoreTimes();
     $telephony->shouldReceive('stopHoldMusic')->zeroOrMoreTimes();
+    // F20: a ringing desk reads as not picked up unless a test says otherwise.
+    $telephony->shouldReceive('isAnswered')->andReturnFalse()->byDefault();
 
     return $telephony;
 }

@@ -122,6 +122,13 @@ interface TelephonyProvider
     public function liveChannelNames(): array;
 
     /**
+     * Whether a leg has been picked up — its channel is Up (F20). Asked only when the
+     * hold limit runs out while a desk is still ringing, so the limit cannot hang up on
+     * an agent whose pick-up is already on its way to us.
+     */
+    public function isAnswered(string $legId): bool;
+
+    /**
      * Record both sides of a leg's call (B1 D4): what that person says and
      * what they hear, as two separate files — the pair a queued job later
      * merges into the stereo MP3 (caller left, agent right, PW5-4).

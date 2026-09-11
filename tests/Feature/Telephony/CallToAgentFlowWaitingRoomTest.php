@@ -169,6 +169,7 @@ it('stops waiting even while a desk is ringing, so the cap is not overshot by a 
     $telephony->shouldReceive('answer')->once();
     $telephony->shouldReceive('startHoldMusic')->once();
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
+    $telephony->shouldReceive('isAnswered')->once()->with('agent-leg')->andReturnFalse();   // F20: still only ringing
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');
 
