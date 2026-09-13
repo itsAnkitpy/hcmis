@@ -1,5 +1,6 @@
 <?php
 
+use App\Enums\CallOutcome;
 use App\Models\Call;
 use App\Models\Campaign;
 use App\Models\Disposition;
@@ -9,6 +10,8 @@ use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -342,4 +345,94 @@ it('reports zero coverage on an empty range without erroring', function () {
 
     expect($totals['total'])->toBe(0)
         ->and($totals['recording_coverage'])->toBe(0.0);
+});
+
+// --- DIAL-1 DP-12 / DP-12a: the dialer's abandoned rate and voicemail share ---
+
+/**
+ * A row the progressive dialer placed, filed at a moment on the client's own clock.
+ *
+ * @param  array<string, mixed>  $attributes
+ */
+function dialledCall(Campaign $campaign, string $ticket, string $atIndia, array $attributes = []): Call
+{
+    return Call::factory()->create([
+        'was_dialled' => true,
+        'campaign_id' => $campaign->id,
+        'correlation_id' => $ticket,
+        'created_at' => Carbon::parse($atIndia, 'Asia/Kolkata')->utc(),
+        ...$attributes,
+    ]);
+}
+
+it('counts the abandoned rate over dials the dialer placed, per client day, with a row per campaign', function () {
+    $tenant = Tenant::factory()->create();
+
+    [$rows, $narrowedToOneAgent] = TenantContext::run($tenant->id, function (): array {
+        $agent = User::factory()->create();
+        $closer = User::factory()->create();
+        $cod = Campaign::factory()->create(['name' => 'COD']);
+        $ndr = Campaign::factory()->create(['name' => 'NDR']);
+        // Relabelled on purpose: the share keys on the code, and a client may call it anything.
+        $voicemail = Disposition::factory()->create([
+            'campaign_id' => $cod->id, 'code' => Disposition::VOICEMAIL_CODE, 'label' => 'Machine',
+        ]);
+
+        dialledCall($cod, (string) Str::uuid(), '2026-09-11 10:00', ['outcome' => CallOutcome::NoAnswer]);   // rang out
+        dialledCall($cod, (string) Str::uuid(), '2026-09-11 10:05', ['outcome' => CallOutcome::Abandoned]);  // hung up holding
+        dialledCall($cod, (string) Str::uuid(), '2026-09-11 10:10', ['outcome' => CallOutcome::Abandoned]);  // the hold limit
+        dialledCall($cod, (string) Str::uuid(), '2026-09-11 10:15', ['agent_id' => $agent->id, 'disposition_id' => $voicemail->id]);
+
+        // F26: answered on NDR and transferred — two agents, two rows, ONE dial.
+        $transferred = (string) Str::uuid();
+        dialledCall($ndr, $transferred, '2026-09-11 11:00', ['agent_id' => $agent->id]);
+        dialledCall($ndr, $transferred, '2026-09-11 11:03', ['agent_id' => $closer->id]);
+
+        // Neither of these was placed by the dialer: an agent's own dial and an inbound abandon.
+        $noon = Carbon::parse('2026-09-11 12:00', 'Asia/Kolkata')->utc();
+        Call::factory()->forAgent($agent)->create(['campaign_id' => $cod->id, 'outcome' => CallOutcome::NoAnswer, 'created_at' => $noon]);
+        Call::factory()->inbound()->create(['campaign_id' => $cod->id, 'outcome' => CallOutcome::Abandoned, 'created_at' => $noon]);
+
+        // 00:30 on the 12th in India is still the 11th in UTC. It is the client's 12th.
+        dialledCall($cod, (string) Str::uuid(), '2026-09-12 00:30', ['outcome' => CallOutcome::Abandoned]);
+
+        $service = new CallReportService;
+
+        return [
+            $service->dialerByDay(new CallReportFilters),
+            $service->dialerByDay(new CallReportFilters(agentId: $closer->id)),
+        ];
+    });
+
+    expect($rows)->toHaveCount(5)
+        ->and($rows[0])->toMatchArray(['date' => '2026-09-11', 'is_total' => true, 'dials' => 5, 'abandoned' => 2, 'abandoned_rate' => 40.0, 'voicemail' => null])
+        ->and($rows[1])->toMatchArray(['date' => '2026-09-11', 'campaign' => 'COD', 'dials' => 4, 'abandoned' => 2, 'abandoned_rate' => 50.0, 'answered' => 1, 'voicemail' => 1])
+        // No VOICEMAIL disposition on NDR, so no share: a dash, never 0.
+        ->and($rows[2])->toMatchArray(['date' => '2026-09-11', 'campaign' => 'NDR', 'dials' => 1, 'abandoned' => 0, 'answered' => 1, 'voicemail' => null])
+        ->and($rows[3])->toMatchArray(['date' => '2026-09-12', 'is_total' => true, 'dials' => 1, 'abandoned' => 1, 'abandoned_rate' => 100.0])
+        ->and($rows[4])->toMatchArray(['date' => '2026-09-12', 'campaign' => 'COD', 'answered' => 0])
+        // Strict: toMatchArray compares loosely, and null == 0 — the very difference the dash is.
+        ->and($rows[2]['voicemail'])->toBeNull()
+        ->and($rows[4]['voicemail'])->toBe(0)
+        // A ring-out has no agent, so an agent filter would show a dialer that never abandons.
+        ->and($narrowedToOneAgent)->toBe($rows);
+});
+
+it('gives each client its own day total, never one rate across clients', function () {
+    $acme = Tenant::factory()->create(['name' => 'Acme']);
+    $zeta = Tenant::factory()->create(['name' => 'Zeta']);
+
+    TenantContext::run($acme->id, fn () => dialledCall(Campaign::factory()->create(), (string) Str::uuid(), '2026-09-11 10:00', ['outcome' => CallOutcome::Abandoned]));
+    TenantContext::run($zeta->id, function (): void {
+        $campaign = Campaign::factory()->create();
+        dialledCall($campaign, (string) Str::uuid(), '2026-09-11 10:00', ['outcome' => CallOutcome::Abandoned]);
+        dialledCall($campaign, (string) Str::uuid(), '2026-09-11 10:05', ['outcome' => CallOutcome::NoAnswer]);
+    });
+
+    $totals = collect(TenantContext::cross(fn (): array => (new CallReportService)->dialerByDay(new CallReportFilters)))
+        ->where('is_total', true);
+
+    expect($totals)->toHaveCount(2)
+        ->and($totals->firstWhere('client', 'Acme'))->toMatchArray(['dials' => 1, 'abandoned' => 1, 'abandoned_rate' => 100.0])
+        ->and($totals->firstWhere('client', 'Zeta'))->toMatchArray(['dials' => 2, 'abandoned' => 1, 'abandoned_rate' => 50.0]);
 });

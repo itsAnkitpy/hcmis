@@ -52,7 +52,7 @@ use Illuminate\Support\Carbon;
  * arrival because nobody waited, the agent placed it (CT-8), so its "waited" is blank.
  * A call the progressive dialer placed and the customer ANSWERED does carry one (F16) —
  * they were on the line, holding, while the desk we promised them rang — measured from
- * their hello, never from the dial. An unanswered dial writes no row at all.
+ * their hello, never from the dial. An unanswered dial writes a row with no arrival (F21).
  *
  * All four are stamped by the listener onto the handoff note and copied here by the
  * wrap-up (CT-3), so they share one clock. Any of them may be null — a missing moment
@@ -68,6 +68,7 @@ use Illuminate\Support\Carbon;
  * @property int $id
  * @property int $tenant_id
  * @property CallDirection $direction
+ * @property bool $was_dialled
  * @property string $from_number
  * @property string $to_number
  * @property int|null $lead_id
@@ -93,6 +94,8 @@ class Call extends Model
 
     protected $fillable = [
         'direction',
+        // DIAL-1 F25: the progressive dialer placed this call. What DP-12a's 3% counts.
+        'was_dialled',
         'from_number',
         'to_number',
         'lead_id',
@@ -123,6 +126,7 @@ class Call extends Model
     {
         return [
             'direction' => CallDirection::class,
+            'was_dialled' => 'boolean',
             'outcome' => CallOutcome::class,
             'started_at' => 'datetime',
             'ringing_at' => 'datetime',

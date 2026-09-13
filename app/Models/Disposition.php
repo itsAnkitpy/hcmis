@@ -39,6 +39,13 @@ class Disposition extends Model
      */
     public const CALLBACK_CODE = 'CALLBACK';
 
+    /**
+     * The disposition `code` that means "the agent reached a voicemail" (DIAL-1 DP-11).
+     * The dialer's voicemail share keys off it (DP-12) for the reason CALLBACK_CODE
+     * exists: labels are client-editable, the code is not.
+     */
+    public const VOICEMAIL_CODE = 'VOICEMAIL';
+
     protected $fillable = [
         'campaign_id',
         'code',

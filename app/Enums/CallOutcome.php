@@ -4,9 +4,11 @@ namespace App\Enums;
 
 /**
  * What happened on the line (B3 D5). NOT `blocked` — a do-not-call dial places no
- * call, so it gets no `calls` row (stays audit-only). `abandoned` is reserved for
- * the trunk-era listener (an inbound caller who hung up before an agent answered);
- * the web write-path only ever sets `answered` / `no_answer`.
+ * call, so it gets no `calls` row (stays audit-only). `abandoned` is written only by
+ * the listener: an inbound caller who hung up before an agent answered, or a customer
+ * the dialer rang who answered and reached no agent, however that call ended (DIAL-1
+ * F22 — TRAI's definition, and the top of DP-12a's 3%). The web write-path only ever
+ * sets `answered` / `no_answer`.
  *
  * STAGING NOTE (B3 S39 — see PRD/phase-2/b3-calls-table.md top banner): in v1 this
  * value is AGENT-REPORTED and provisional — derived from the picked disposition's

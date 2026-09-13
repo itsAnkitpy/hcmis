@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
 use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
@@ -104,8 +105,9 @@ it('loads the report for a per-client team leader, walled to their client', func
 });
 
 it('loads the call & disposition summary report', function () {
-    $tenant = Tenant::factory()->create();
+    $tenant = Tenant::factory()->create(['name' => 'Acme']);
     seedCallReportFixture($tenant);
+    TenantContext::run($tenant->id, fn () => Call::factory()->create(['was_dialled' => true, 'correlation_id' => (string) Str::uuid()]));
 
     $this->actingAs(reportsHcUser(RoleName::HcAdmin->value));
     TenantContext::applyWebRequest(null, crossTenant: true);
@@ -113,7 +115,9 @@ it('loads the call & disposition summary report', function () {
     Livewire::test(CallSummaryReport::class)
         ->assertOk()
         ->assertSee('Interested') // a disposition label from the breakdown
-        ->assertSee('Sold');
+        ->assertSee('Sold')
+        ->assertSee('All campaigns') // the dialer section's day total (DP-12a)
+        ->assertSee('Acme');         // and whose day it is, for staff who see every client
 });
 
 // --- Filters recompute the table ---

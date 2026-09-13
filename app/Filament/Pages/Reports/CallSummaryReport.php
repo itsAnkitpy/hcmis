@@ -111,6 +111,17 @@ class CallSummaryReport extends Page
     }
 
     /**
+     * The progressive dialer's rows (DIAL-1 DP-12 / DP-12a): a total per client day, then
+     * one row per campaign. Ignores the agent and direction filters — see dialerByDay().
+     *
+     * @return array<int, array{date: string, client: string, campaign: string|null, is_total: bool, dials: int, abandoned: int, abandoned_rate: float, answered: int, voicemail: int|null}>
+     */
+    public function dialerRows(): array
+    {
+        return app(CallReportService::class)->dialerByDay($this->reportFilters());
+    }
+
+    /**
      * CSV export of the by-day view (the primary operational grid). The disposition
      * mix is a small on-screen breakdown; the by-day rows are the exportable record.
      */

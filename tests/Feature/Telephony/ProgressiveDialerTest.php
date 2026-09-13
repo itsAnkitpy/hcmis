@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\CallDirection;
+use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Enums\CampaignCategory;
 use App\Enums\DialMode;
@@ -215,7 +216,7 @@ it('dials nothing for a suspended client', function () {
  * time is what makes this reach a handler that can hand the desk back. Without it a desk
  * leaks on every unanswered dial, which is most of them.
  */
-it('hands the desk back and counts the attempt when nobody answers', function () {
+it('hands the desk back, counts one attempt and files an outbound no-answer when nobody answers', function () {
     $tenant = Tenant::factory()->create();
     $agent = readyDeskOn($tenant);
     $campaign = dialingCampaignOn($tenant);
@@ -230,13 +231,23 @@ it('hands the desk back and counts the attempt when nobody answers', function ()
 
     $switchboard->handle(channelDestroyed('customer-leg'));
 
+    // One try, not two: the row's writer counts it, so the ring-out no longer does.
     expect(deskStatus($tenant, $agent))->toBe(PresenceStatus::Ready)
         ->and(TenantContext::run($tenant->id, fn () => $lead->fresh()->attempts))->toBe(1);
 
-    // 🔴 And NO calls row. Reusing the outbound ringing state here files a phone that rang
-    // out as CallOutcome::Abandoned — measured, live, when this was broken deliberately —
-    // and abandoned is the number DP-12a counts against the 3% legal cap.
-    expect(TenantContext::run($tenant->id, fn (): int => Call::query()->count()))->toBe(0);
+    // 🔴 F21 — a row, because DP-12a divides by every dial placed. But NEVER Abandoned:
+    // reusing the outbound ringing state here once filed a phone that rang out as
+    // CallOutcome::Abandoned — measured, live, when this was broken deliberately — and
+    // abandoned is the top of the 3% legal cap.
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::query()->sole());
+
+    expect($call->direction)->toBe(CallDirection::Outbound)
+        ->and($call->outcome)->toBe(CallOutcome::NoAnswer)
+        ->and($call->was_dialled)->toBeTrue()
+        ->and($call->agent_id)->toBeNull()
+        ->and($call->started_at)->toBeNull()   // nobody came on the line
+        ->and($call->lead_id)->toBe($lead->id)
+        ->and($call->campaign_id)->toBe($campaign->id);
 });
 
 /**
@@ -395,6 +406,8 @@ it('files a dialled customer who gives up as an outbound abandon, against their 
     expect($call)->not->toBeNull()
         ->and($call->direction)->toBe(CallDirection::Outbound)
         ->and($call->outcome)->toBe(CallOutcome::Abandoned)
+        ->and($call->ended_by)->toBe(CallEndedBy::Customer)
+        ->and($call->was_dialled)->toBeTrue()
         // Ours first, theirs second — the pairing the console's own wrap-up writes.
         ->and($call->from_number)->toBe('+911400000000')
         ->and($call->to_number)->toBe('9991234567')
@@ -460,6 +473,38 @@ it('starts the hold clock when the dialled customer answers, not when their phon
 
     expect($call->outcome)->toBe(CallOutcome::Abandoned)
         ->and($call->waitedSeconds())->toBe(40);   // 12:00:40 hello -> 12:01:20 gave up
+});
+
+/**
+ * 🔴 F22 — the hold limit cutting off a dialled customer is an ABANDONED call. TRAI counts
+ * a call the person answered and no agent reached, however it ended, and this is the top of
+ * DP-12a's 3%. Filed the inbound way, as a no-answer, a floor whose desks never pick up
+ * would read 0% abandoned. It is still us who ended it, and the row says so.
+ */
+it('files a dialled customer the hold limit cuts off as abandoned, ended by us', function () {
+    $tenant = Tenant::factory()->create(['max_hold_seconds' => 44]);
+    readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+    $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
+    $telephony->shouldReceive('isAnswered')->with('agent-leg')->andReturnFalse();
+    $telephony->shouldReceive('hangup')->andReturnNull();
+
+    $switchboard = tickWith($telephony);
+    $switchboard->handle(stasisStart('customer-leg', ['dialer']));   // hello — the desk rings
+
+    $this->travel(45)->seconds();
+    $switchboard->sweepWaiting();                                     // and never picks up
+
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::query()->sole());
+
+    expect($call->outcome)->toBe(CallOutcome::Abandoned)
+        ->and($call->ended_by)->toBe(CallEndedBy::System)
+        ->and($call->was_dialled)->toBeTrue()
+        ->and(TenantContext::run($tenant->id, fn () => $lead->fresh()->attempts))->toBe(1);
 });
 
 /**
@@ -542,6 +587,8 @@ it('files an answered dial as an outbound call, on the campaign number the diale
     $call = TenantContext::run($tenant->id, fn (): ?Call => Call::query()->latest('id')->first());
 
     expect($call->direction)->toBe(CallDirection::Outbound)
+        // F25: the note is pruned on this agent's next ring, so the row keeps the fact.
+        ->and($call->was_dialled)->toBeTrue()
         // Ours first, theirs second — and OURS is the campaign's own caller ID, which the
         // note carries. The config default would file every campaign under the system
         // number, which is the whole reason DQ-5 makes campaigns carry their own.

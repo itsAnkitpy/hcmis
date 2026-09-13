@@ -6,10 +6,14 @@ namespace App\Reporting;
 
 use App\Enums\CallDirection;
 use App\Models\Call;
+use App\Models\Campaign;
+use App\Models\Disposition;
+use App\Models\Tenant;
 use App\Models\User;
 use App\Tenancy\TenantContext;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 
 /**
  * The counting layer (RP-1): the ONE place that turns raw `calls` rows into grouped
@@ -253,6 +257,94 @@ class CallReportService
             'with_recording' => $withRecording,
             'recording_coverage' => $this->rate($withRecording, $total),
         ];
+    }
+
+    /**
+     * DIAL-1 DP-12 / DP-12a — the progressive dialer's two numbers: one total per client
+     * per client day, then a row per campaign under it, which is where a leak shows.
+     *
+     * 🔴 THE ABANDONED RATE IS THE LEGAL ONE (TCCCPR 2018, Schedule): abandoned calls ÷
+     * total attempted calls, per registered entity, per day. So:
+     *   - only calls the DIALER placed count, top and bottom (`was_dialled`, F25). An
+     *     agent's own dials could only lower the rate, so leaving them out is the safe side;
+     *   - the bottom counts CALLS, not rows (F26). A transfer on an answered dial writes one
+     *     row per agent under one ticket, and counting both would lower the rate;
+     *   - the day is the client's own, the bucket callsByDay() uses.
+     * The agent and direction filters are dropped: a ring-out or an abandon has no agent,
+     * so narrowing to one would show a dialer that never abandons anybody.
+     *
+     * The voicemail share (DP-12) is VOICEMAIL wrap-ups ÷ dialled calls an agent answered,
+     * keyed on the code, never the label. `voicemail` is null — a dash — for a campaign
+     * with no VOICEMAIL disposition: 0 would claim no machine was reached on a floor that
+     * had no way to say one was.
+     *
+     * @return array<int, array{date: string, client: string, campaign: string|null, is_total: bool, dials: int, abandoned: int, abandoned_rate: float, answered: int, voicemail: int|null}>
+     */
+    public function dialerByDay(CallReportFilters $filters): array
+    {
+        $filters = new CallReportFilters($filters->from, $filters->to, campaignId: $filters->campaignId, clientId: $filters->clientId);
+
+        $rows = $this->baseQuery($filters)
+            ->where('calls.was_dialled', true)
+            ->selectRaw('calls.tenant_id as tenant_id')
+            ->selectRaw(
+                "CAST(calls.created_at AT TIME ZONE 'UTC' AT TIME ZONE ? AS date) as day",
+                [TenantContext::reportTimezone()],
+            )
+            ->selectRaw('calls.campaign_id as campaign_id')
+            ->selectRaw('COUNT(DISTINCT calls.correlation_id) as dials')
+            ->selectRaw("COUNT(*) FILTER (WHERE calls.outcome = 'abandoned') as abandoned")
+            ->selectRaw('COUNT(DISTINCT calls.correlation_id) FILTER (WHERE calls.agent_id IS NOT NULL) as answered')
+            ->selectRaw('COUNT(*) FILTER (WHERE dispositions.code = ?) as voicemail', [Disposition::VOICEMAIL_CODE])
+            ->groupBy('calls.tenant_id', 'day', 'calls.campaign_id')
+            ->toBase()
+            ->get();
+
+        $campaignIds = $rows->pluck('campaign_id')->filter()->unique()->all();
+        $campaigns = Campaign::query()->whereIn('id', $campaignIds)->pluck('name', 'id');
+        $hasVoicemail = Disposition::query()
+            ->whereIn('campaign_id', $campaignIds)
+            ->where('code', Disposition::VOICEMAIL_CODE)
+            ->pluck('campaign_id')
+            ->flip();
+        $clients = Tenant::query()->whereIn('id', $rows->pluck('tenant_id')->unique()->all())->pluck('name', 'id');
+
+        return $rows
+            ->groupBy(fn (object $row): string => $row->day.'|'.$row->tenant_id)
+            ->sortKeys()
+            ->flatMap(function (Collection $day) use ($campaigns, $hasVoicemail, $clients): array {
+                $first = $day->first();
+                $line = fn (?string $campaign, int $dials, int $abandoned, int $answered, ?int $voicemail): array => [
+                    'date' => (string) $first->day,
+                    'client' => $clients[(int) $first->tenant_id] ?? 'Unknown',
+                    'campaign' => $campaign,
+                    'is_total' => $campaign === null,
+                    'dials' => $dials,
+                    'abandoned' => $abandoned,
+                    'abandoned_rate' => $this->rate($abandoned, $dials),
+                    'answered' => $answered,
+                    'voicemail' => $voicemail,
+                ];
+
+                $campaignLines = $day
+                    ->map(fn (object $row): array => $line(
+                        $campaigns[(int) $row->campaign_id] ?? 'Unknown',
+                        (int) $row->dials,
+                        (int) $row->abandoned,
+                        (int) $row->answered,
+                        isset($hasVoicemail[(int) $row->campaign_id]) ? (int) $row->voicemail : null,
+                    ))
+                    ->sortBy('campaign')
+                    ->values()
+                    ->all();
+
+                return [
+                    $line(null, (int) $day->sum('dials'), (int) $day->sum('abandoned'), (int) $day->sum('answered'), null),
+                    ...$campaignLines,
+                ];
+            })
+            ->values()
+            ->all();
     }
 
     /**

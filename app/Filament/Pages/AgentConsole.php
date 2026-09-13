@@ -1597,6 +1597,9 @@ class AgentConsole extends Page
 
         Call::create([
             'direction' => $direction,
+            // F25: copied off the note like the moments below, because the note is pruned
+            // on this agent's next ring and DP-12a's report reads it long after.
+            'was_dialled' => (bool) $moments?->was_dialled,
             'from_number' => $isOutbound ? $ourNumber : $this->callPartyNumber,
             'to_number' => $isOutbound ? $this->callPartyNumber : $ourNumber,
             'lead_id' => $lead?->id,

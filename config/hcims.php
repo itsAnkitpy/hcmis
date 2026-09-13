@@ -47,6 +47,7 @@ return [
             ['code' => 'RESCHEDULE', 'label' => 'Reschedule delivery', 'is_contact' => true, 'is_sale' => false],
             ['code' => 'NO_ANSWER', 'label' => 'No answer', 'is_contact' => false, 'is_sale' => false],
             ['code' => 'INVALID_NUMBER', 'label' => 'Invalid number', 'is_contact' => false, 'is_sale' => false],
+            ['code' => 'VOICEMAIL', 'label' => 'Voicemail left', 'is_contact' => false, 'is_sale' => false],
         ],
 
         CampaignTemplate::Ndr->value => [
@@ -55,6 +56,7 @@ return [
             ['code' => 'REFUSED', 'label' => 'Refused', 'is_contact' => true, 'is_sale' => false],
             ['code' => 'OUT_OF_AREA', 'label' => 'Out of service area', 'is_contact' => true, 'is_sale' => false],
             ['code' => 'NO_ANSWER', 'label' => 'No answer', 'is_contact' => false, 'is_sale' => false],
+            ['code' => 'VOICEMAIL', 'label' => 'Voicemail left', 'is_contact' => false, 'is_sale' => false],
         ],
 
         CampaignTemplate::EdtechEnrollment->value => [
@@ -63,6 +65,7 @@ return [
             ['code' => 'INTERESTED', 'label' => 'Interested', 'is_contact' => true, 'is_sale' => false],
             ['code' => 'NOT_INTERESTED', 'label' => 'Not interested', 'is_contact' => true, 'is_sale' => false],
             ['code' => 'NO_ANSWER', 'label' => 'No answer', 'is_contact' => false, 'is_sale' => false],
+            ['code' => 'VOICEMAIL', 'label' => 'Voicemail left', 'is_contact' => false, 'is_sale' => false],
         ],
     ],
 

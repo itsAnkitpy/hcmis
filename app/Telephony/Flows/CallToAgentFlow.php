@@ -987,6 +987,9 @@ class CallToAgentFlow
      * drops every leg we hold rather than the caller's alone — otherwise that agent's
      * phone would go on ringing for a caller who is no longer there — and hands their
      * board tag back first, so the cap firing cannot leave them tagged "On a call".
+     *
+     * A customer the DIALER rang is filed `abandoned` instead (F22) — recordMissedCall()
+     * decides that, in the one place every missed-call path goes through.
      */
     private function giveUpOnWaitingCaller(): void
     {
@@ -1036,12 +1039,14 @@ class CallToAgentFlow
      * open to write anything. So its row is written here — and written as what it is,
      * which is the note on `direction` below.
      *
-     * The guard below therefore still keeps UNANSWERED dials out for free: nobody came on
-     * the line, so nothing stamped `startedAt`, so there is no row.
+     * An UNANSWERED dial gets a row too (F21, reversing A3's "no row"): nobody came on the
+     * line, so nothing stamped `startedAt`, but DP-12a divides by every dial placed and a
+     * ring-out was one. The guard lets it through on `dialedLeadId`, which a console
+     * outbound call never has, so that call is still kept out.
      */
     private function recordMissedCall(CallOutcome $outcome): void
     {
-        if ($this->tenantId === null || $this->startedAt === null) {
+        if ($this->tenantId === null || ($this->startedAt === null && $this->dialedLeadId === null)) {
             return;
         }
 
@@ -1057,10 +1062,18 @@ class CallToAgentFlow
         // old way, a customer WE rang turns up on a supervisor's screen as somebody who
         // rang US and gave up, and gets called back for a call they never made.
         $wasDialled = $this->dialedLeadId !== null;
+        // 🔴 F22. TRAI's abandoned call is one the person ANSWERED and no agent reached,
+        // however it ended. So a dialled customer who came on the line is filed
+        // `abandoned` whether they hung up or we did: the hold limit and an error teardown
+        // pass NoAnswer, QD-6's mapping, which stays right for inbound. `$outcome` still
+        // says who ended it, and that is what `ended_by` records below. A ring-out never
+        // came on the line, so it stays `no_answer` (F9).
+        $filedOutcome = $wasDialled && $startedAt !== null ? CallOutcome::Abandoned : $outcome;
 
         rescue(
             fn () => TenantContext::run($tenantId, fn () => Call::query()->create([
                 'direction' => $wasDialled ? CallDirection::Outbound : CallDirection::Inbound,
+                'was_dialled' => $wasDialled,
                 // Ours first on a dial, theirs first on an inbound call — the pairing the
                 // console's own wrap-up writes, so one rule reads both.
                 'from_number' => $wasDialled ? $this->dialledNumber : $this->callerNumber,
@@ -1079,7 +1092,7 @@ class CallToAgentFlow
                 // dial presents is our outbound caller-ID, which is either missing from
                 // that map or pointing at whichever campaign happens to receive on it.
                 'campaign_id' => $this->dialedCampaignId ?? PhoneNumberRecord::campaignIdFor($this->dialledNumber),
-                'outcome' => $outcome,
+                'outcome' => $filedOutcome,
                 'correlation_id' => $this->ticketNumber,
                 // CE-11, and this row is the one place we can say it without a note:
                 // `abandoned` means the caller gave up, `no_answer` means we stopped
@@ -1097,10 +1110,10 @@ class CallToAgentFlow
                 // computed from these two moments wherever it is shown.
                 'ended_at' => $endedAt,
             ])),
-            function (Throwable $exception) use ($outcome): void {
+            function (Throwable $exception) use ($filedOutcome): void {
                 Log::warning('Missed-call record write failed — the caller will not appear in the missed-call list.', [
                     'ticket' => $this->ticketNumber,
-                    'outcome' => $outcome->value,
+                    'outcome' => $filedOutcome->value,
                     'error' => $exception->getMessage(),
                 ]);
             },
@@ -1712,16 +1725,19 @@ class CallToAgentFlow
 
         if ($this->state === CallFlowState::DialingCustomer) {
             // Nobody answered a call the dialer placed (DP-9). Hand the desk straight back
-            // and count the attempt, so the number goes to the back of its tier rather than
-            // being dialled again on the very next tick.
+            // and write the dial down. recordMissedCall() counts the attempt as well, so the
+            // number goes to the back of its tier rather than being dialled again on the
+            // very next tick — which is why this branch no longer counts one of its own.
             //
-            // 🔴 No `calls` row and NO CallOutcome::Abandoned. Abandoned means a person was
-            // on the line and gave up; this is a phone that rang out. That column is what
-            // DP-12a measures against the 3% cap, and filling it with no-answers would put
-            // a compliant floor over the line on paper.
+            // 🔴 An outbound `no_answer` row with no agent (F21): DP-12a divides by every
+            // dial placed, and a ring-out used to leave nothing to count. But NEVER
+            // CallOutcome::Abandoned. Abandoned means a person was on the line and no agent
+            // reached them; this is a phone that rang out. That column is the top of the 3%
+            // cap, and filling it with no-answers would put a compliant floor over the line
+            // on paper.
             if ($legId === $this->callerLegId) {
                 $this->releaseAllReservations();
-                $this->countDialAttempt();
+                $this->recordMissedCall(CallOutcome::NoAnswer);
                 $this->dispose();
             }
 
@@ -1934,7 +1950,8 @@ class CallToAgentFlow
      * caller vanishes from every call report exactly as they would have before this slice.
      *
      * `no_answer` per QD-6's mapping — we stopped waiting on their behalf, they did not
-     * give up. Only for a call that never connected: once an agent is on the line their
+     * give up — except on a dialled call, which recordMissedCall() files `abandoned`
+     * (F22). Only for a call that never connected: once an agent is on the line their
      * screen owns the row (D2), and writing here would duplicate it. Ordered BEFORE the
      * teardown because reset() wipes the client, the ticket and the arrival time this
      * needs. The write is best-effort inside recordMissedCall(), so an error path cannot
