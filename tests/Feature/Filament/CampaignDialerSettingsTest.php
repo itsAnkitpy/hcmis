@@ -43,7 +43,10 @@ it('leaves a campaign made the old way on manual, not dialing, inside the legal 
             // Wall-clock strings, deliberately uncast (S118). Postgres spells them HH:MM:SS.
             ->and($campaign->dial_start_time)->toBe('10:00:00')
             ->and($campaign->dial_end_time)->toBe('21:00:00')
-            ->and($campaign->max_attempts)->toBeNull();
+            ->and($campaign->max_attempts)->toBeNull()
+            // DP-14: a default, not nullable — there is no "no gap" case worth having,
+            // so every campaign reads two hours without anyone typing it.
+            ->and($campaign->retry_gap_minutes)->toBe(120);
     });
 });
 
@@ -203,6 +206,7 @@ it('refuses a progressive campaign with no caller ID, and accepts it with one', 
     createCampaignWith($tenant, [
         'dial_mode' => DialMode::Progressive->value,
         'caller_id' => '+911400000000',
+        'max_attempts' => 5,
     ])->assertHasNoFormErrors();
 });
 
@@ -315,4 +319,46 @@ it('reads the window in a client\'s own timezone when they have set one', functi
     $this->travelTo(Carbon::parse('2026-09-10 16:30:00', 'UTC'));
 
     expect(TenantContext::run($tenant->id, fn (): bool => Campaign::dialable()->exists()))->toBeTrue();
+});
+
+// --- DP-14: the give-up cap becomes compulsory, and the gap gets a floor ---
+
+/**
+ * The gap alone still permits roughly five calls a day, every day, forever. The
+ * cap is what ends it, so on a progressive campaign it stops being optional —
+ * the caller_id rule (G3), one field further along.
+ */
+it('refuses a progressive campaign with no give-up cap, and accepts it with one', function () {
+    $tenant = Tenant::factory()->create();
+
+    createCampaignWith($tenant, [
+        'dial_mode' => DialMode::Progressive->value,
+        'caller_id' => '+911400000000',
+        'max_attempts' => null,
+    ])->assertHasFormErrors(['max_attempts']);
+
+    createCampaignWith($tenant, [
+        'dial_mode' => DialMode::Progressive->value,
+        'caller_id' => '+911400000000',
+        'max_attempts' => 5,
+    ])->assertHasNoFormErrors();
+});
+
+it('lets a manual campaign save with no give-up cap, because nothing auto-dials it', function () {
+    createCampaignWith(Tenant::factory()->create(), [
+        'dial_mode' => DialMode::Manual->value,
+        'max_attempts' => null,
+    ])->assertHasNoFormErrors();
+});
+
+it('refuses a retry gap short enough to rebuild the problem it exists to stop', function () {
+    // We cannot tell a busy signal from a rang-out (the `outcome` column has no busy),
+    // so short gaps are the wrong end of our own blindness. 15 is a judgement, not a
+    // legal figure — there is no legal figure.
+    createCampaignWith(Tenant::factory()->create(), [
+        'dial_mode' => DialMode::Progressive->value,
+        'caller_id' => '+911400000000',
+        'max_attempts' => 5,
+        'retry_gap_minutes' => 2,
+    ])->assertHasFormErrors(['retry_gap_minutes']);
 });

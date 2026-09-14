@@ -130,6 +130,17 @@ class Lead extends Model
     }
 
     /**
+     * Every call ever placed to or from this lead (B3). Read by DP-14's retry gap,
+     * which is the reason it exists as a relation rather than an ad-hoc join.
+     *
+     * @return HasMany<Call, $this>
+     */
+    public function calls(): HasMany
+    {
+        return $this->hasMany(Call::class);
+    }
+
+    /**
      * The one serving rule: the next lead worth working on a campaign (DIAL-1
      * DP-1). Not Closed, fewest attempts first then oldest, never one parked by a
      * pending callback, never one another caller is already holding.
@@ -186,6 +197,41 @@ class Lead extends Model
         return $query->where(fn (Builder $query) => $query
             ->whereNull('claimed_at')
             ->orWhere('claimed_at', '<', now()->subSeconds(self::CLAIM_TTL_SECONDS)));
+    }
+
+    /**
+     * Leads nobody has rung in the last $minutes (DIAL-1 DP-14).
+     *
+     * 🔴 Deliberately NOT folded into callable(). That rule is shared with the agent
+     * console (AgentConsole::nextCallableLead), and an agent choosing to ring somebody
+     * back after forty minutes is not the dialer machine-gunning them. Chained at the
+     * dialer's call site alone, so the console's queue is provably untouched — one grep
+     * for this name finds every caller, which a boolean argument on callable() would not
+     * give.
+     *
+     * EVERY call counts, an agent's own hand-dialled one included: from the customer's
+     * side it is the same company ringing twice in half an hour. `was_dialled` could
+     * narrow it to the dialer's own and deliberately does not.
+     *
+     * That reaches INBOUND as well, and only the half of it that should. A call the
+     * CUSTOMER made which an agent then wrapped up is filed against their lead (the
+     * console matches them on phone number), so speaking to them at 10:00 holds the
+     * dialer off until 12:00 — right, because we have just spoken to them. A missed
+     * inbound call is not: those rows are written with no lead attached at all, so
+     * somebody who rang us and gave up is still reachable on the very next tick, which
+     * is the behaviour a floor would want.
+     *
+     * Read off `created_at`: `started_at` is trunk-era listener enrichment and is null
+     * in v1, so it is the only moment on a `calls` row that is always populated.
+     * `calls.lead_id` is indexed, so this costs an EXISTS on an indexed column.
+     *
+     * @param  Builder<Lead>  $query
+     * @return Builder<Lead>
+     */
+    public function scopeNotDialedRecently(Builder $query, int $minutes): Builder
+    {
+        return $query->whereDoesntHave('calls', fn (Builder $query) => $query
+            ->where('calls.created_at', '>=', now()->subMinutes($minutes)));
     }
 
     /**

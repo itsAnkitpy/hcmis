@@ -121,7 +121,12 @@ class ProgressiveDialer
             return;   // nobody free: nothing booked, nothing to give back.
         }
 
-        $lead = Lead::query()->callable($campaign->id)->first();
+        // DP-14: the retry gap is chained HERE and nowhere else. callable() is the
+        // agent console's rule too, and the console is meant to be unchanged.
+        $lead = Lead::query()
+            ->callable($campaign->id)
+            ->notDialedRecently($campaign->retry_gap_minutes)
+            ->first();
 
         // claim() is the race the console already lost once (DP-3): an agent pressing Dial
         // in the same second takes the lead from under us. Losing it costs one tick.

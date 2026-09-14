@@ -679,3 +679,157 @@ it('still files a dialled customer who answered when a verb before the ring is r
         ->and($call->lead_id)->toBe($lead->id)
         ->and(TenantContext::run($tenant->id, fn (): int => $lead->fresh()->attempts))->toBe(1);
 });
+
+// --- DP-14: the retry gap. A lead we rang recently is not rung again. ---
+
+/**
+ * The gap lives in its own scope, chained at the dialer's call site only. These
+ * prove the two halves that matter: the dialer honours it, and `callable()` — the
+ * rule the agent console shares — does not, so a human ringing somebody back after
+ * forty minutes is unaffected.
+ *
+ * Time is read off `calls.created_at`: `started_at` is trunk-era enrichment and is
+ * null in v1, so it is the only moment on the row that is always populated.
+ */
+function rangLeadMinutesAgo(Tenant $tenant, Lead $lead, int $minutesAgo, ?User $agent = null, array $attributes = []): void
+{
+    TenantContext::run($tenant->id, function () use ($lead, $minutesAgo, $agent, $attributes) {
+        $call = Call::factory()->forLead($lead);
+
+        if ($agent !== null) {
+            $call = $call->forAgent($agent);
+        }
+
+        $call->create([
+            'direction' => CallDirection::Outbound,
+            'outcome' => CallOutcome::NoAnswer,
+            'created_at' => now()->subMinutes($minutesAgo),
+            ...$attributes,
+        ]);
+    });
+}
+
+it('does not dial a lead again inside the campaign retry gap', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+    rangLeadMinutesAgo($tenant, $lead, 30);   // default gap is 120
+
+    $telephony = fakeTelephony();
+    $telephony->shouldNotReceive('placeCall');
+
+    tickWith($telephony);
+
+    // Nothing dialled and the desk handed straight back — the same shape as an
+    // empty pool, because to the dialer that is exactly what this is.
+    expect(deskStatus($tenant, $agent))->toBe(PresenceStatus::Ready)
+        ->and(TenantContext::run($tenant->id, fn () => $lead->fresh()->claimed_at))->toBeNull();
+});
+
+it('dials the lead again once the retry gap has passed', function () {
+    $tenant = Tenant::factory()->create();
+    readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+    rangLeadMinutesAgo($tenant, $lead, 180);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+
+    tickWith($telephony);
+
+    expect(TenantContext::run($tenant->id, fn () => $lead->fresh()->claimed_at))->not->toBeNull();
+});
+
+it('counts a call an agent made by hand against the gap, not only the dialer\'s own', function () {
+    // From the customer's side it is the same company ringing twice in half an hour.
+    $tenant = Tenant::factory()->create();
+    $agent = readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+    rangLeadMinutesAgo($tenant, $lead, 30, $agent);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldNotReceive('placeCall');
+
+    tickWith($telephony);
+
+    expect(TenantContext::run($tenant->id, fn () => $lead->fresh()->claimed_at))->toBeNull();
+});
+
+it('reads the gap off the campaign rather than a fixed two hours', function () {
+    $tenant = Tenant::factory()->create();
+    readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    TenantContext::run($tenant->id, fn () => $campaign->update(['retry_gap_minutes' => 15]));
+    $lead = leadOn($tenant, $campaign);
+    rangLeadMinutesAgo($tenant, $lead, 30);   // inside two hours, outside this campaign's gap
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+
+    tickWith($telephony);
+
+    expect(TenantContext::run($tenant->id, fn () => $lead->fresh()->claimed_at))->not->toBeNull();
+});
+
+it('leaves the shared serving rule alone, so the agent console still offers a lead rung ten minutes ago', function () {
+    // 🔴 The guard on DP-14's promise. callable() is AgentConsole::nextCallableLead's
+    // rule too; if the gap ever leaks into it, a floor silently loses its callbacks.
+    $tenant = Tenant::factory()->create();
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+    rangLeadMinutesAgo($tenant, $lead, 10);
+
+    $served = TenantContext::run($tenant->id, fn (): ?Lead => Lead::query()->callable($campaign->id)->first());
+
+    expect($served?->id)->toBe($lead->id);
+});
+
+it('holds the dialer off a customer we spoke to, even though they rang us', function () {
+    // The wrap-up files an inbound conversation against the same lead (the console
+    // matches on phone number), so it lands in the history the gap reads. Deliberate:
+    // ringing somebody an hour after they called us is the same nuisance either way.
+    $tenant = Tenant::factory()->create();
+    $agent = readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+    rangLeadMinutesAgo($tenant, $lead, 30, $agent, [
+        'direction' => CallDirection::Inbound,
+        'outcome' => CallOutcome::Answered,
+    ]);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldNotReceive('placeCall');
+
+    tickWith($telephony);
+
+    expect(TenantContext::run($tenant->id, fn () => $lead->fresh()->claimed_at))->toBeNull();
+});
+
+it('still dials somebody who rang us and gave up before anyone answered', function () {
+    // 🔴 The other half, and the one that would hurt if it went the other way. A missed
+    // inbound call is written with NO lead attached, so it never enters this lead's
+    // history and never holds the dialer off — the person who tried to reach us is
+    // called straight back rather than parked for two hours.
+    $tenant = Tenant::factory()->create();
+    readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+
+    TenantContext::run($tenant->id, fn () => Call::factory()->create([
+        'direction' => CallDirection::Inbound,
+        'outcome' => CallOutcome::Abandoned,
+        'lead_id' => null,
+        'to_number' => $lead->phone,
+        'created_at' => now()->subMinutes(5),
+    ]));
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+
+    tickWith($telephony);
+
+    expect(TenantContext::run($tenant->id, fn () => $lead->fresh()->claimed_at))->not->toBeNull();
+});

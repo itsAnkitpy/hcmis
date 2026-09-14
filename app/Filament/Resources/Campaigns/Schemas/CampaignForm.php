@@ -155,7 +155,39 @@ class CampaignForm
                             ->maxValue(50)
                             ->placeholder('No limit')
                             ->suffix('attempts')
-                            ->helperText('Stop serving a number that never answers. Blank keeps trying, which is what every campaign does today.'),
+                            // DP-14 / G3, the caller_id pattern again. The retry gap alone
+                            // still permits ~5 calls a day, every day, forever; the cap is
+                            // what ends it. Optional stays fine on a manual campaign, where
+                            // a person decides each dial.
+                            ->required(fn (callable $get): bool => $get('dial_mode') === DialMode::Progressive->value)
+                            ->validationMessages([
+                                'required' => 'An auto-dialing campaign has to give up eventually — set how many attempts a number gets before it is left alone.',
+                            ])
+                            ->helperText('Stop serving a number that never answers. Required once the dialer is doing the calling.'),
+
+                        TextInput::make('retry_gap_minutes')
+                            ->label('Wait between calls')
+                            // Only the dialer obeys this, so only a dialing campaign should
+                            // be shown it — the `is_dialing` rule two fields up. Left visible
+                            // it reads as a promise on a manual campaign, where an agent
+                            // decides each dial and nothing spaces them out. Hidden, the
+                            // column's own default fills it in and nothing is lost.
+                            ->visible(fn (callable $get): bool => $get('dial_mode') === DialMode::Progressive->value)
+                            ->numeric()
+                            ->required()
+                            // 🔴 The floor is the guard, not decoration: without it a client
+                            // types 1 and rebuilds the exact bug DP-14 exists to fix. We
+                            // cannot tell a busy signal from a rang-out (`calls.outcome` has
+                            // no busy), so short gaps are the wrong end of our own blindness.
+                            // 15 and 1440 are judgements — no regulation sets a gap at all.
+                            ->minValue(15)
+                            ->maxValue(1440)
+                            ->default(120)
+                            ->suffix('minutes')
+                            ->validationMessages([
+                                'min' => 'Anything under 15 minutes rings the same person over and over — that is what this setting exists to prevent.',
+                            ])
+                            ->helperText('How long the dialer leaves a number alone before trying it again. Two hours by default.'),
                     ])
                     // The resource form is a 2-column grid, so without this the whole
                     // section is squeezed into one half-width slot next to Template.

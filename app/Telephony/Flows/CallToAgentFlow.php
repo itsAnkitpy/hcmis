@@ -1806,6 +1806,27 @@ class CallToAgentFlow
             // cap, and filling it with no-answers would put a compliant floor over the line
             // on paper.
             if ($legId === $this->callerLegId) {
+                // 🔴 Measurement only, S155 — nothing reads this and nothing should.
+                // Asterisk puts its own hangup reason on ChannelDestroyed (Q.850: 17 is
+                // busy, 19 rang out); StasisEnd carries none, and whichever of the two
+                // lands first tears the call down, so the reason is here SOMETIMES. That
+                // is precisely the number we need: a week of these says how often the
+                // engine actually tells us, which decides whether per-reason retry gaps
+                // are worth building at all. Asterisk has open bugs (#963, #1660) on the
+                // cause going missing for exactly the dial-timeout case, so do not build
+                // on this field before the log says it is there.
+                // ponytail: a measurement with an end date, not a permanent log line. It
+                // writes on every unanswered dial, so delete it once a week of staging has
+                // answered how often `cause` is actually present — or promote it to a
+                // counted field if the answer is "always" and per-reason gaps get built.
+                Log::info('A dialled call ended with nobody on it.', [
+                    'ticket' => $this->ticketNumber,
+                    'tenant' => $this->tenantId,
+                    'eventType' => $event['type'] ?? null,
+                    'cause' => $event['cause'] ?? null,
+                    'causeText' => $event['cause_txt'] ?? null,
+                ]);
+
                 $this->releaseAllReservations();
                 $this->recordMissedCall(CallOutcome::NoAnswer);
                 $this->dispose();

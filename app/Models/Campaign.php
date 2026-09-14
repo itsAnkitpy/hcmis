@@ -32,6 +32,7 @@ use Illuminate\Support\Carbon;
  * @property string $dial_start_time
  * @property string $dial_end_time
  * @property int|null $max_attempts
+ * @property int $retry_gap_minutes
  * @property bool $is_active
  * @property array<int, array<string, mixed>> $custom_fields
  */
@@ -53,6 +54,7 @@ class Campaign extends Model
         'dial_start_time',
         'dial_end_time',
         'max_attempts',
+        'retry_gap_minutes',
         'is_active',
         'custom_fields',
     ];
@@ -68,6 +70,7 @@ class Campaign extends Model
             'is_dialing' => 'boolean',
             'category' => CampaignCategory::class,
             'max_attempts' => 'integer',
+            'retry_gap_minutes' => 'integer',
             // 🔴 dial_start_time / dial_end_time are deliberately NOT cast (S118).
             // They are wall-clock times with no date, so casting them to datetime
             // makes Filament convert them against the panel's reading zone — the
