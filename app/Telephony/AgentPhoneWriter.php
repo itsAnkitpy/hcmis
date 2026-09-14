@@ -72,6 +72,27 @@ class AgentPhoneWriter
                 'id' => $extension,
                 'max_contacts' => 1,
                 'remove_existing' => 'yes',
+                // 🔴 F29. Every agent was born with qualify OFF, so Asterisk never checked
+                // whether a registered console was still there and kept dead registrations
+                // on the books for up to the hour `default_expiration` allows. A desk that
+                // had gone away still looked reachable, and the dial against it failed
+                // with "Allocation failed" (measured on staging 2026-09-13, extension
+                // 1103). Thirty seconds is one OPTIONS ping per agent per half minute —
+                // about 1.7 a second on a fifty-seat floor, and nothing at our size.
+                //
+                // A literal, not a config key: nobody tunes this per deploy, and a knob
+                // that never turns is one more thing to read. Being an upsert on `id`,
+                // re-provisioning an agent repairs a row written before this line existed.
+                //
+                // Deliberately NOT paired with `remove_unavailable` (S154, Ankit's call).
+                // Nothing in this codebase ever asks the switch whether a phone is alive —
+                // the agent board decides who is free — so deleting a contact on a failed
+                // ping cannot improve a routing decision; it can only change which error
+                // comes back. Against that it takes a live agent off the floor for minutes
+                // on one missed ping, because their browser re-registers on its own timer.
+                // ringAgent() now survives a refused desk, which is what made the trade a
+                // losing one.
+                'qualify_frequency' => 30,
             ]], 'id');
 
             $user->forceFill(['sip_extension' => $extension])->save();

@@ -23,6 +23,8 @@ use App\Telephony\AgentRouter;
 use App\Telephony\Flows\Switchboard;
 use App\Telephony\ProgressiveDialer;
 use App\Telephony\RecordingSession;
+use App\Telephony\TelephonyException;
+use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -594,4 +596,86 @@ it('files an answered dial as an outbound call, on the campaign number the diale
         // number, which is the whole reason DQ-5 makes campaigns carry their own.
         ->and($call->from_number)->toBe('+911400000000')
         ->and($call->to_number)->toBe('9991234567');
+});
+
+/**
+ * 🔴 F28, measured on staging 2026-09-13 and the reason slice 4's reported 4 / 2 / 50.0%
+ * was a coincidence — the honest figures for the day were 5 / 3 / 60.0%.
+ *
+ * We rang this person. They answered. The switch then refused to ring the desk booked for
+ * them ("Allocation failed", F29's stale WebRTC registration), and the refusal reached
+ * abort(), which hung up every leg. So a human who said hello got dead air, the state was
+ * still DialingCustomer — which recordMissedCallIfNeverConnected() skipped — and the call
+ * was recorded NOWHERE: missing from both halves of DP-12a's 3% cap in the direction that
+ * flatters us, and missing its attempt, so the dialer would ring them again too soon.
+ *
+ * They now hold instead, and the ordinary hold-limit path files them.
+ */
+it('keeps a dialled customer who answered on the line when the switch refuses their desk (F28)', function () {
+    $tenant = Tenant::factory()->create(['max_hold_seconds' => 44]);
+    $agent = readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+    $telephony->shouldReceive('placeCall')->once()->andThrow(new TelephonyException('Allocation failed'));
+    $telephony->shouldReceive('hangup')->andReturnNull();
+
+    $switchboard = tickWith($telephony);
+    $switchboard->handle(stasisStart('customer-leg', ['dialer']));   // hello — and the desk refuses
+
+    // Still on the line: nothing filed yet, because nothing has ended. The old code had
+    // hung them up by this point and written nothing at all.
+    expect(TenantContext::run($tenant->id, fn (): int => Call::query()->count()))->toBe(0)
+        // The booking was still PENDING when the refusal landed, so only this hands it
+        // back — otherwise the desk sits tagged "On a call" for good (Fold B).
+        ->and(deskStatus($tenant, $agent))->toBe(PresenceStatus::Ready);
+
+    $this->travel(45)->seconds();
+    $switchboard->sweepWaiting();
+
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::query()->sole());
+
+    // Row 619's shape, through row 619's code: a person answered a call we placed and no
+    // agent reached them, which is what TRAI counts.
+    expect($call->outcome)->toBe(CallOutcome::Abandoned)
+        ->and($call->ended_by)->toBe(CallEndedBy::System)
+        ->and($call->direction)->toBe(CallDirection::Outbound)
+        ->and($call->was_dialled)->toBeTrue()
+        ->and($call->lead_id)->toBe($lead->id)
+        ->and($call->campaign_id)->toBe($campaign->id)
+        ->and($call->started_at)->not->toBeNull()
+        ->and(TenantContext::run($tenant->id, fn (): int => $lead->fresh()->attempts))->toBe(1);
+});
+
+/**
+ * The net under the catch above, and the reason DialingCustomer is in
+ * recordMissedCallIfNeverConnected()'s guard. Not every verb on the way to a ringing desk
+ * is inside that catch — the hold music is started first and has no rescue of its own — so
+ * a refusal there still tears the call down the old way. The customer had already said
+ * hello, which makes it an abandon however it ended (F22), and before this the state was
+ * DialingCustomer and the guard walked straight past it.
+ */
+it('still files a dialled customer who answered when a verb before the ring is refused', function () {
+    $tenant = Tenant::factory()->create();
+    readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    $lead = leadOn($tenant, $campaign);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->andThrow(new TelephonyException('Allocation failed'));
+    $telephony->shouldReceive('hangup')->once()->with('customer-leg');
+
+    $switchboard = tickWith($telephony);
+    $switchboard->handle(stasisStart('customer-leg', ['dialer']));
+
+    $call = TenantContext::run($tenant->id, fn (): Call => Call::query()->sole());
+
+    expect($call->outcome)->toBe(CallOutcome::Abandoned)
+        ->and($call->direction)->toBe(CallDirection::Outbound)
+        ->and($call->was_dialled)->toBeTrue()
+        ->and($call->lead_id)->toBe($lead->id)
+        ->and(TenantContext::run($tenant->id, fn (): int => $lead->fresh()->attempts))->toBe(1);
 });

@@ -677,12 +677,72 @@ class CallToAgentFlow
         // the question "did this customer wait for us".
         $this->writeHandoffNote($reservedAgentId, $this->dialedLeadId === null ? $this->startedAt : null);
 
-        $agentLegId = $this->telephony->placeCall(
-            $this->directory->endpointFor($reservedAgentId),
-            'agent',
-            $this->callerNumber,
-            $this->ringSecondsOrDefault(),
-        );
+        // 🔴 F28/F30: A REFUSED DESK IS NOT A BROKEN CALL. The switch can refuse to ring
+        // an endpoint it has a stale registration for (F29, measured 2026-09-13: a WebRTC
+        // contact that had gone away without Asterisk noticing, HTTP 500 "Allocation
+        // failed"). Without this catch the exception reaches abort(), which hangs up every
+        // leg — so a dialled customer who had just ANSWERED got dead air, and the state
+        // was still DialingCustomer, which recordMissedCallIfNeverConnected() skips: no
+        // row, no counted attempt, and an abandoned call missing from both halves of
+        // DP-12a's 3% cap, in the direction that flatters us.
+        //
+        // Caught HERE rather than in the dialer's branch because all three ways a desk is
+        // rung pass through this one call — the dialer's answered customer, an inbound
+        // call's first ring (beginCall), and the waiting room's retry (sweepThisCall) —
+        // and the first two both landed in abort() from a state that writes nothing.
+        // beginCall never assigns a state at all, so an answered INBOUND caller vanished
+        // the same way (F30) and nobody had noticed, because no one reads abandon figures
+        // for inbound calls. One guard, three paths.
+        //
+        // A lost pipe still goes up, as everywhere: that is everyone's problem, not this
+        // call's (the tryAgain/handle split).
+        try {
+            $agentLegId = $this->telephony->placeCall(
+                $this->directory->endpointFor($reservedAgentId),
+                'agent',
+                $this->callerNumber,
+                $this->ringSecondsOrDefault(),
+            );
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException $exception) {
+            Log::warning('The desk we booked could not be rung — the customer keeps holding while we try another.', [
+                'ticket' => $this->ticketNumber,
+                'tenant' => $this->tenantId,
+                'agentUser' => $reservedAgentId,
+                'wasDialled' => $this->dialedLeadId !== null,
+                'error' => $exception->getMessage(),
+            ]);
+
+            // Same note as a desk that let the phone ring out (QD-4's second door): it
+            // keeps this desk out of the next attempt for one ring and then lets it back
+            // in. Without it tryAgain() re-books the same refusing endpoint every five
+            // seconds until the hold limit, and on a floor with someone else free the
+            // customer would wait behind a phone that cannot ring instead of being
+            // handed to them.
+            $this->rangOutAt[$reservedAgentId] = now();
+
+            // The booking is still PENDING here — it moves onto the leg only below, on
+            // the line the throw skipped — so nothing else would ever hand it back and
+            // this agent would sit tagged "On a call" for good (Fold B). Best-effort, for
+            // the reason abort() rescues the same call: it must not become a second error.
+            rescue(fn () => $this->releaseAllReservations(), report: false);
+
+            // Close the screen pop we opened three lines ago for a phone that never rang.
+            // It used to clear itself within milliseconds because the call died; now the
+            // call lives on for the whole hold limit, so without this the agent watches a
+            // customer's details for a call they are not on while someone else takes it.
+            $this->stampHandoff(['ended_at' => now()], $reservedAgentId);
+
+            // Back to the machinery that already handles "nobody can take this caller":
+            // music stays on, the listener's five-second heartbeat retries, and if nobody
+            // else is free the hold limit files them through giveUpOnWaitingCaller —
+            // `abandoned` for a dialled customer (F22), counted attempt and all. The
+            // bookkeeping is not rebuilt here; it is inherited.
+            $this->enterWaitingRoom('the desk we booked could not be rung');
+
+            return;
+        }
         // The first agent enters the set RINGING, carrying the reservation so a no-answer
         // can release it (Fold B); it flips to connected when they pick up (connectAgent).
         $this->agents[$agentLegId] = new AgentLeg(
@@ -1956,10 +2016,30 @@ class CallToAgentFlow
      * teardown because reset() wipes the client, the ticket and the arrival time this
      * needs. The write is best-effort inside recordMissedCall(), so an error path cannot
      * become a second error.
+     *
+     * DialingCustomer is here as the NET UNDER ringAgent's own catch, not as a second way
+     * to write F28's row — that row is now the waiting room's, and a dial that reaches the
+     * catch never reaches here at all. What is left is a teardown that strikes while the
+     * dial is still in flight and before the ring is placed: startHoldMusicIfSilent() is a
+     * raw verb with no rescue of its own, and discard() arrives here from the switchboard's
+     * backstop on any unexpected error. Which row that writes is recordMissedCall's usual
+     * question and it answers it correctly either way — a refused verb AFTER the customer
+     * said hello has `startedAt` stamped and is filed `abandoned` (F22), while a teardown
+     * on a number still ringing has none and is filed as the ring-out it is (F21). Both
+     * count the attempt. No double write: onLegEnded's own DialingCustomer branch disposes,
+     * and reset() puts the state back to Idle behind it.
+     *
+     * ponytail: the same early-teardown hole is still open on the INBOUND first ring —
+     * beginCall assigns no state at all, so an answered caller lost to a refused hold-music
+     * verb writes nothing. Not reachable through placeCall any more (ringAgent catches it)
+     * and never measured, so it is left alone; adding Idle to this guard closes it if it
+     * ever shows up in a log.
      */
     private function recordMissedCallIfNeverConnected(): void
     {
-        if ($this->state !== CallFlowState::Waiting && $this->state !== CallFlowState::RingingAgent) {
+        if ($this->state !== CallFlowState::Waiting
+            && $this->state !== CallFlowState::RingingAgent
+            && $this->state !== CallFlowState::DialingCustomer) {
             return;
         }
 

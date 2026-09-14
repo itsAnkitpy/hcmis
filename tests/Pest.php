@@ -456,9 +456,15 @@ function createAsteriskPhoneTables(): void
         password varchar(80)
     )');
 
+    // 🔴 `qualify_frequency` is the one column here NOT read off the box — it was added at
+    // S154, when AgentPhoneWriter started writing it (F29), and the laravel-boost MCP has
+    // been down since S152 so the schema could not be re-read. `integer` is what Asterisk's
+    // own Alembic set uses for it, a plain count of seconds. Confirm it against staging on
+    // the next trip there; everything else below was read on 2026-09-07.
     DB::statement('create table asterisk.ps_aors (
         id varchar(255) primary key,
         max_contacts integer,
-        remove_existing asterisk.ast_bool_values
+        remove_existing asterisk.ast_bool_values,
+        qualify_frequency integer
     )');
 }

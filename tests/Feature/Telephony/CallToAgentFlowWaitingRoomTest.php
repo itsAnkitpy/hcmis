@@ -82,16 +82,18 @@ it('releases the agent booked by a sweep that never got as far as placing the le
     $flow = new CallToAgentFlow($telephony, $switchboard);
     $flow->handle(stasisStart('caller-leg', []));
 
-    // An agent frees up, the sweep books them on the board — and the caller hangs up in
-    // that same instant, so placing their leg comes back "channel not found". Nothing
-    // carries the reservation yet, which is exactly how an agent used to end up tagged
-    // On a call with no way back short of a database edit.
+    // An agent frees up, the sweep books them on the board — and placing their leg is
+    // refused. Nothing carries the reservation yet, which is exactly how an agent used to
+    // end up tagged On a call with no way back short of a database edit.
     $router->agentId = 6;
-    $telephony->shouldReceive('placeCall')->once()->andThrow(new TelephonyException('Channel not found'));
-    $telephony->shouldReceive('hangup')->once()->with('caller-leg');
+    $telephony->shouldReceive('placeCall')->once()->andThrow(new TelephonyException('Allocation failed'));
 
     $flow->tryAgain();
 
+    // No hangup is expected on this mock any more, and its absence is the assertion: as of
+    // S154 a refused desk sends the caller back to the waiting room instead of ending
+    // their call (F28/F30). The reservation release this test is named for is unchanged —
+    // it just now happens on the way to holding rather than on the way to a teardown.
     expect($router->released)->toBe([[3, 6]]);   // the board tag was handed back
 });
 

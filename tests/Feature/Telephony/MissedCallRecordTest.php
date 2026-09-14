@@ -5,6 +5,7 @@ use App\Enums\CallOutcome;
 use App\Enums\RoleName;
 use App\Models\Call;
 use App\Models\Tenant;
+use App\Telephony\Flows\CallFlowState;
 use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\Flows\Switchboard;
 use App\Telephony\RecordingSession;
@@ -180,14 +181,62 @@ it('writes nothing when the dialled number belongs to no client (ND-4 — a row 
     expect(allCalls())->toHaveCount(0);
 });
 
-it('still writes the record when an error tears down a waiting caller (S88 review #5)', function () {
+/**
+ * 🔴 REWRITTEN AT S154, and the reversal is the point. This used to assert that a refused
+ * desk hung the waiting caller up and wrote them a no-answer row — the record was right
+ * and the caller was still lost. F28 proved that trade is not one we should be making: the
+ * refusal is usually a stale registration the switch has not noticed (F29), transient and
+ * survivable, so a caller who is quite happily on hold should not be cut off because ONE
+ * desk could not be rung. They keep holding, the sweep tries the next desk, and if nobody
+ * can take them the hold limit still files them — the record never went away, it just
+ * stopped being the consolation prize for a dropped call.
+ */
+it('keeps a waiting caller on the line when a desk is refused, and tries the next one', function () {
+    $tenant = Tenant::factory()->create();
+    $router = fakeAgentRouter(null);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    // Once, not twice: the music is already on from the first door into the waiting room,
+    // and coming back through it must not start a second copy over the first.
+    $telephony->shouldReceive('startHoldMusic')->once();
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+    $flow->handle(stasisStart('caller-leg', [], '9998887777', (string) $tenant->id));
+
+    // An agent frees up, the sweep books them — and placing their leg is refused. A REAL
+    // agent row, because the ring writes the screen's ticket note against it first.
+    $agentId = clientUserWithRole($tenant, RoleName::Agent->value)->id;
+    $router->agentId = $agentId;
+    $telephony->shouldReceive('placeCall')->once()->andThrow(new TelephonyException('Allocation failed'));
+
+    $this->travel(30)->seconds();
+    $flow->tryAgain();
+
+    expect($flow->state())->toBe(CallFlowState::Waiting)
+        // Nothing filed: they have not gone anywhere, so there is nothing to file yet.
+        ->and(allCalls())->toHaveCount(0)
+        // Handed back — the booking was still pending when the refusal landed, so nothing
+        // else would have released it and the desk would read "On a call" for good.
+        ->and($router->released)->toBe([[$tenant->id, $agentId]]);
+
+    // …and the refusing desk is kept out of the very next attempt, so the five-second
+    // heartbeat tries somebody else instead of re-booking the same dead endpoint until
+    // the hold limit.
+    $flow->tryAgain();
+
+    expect(end($router->skipped))->toBe([$agentId]);
+});
+
+it('still writes the record when the hold limit ends a caller whose desks all refused', function () {
     // Frozen, because the assertion below is an exact 30 against travel(30). Unfrozen,
     // any real time spent between the caller arriving and the sweep — a database round
     // trip is enough — lands the wait on 31 and fails the run. It only ever showed
     // under a full-suite run, which is the worst way to find it.
     $this->freezeTime();
 
-    $tenant = Tenant::factory()->create();
+    $tenant = Tenant::factory()->create(['max_hold_seconds' => 25]);
     $router = fakeAgentRouter(null);
 
     $telephony = Mockery::mock(TelephonyProvider::class);
@@ -198,19 +247,20 @@ it('still writes the record when an error tears down a waiting caller (S88 revie
     $flow = new CallToAgentFlow($telephony, $switchboard);
     $flow->handle(stasisStart('caller-leg', [], '9998887777', (string) $tenant->id));
 
-    // An agent frees up, the sweep books them — and placing their leg is refused, the
-    // realistic case being the caller hanging up in that same instant. The call is torn
-    // down by the error path rather than by either ordinary ending. A REAL agent row,
-    // because the ring writes the screen's ticket note against it first.
     $router->agentId = clientUserWithRole($tenant, RoleName::Agent->value)->id;
-    $telephony->shouldReceive('placeCall')->once()->andThrow(new TelephonyException('Channel not found'));
+    $telephony->shouldReceive('placeCall')->once()->andThrow(new TelephonyException('Allocation failed'));
     $telephony->shouldReceive('hangup')->once()->with('caller-leg');
 
-    $this->travel(30)->seconds();
+    // The first sweep has to land INSIDE the client's 25 seconds, because the cap is read
+    // before a desk is booked — past it, the sweep gives up without ever ringing anyone
+    // and this test proves nothing. So: book and be refused at 20 seconds, then come back
+    // at 30 to a caller nobody can take. The row is the same one QD-5 always promised.
+    $this->travel(20)->seconds();
     $flow->tryAgain();
 
-    // Without this the caller is hung up on and vanishes from every call report — the
-    // exact outcome the waiting room exists to make impossible.
+    $this->travel(10)->seconds();
+    $flow->tryAgain();
+
     $call = allCalls()->sole();
 
     expect($call->tenant_id)->toBe($tenant->id)
@@ -220,6 +270,37 @@ it('still writes the record when an error tears down a waiting caller (S88 revie
         ->and($call->waitedSeconds())->toBe(30)     // computed from the moments (CT-4)
         ->and($call->duration_seconds)->toBeNull()
         ->and($call->agent_id)->toBeNull();
+});
+
+/**
+ * 🔴 F30 — found at S154 by reading, not by a report, and it had been live the whole time.
+ * beginCall() never assigns a state at all, so when the switch refused the FIRST desk an
+ * inbound caller was offered, the exception reached abort() from Idle — which
+ * recordMissedCallIfNeverConnected() skips just as surely as it skipped DialingCustomer.
+ * A caller we had already answered was hung up on and left no row anywhere. Nobody caught
+ * it because nobody reads abandon figures for inbound calls.
+ *
+ * This is why the guard went into ringAgent() rather than into the dialer's own branch:
+ * one catch, and the three ways a desk gets rung are all covered.
+ */
+it('keeps a brand-new inbound caller on the line when the switch refuses the first desk (F30)', function () {
+    $tenant = Tenant::factory()->create();
+    $router = fakeAgentRouter(clientUserWithRole($tenant, RoleName::Agent->value)->id);
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('startHoldMusic')->once();
+    $telephony->shouldReceive('placeCall')->once()->andThrow(new TelephonyException('Allocation failed'));
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+    $flow->handle(stasisStart('caller-leg', [], '9998887777', (string) $tenant->id));
+
+    // No hangup was expected on the mock above, so the call reaching one would fail this
+    // outright: the caller is still here, holding, with the heartbeat about to try again.
+    expect($flow->state())->toBe(CallFlowState::Waiting)
+        ->and(allCalls())->toHaveCount(0)
+        ->and($router->released)->toBe([[$tenant->id, $router->agentId]]);
 });
 
 it('writes nothing when a verb is refused AFTER the agent picked up (S88 review #5)', function () {

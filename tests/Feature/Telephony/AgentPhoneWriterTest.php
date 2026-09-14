@@ -56,7 +56,13 @@ it('writes the same settings the hand-written phone 1003 uses', function () {
     expect($rows['auth']->auth_type)->toBe('userpass')
         ->and($rows['auth']->username)->toBe($extension)
         ->and($rows['aor']->max_contacts)->toBe(1)
-        ->and($rows['aor']->remove_existing)->toBe('yes');
+        ->and($rows['aor']->remove_existing)->toBe('yes')
+        // 🔴 F29, and the reason every agent on staging had a phone Asterisk never checked
+        // on: this was absent, so the switch kept dead WebRTC registrations on the books
+        // for up to the hour `default_expiration` allows and a dial against one came back
+        // "Allocation failed". Deliberately not paired with `remove_unavailable` — see the
+        // note on the writer for why that trade stopped being worth it.
+        ->and($rows['aor']->qualify_frequency)->toBe(30);
 });
 
 // --- PP-5: idempotent — a second call is not a second phone, nor a new key ---
