@@ -769,16 +769,6 @@ class CallToAgentFlow
     }
 
     /**
-     * Put the caller in the waiting room (QD-1/QD-2): music starts on the line they are
-     * already on, and the call is simply labelled Waiting. There is no queue object and
-     * no holding bridge — the switchboard's own list of live calls, in arrival order, IS
-     * the waiting line, so first-in-first-out comes free.
-     *
-     * Reached from both doors: nobody free when the call arrived, and an agent letting
-     * their phone ring out. Each hands its own reason to the log, because they mean
-     * different things to whoever reads it (understaffed vs one desk not answering).
-     */
-    /**
      * Drop a handoff note for an agent we are about to ring (TH-5/TH-6): prune their
      * prior note, then write this call's ticket, so their screen reads the RIGHT call's
      * ticket at ring-time and stamps it on the row for the recording to attach to.
@@ -883,15 +873,33 @@ class CallToAgentFlow
         );
     }
 
+    /**
+     * Put the customer in the waiting room (QD-1/QD-2): music starts on the line they are
+     * already on, and the call is simply labelled Waiting. There is no queue object and
+     * no holding bridge — the switchboard's own list of live calls, in arrival order, IS
+     * the waiting line, so first-in-first-out comes free.
+     *
+     * Reached from three doors: nobody free when the call arrived, an agent letting their
+     * phone ring out, and (S154) the switch refusing to ring the desk we booked. Each
+     * hands its own reason to the log, because they mean different things to whoever
+     * reads it — understaffed, one desk not answering, one desk unreachable.
+     *
+     * 🔴 A DIALLED customer reaches all three, which is why neither this line nor the two
+     * endings below says "inbound" any more: on a progressive dial the person holding is
+     * someone WE rang, and a log that calls them "the caller" on an "inbound call" is the
+     * one a reader skips past while hunting a dialer fault. `wasDialled` is the field to
+     * filter on instead.
+     */
     private function enterWaitingRoom(string $why): void
     {
         $this->startHoldMusicIfSilent();
         $this->state = CallFlowState::Waiting;
 
-        Log::info('Inbound call: the caller is holding with music on, waiting for a desk to free up.', [
+        Log::info('The customer is holding with music on, waiting for a desk to free up.', [
             'ticket' => $this->ticketNumber,
             'caller' => $this->callerLegId,
             'tenant' => $this->tenantId,
+            'wasDialled' => $this->dialedLeadId !== null,
             'why' => $why,
             'rangOut' => array_keys($this->rangOutAt),          // everyone who has missed this caller
             'coolingOff' => $this->coolingOffAgentIds(),        // …and who is out of the next attempt
@@ -1053,10 +1061,11 @@ class CallToAgentFlow
      */
     private function giveUpOnWaitingCaller(): void
     {
-        Log::info('Inbound call: the caller held longer than this client allows — ending the call as a missed one.', [
+        Log::info('The customer held longer than this client allows — ending the call as a missed one.', [
             'ticket' => $this->ticketNumber,
             'caller' => $this->callerLegId,
             'tenant' => $this->tenantId,
+            'wasDialled' => $this->dialedLeadId !== null,
             'heldSeconds' => (int) $this->startedAt?->diffInSeconds(now()),
             'aDeskWasRinging' => $this->state === CallFlowState::RingingAgent,
         ]);
@@ -1770,9 +1779,10 @@ class CallToAgentFlow
 
         if ($this->state === CallFlowState::Waiting) {
             if ($legId === $this->callerLegId) {
-                Log::info('Inbound call: the waiting caller gave up — writing them to the missed-call list.', [
+                Log::info('The customer waiting on hold gave up — writing them to the missed-call list.', [
                     'ticket' => $this->ticketNumber,
                     'tenant' => $this->tenantId,
+                    'wasDialled' => $this->dialedLeadId !== null,
                     'waitedSeconds' => (int) $this->startedAt?->diffInSeconds(now()),
                 ]);
 
