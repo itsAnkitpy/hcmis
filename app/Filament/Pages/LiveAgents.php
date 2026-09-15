@@ -151,7 +151,7 @@ class LiveAgents extends Page
      * and today's per-agent call count from the counting layer. All tenant-walled by
      * the request context.
      *
-     * @return array<int, array{id: int|null, name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, startedAtMs: int|null, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int, client: string|null, canLogOut: bool, canListen: bool}>
+     * @return array<int, array{id: int|null, name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, startedAtMs: int|null, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int, client: string|null, canLogOut: bool, canMonitor: bool}>
      */
     public function roster(): array
     {
@@ -203,9 +203,9 @@ class LiveAgents extends Page
                 'client' => $this->showsClient() ? ($presence->tenant?->name ?? '—') : null,
                 // LB-8: never on a row that is mid-call. See stuckRoster() for why.
                 'canLogOut' => $status !== PresenceStatus::OnCall,
-                // SM slice 2, the mirror image: listening is only offered on a row that IS
-                // mid-call, because there is nothing to listen to otherwise.
-                'canListen' => $status === PresenceStatus::OnCall,
+                // SM slices 2-3, the mirror image: listening and coaching are only offered
+                // on a row that IS mid-call, because there is nothing to hear otherwise.
+                'canMonitor' => $status === PresenceStatus::OnCall,
             ];
         })->all();
 
@@ -476,6 +476,32 @@ class LiveAgents extends Page
     /**
      * Listen in on an agent's live call (SM slice 2). Silent: the agent and the customer
      * hear nothing, and the call is not touched in any way.
+     */
+    public function listenTo(int $agentUserId): void
+    {
+        $this->beginMonitoring($agentUserId, 'listen');
+    }
+
+    /**
+     * Coach an agent on a live call (SM slice 3). The agent hears the supervisor; the
+     * customer does not.
+     *
+     * 🔴 TWO METHODS RATHER THAN ONE WITH A MODE ARGUMENT, and it is not style. Both are
+     * public and therefore reachable from any browser, so a mode passed in would be a
+     * value this page has to police — it reaches the audit wording, the on-screen text
+     * and, one hop later, whether a supervisor's microphone is opened onto a live call.
+     * Fixing the mode at the method removes the question instead of answering it.
+     *
+     * Pressing this while already listening does nothing (the phone program refuses a
+     * second session for the same supervisor). Stop first, then coach.
+     */
+    public function whisperTo(int $agentUserId): void
+    {
+        $this->beginMonitoring($agentUserId, 'whisper');
+    }
+
+    /**
+     * The shared body of both buttons (SM slices 2-3).
      *
      * Three things happen. The agent's board row is read, which is what proves they are
      * on a call AND which client they belong to (the row is client-owned; the tenant wall
@@ -498,7 +524,7 @@ class LiveAgents extends Page
      * the one that puts a third voice on a customer's call, and splitting the permission
      * belongs with it in slice 4.
      */
-    public function listenTo(int $agentUserId): void
+    private function beginMonitoring(int $agentUserId, string $mode): void
     {
         abort_unless(static::canAccess(), 403);
 
@@ -529,18 +555,24 @@ class LiveAgents extends Page
         // Pinned to the agent's own client for the write, the same reason forceLogOut
         // pins it: a team leader is already sitting in it, our global staff sit in none,
         // and an audit row with no client is a row nobody inside that client can read.
-        TenantContext::run((int) $presence->tenant_id, fn () => Audit::monitoringStarted($presence));
+        TenantContext::run((int) $presence->tenant_id, fn () => Audit::monitoringStarted($presence, $mode));
 
-        app(TelephonyProvider::class)->signal('listen', [
+        // The signal NAME is the mode (SM slice 3): nothing on the wire says which, so
+        // there is no mode string for anything downstream to have to trust.
+        app(TelephonyProvider::class)->signal($mode, [
             'agentUserId' => (string) $agentUserId,
             'supervisorUserId' => (string) auth()->id(),
         ]);
 
         Notification::make()
-            ->title("Listening in on {$name}")
-            ->body('Your phone will pick up by itself. Press Stop on your phone panel when you are done.')
+            ->title($mode === 'whisper' ? "Coaching {$name}" : "Listening in on {$name}")
+            ->body($mode === 'whisper'
+                ? "Your phone will pick up by itself. {$name} will hear you; the customer will not."
+                : 'Your phone will pick up by itself. Press Stop on your phone panel when you are done.')
             ->success()
             ->send();
+
+        $this->dispatch('monitoring-started', mode: $mode);
     }
 
     /**

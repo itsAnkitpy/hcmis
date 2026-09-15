@@ -94,12 +94,12 @@ it('rings the supervisors own phone, then taps the AGENT leg and feeds it to the
     // 🔴 The tap goes on the AGENT's line, not the customer's (SQ-6): the customer's
     // line already carries recording's two taps and the agent's carries none, so this is
     // the FIRST tap there. 'both' on the agent's line is the whole conversation.
-    $telephony->shouldReceive('snoop')->once()->with('agent-leg', 'both')->andReturn('tap-leg');
+    $telephony->shouldReceive('snoop')->once()->with('agent-leg', 'both', 'none')->andReturn('tap-leg');
     // A mixer of their own — never the call's conversation.
     $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
     $flow->handle(stasisStart('monitor-leg', ['monitor']));
 
     // The call is exactly as it was: the agent still serves it, the supervisor never
@@ -116,16 +116,22 @@ it('never pushes audio back into the call — a listening tap only ever spies', 
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
     $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
 
-    // 🔴 The whole of "silent" is here. A two-argument snoop leaves the whisper direction
-    // at its default of none, so the supervisor's microphone reaches nobody. A three-arg
-    // call — slice 3's coaching — would not match this expectation and the test would
-    // fail, which is exactly the guard whisper needs when it lands.
+    // 🔴 The whole of "silent" is here, and slice 3 made it say so out loud. The tap is
+    // asked for with NO whisper direction, so the supervisor's microphone reaches nobody
+    // however loudly they cough. Asking for 'out' here — which is what the Whisper button
+    // does — would not match, and this test is what stands between the two buttons.
+    //
+    // Nothing reaches the wire either way: the provider leaves 'none' OFF the request,
+    // so a listening tap is byte-identical to the one recording has made on every call
+    // this system has ever carried (AsteriskAriProviderTest pins that separately).
     $telephony->shouldReceive('snoop')->once()
-        ->withArgs(fn (string $legId, string $spy): bool => $legId === 'agent-leg' && $spy === 'both')
+        ->withArgs(fn (string $legId, string $spy, string $whisper): bool => $legId === 'agent-leg'
+            && $spy === 'both'
+            && $whisper === 'none')
         ->andReturn('tap-leg');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
     $flow->handle(stasisStart('monitor-leg', ['monitor']));
 });
 
@@ -146,7 +152,7 @@ it('releases the tap and folds the supervisors mixer when they hang up, leaving 
     $telephony->shouldReceive('endConversation')->once()->with('monitor-conv');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
     $flow->handle(stasisStart('monitor-leg', ['monitor']));
 
     $flow->handle(channelDestroyed('monitor-leg'));
@@ -177,7 +183,7 @@ it('releases a listening supervisor when the call ends underneath them', functio
     $telephony->shouldReceive('endConversation')->once()->with('conv-1');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
     $flow->handle(stasisStart('monitor-leg', ['monitor']));
 
     $flow->handle(channelDestroyed('caller-leg'));   // the customer hangs up
@@ -199,7 +205,7 @@ it('gives up cleanly when the agent leaves while the supervisors phone is still 
     $telephony->shouldNotReceive('snoop');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
 
     $flow->handle(channelDestroyed('agent-leg'));    // the agent hangs up mid-ring
 });
@@ -214,8 +220,8 @@ it('does not ring a second phone when the same supervisor presses listen twice',
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
 });
 
 it('refuses a supervisor who holds no phone of their own', function () {
@@ -227,7 +233,7 @@ it('refuses a supervisor who holds no phone of their own', function () {
     // from any browser, so the refusal has to live here too.
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
 });
 
 it('refuses to listen to an agent who is not on this call', function () {
@@ -239,7 +245,7 @@ it('refuses to listen to an agent who is not on this call', function () {
     // refresh means a click can always name somebody whose call has already moved on.
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 99, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 99, supervisorUserId: 2);
 });
 
 it('lets two supervisors listen to the same call at once', function () {
@@ -252,7 +258,7 @@ it('lets two supervisors listen to the same call at once', function () {
     // mixer. Two taps on one line is the arrangement recording already proves works.
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-a');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1106', 'monitor')->andReturn('monitor-b');
-    $telephony->shouldReceive('snoop')->twice()->with('agent-leg', 'both')->andReturn('tap-a', 'tap-b');
+    $telephony->shouldReceive('snoop')->twice()->with('agent-leg', 'both', 'none')->andReturn('tap-a', 'tap-b');
     $telephony->shouldReceive('join')->once()->with('tap-a', 'monitor-a')->andReturn('conv-a');
     $telephony->shouldReceive('join')->once()->with('tap-b', 'monitor-b')->andReturn('conv-b');
 
@@ -262,9 +268,9 @@ it('lets two supervisors listen to the same call at once', function () {
     $telephony->shouldReceive('endConversation')->once()->with('conv-a');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
     $flow->handle(stasisStart('monitor-a', ['monitor']));
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 3);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 3);
     $flow->handle(stasisStart('monitor-b', ['monitor']));
 
     $flow->handle(channelDestroyed('monitor-a'));
@@ -290,7 +296,7 @@ it('releases a listening supervisor when a bug tears the call down under them', 
     $telephony->shouldReceive('hangup')->once()->with('agent-leg');
 
     $flow = liveCallWithAgentSix($telephony);
-    $flow->beginListen(agentUserId: 6, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2);
     $flow->handle(stasisStart('monitor-leg', ['monitor']));
 
     $flow->discard();
@@ -323,5 +329,151 @@ it('will not tap an agent whose own phone is still ringing', function () {
 
     $flow = liveCallWithAgentSix($telephony);
     $flow->beginConference(3);                       // agent 7's phone starts ringing
-    $flow->beginListen(agentUserId: 7, supervisorUserId: 2);
+    $flow->beginMonitor(agentUserId: 7, supervisorUserId: 2);
+});
+
+/*
+|--------------------------------------------------------------------------
+| SM slice 3 — whisper (coaching)
+|--------------------------------------------------------------------------
+|
+| The same tap as listening, with one word changed. Everything else in this file
+| already covers coaching too, because both buttons walk the identical path: the
+| refusals, the double-click guard, the three teardown doors and the two-supervisors
+| case are all mode-blind by construction.
+|
+| So these cases only assert what the mode actually changes — which way the audio is
+| pointed — plus the one gap coaching turns from cosmetic into misleading: a tap whose
+| agent line goes away underneath it.
+*/
+
+it('points the supervisors voice into the AGENT ear and nowhere else when coaching', function () {
+    directoryOfPhones([6 => 'PJSIP/1100', 2 => 'PJSIP/1105']);
+
+    $telephony = fakeTelephony();
+    expectLiveCall($telephony);
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
+
+    // 🔴 THE WHOLE OF SLICE 3 IS THE WORD 'out'. It is the audio written TO the agent's
+    // line — what the agent hears — so the supervisor lands in the agent's ear alone.
+    // 'in' would be the audio read FROM that line, which is what carries on to the
+    // customer, and is the one outcome this feature must never produce. Asterisk 20 runs
+    // the spy and whisper directions through the same translation, which is why
+    // recording's own two taps use these same two words for said-versus-heard.
+    $telephony->shouldReceive('snoop')->once()
+        ->withArgs(fn (string $legId, string $spy, string $whisper): bool => $legId === 'agent-leg'
+            && $spy === 'both'
+            && $whisper === 'out')
+        ->andReturn('tap-leg');
+
+    $flow = liveCallWithAgentSix($telephony);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2, mode: 'whisper');
+    $flow->handle(stasisStart('monitor-leg', ['monitor']));
+
+    // Still not a participant. Coaching moves the audio, never the call.
+    expect($flow->isServingAgent(6))->toBeTrue()
+        ->and($flow->isServingAgent(2))->toBeFalse();
+});
+
+it('taps silently for any mode it does not recognise, so a bad mode can only under-share', function () {
+    directoryOfPhones([6 => 'PJSIP/1100', 2 => 'PJSIP/1105']);
+
+    $telephony = fakeTelephony();
+    expectLiveCall($telephony);
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('join')->once()->andReturn('monitor-conv');
+
+    // Nothing downstream of the two buttons keeps a list of allowed modes, because it
+    // does not need one: only the exact word 'whisper' opens a microphone, so anything
+    // else — a typo, a stale signal, a crafted one — is a silent tap, which is the safe
+    // direction to fail in.
+    $telephony->shouldReceive('snoop')->once()->with('agent-leg', 'both', 'none')->andReturn('tap-leg');
+
+    $flow = liveCallWithAgentSix($telephony);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2, mode: 'BARGE');
+    $flow->handle(stasisStart('monitor-leg', ['monitor']));
+});
+
+it('ends a supervisors session when the agent line it was tapping goes away under them', function () {
+    directoryOfPhones([6 => 'PJSIP/1100', 2 => 'PJSIP/1105']);
+
+    $telephony = fakeTelephony();
+    expectLiveCall($telephony);
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('snoop')->once()->andReturn('tap-leg');
+    $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
+
+    // 🔴 The supervisor's phone is put down and their mixer folded. Asterisk has already
+    // ended the tap itself, so nothing hangs it up a second time — and NOTHING belonging
+    // to the call is touched, which Mockery's strict matching is what proves.
+    $telephony->shouldReceive('hangup')->once()->with('monitor-leg');
+    $telephony->shouldReceive('endConversation')->once()->with('monitor-conv');
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+    $flow->handle(stasisStart('caller-leg', []));
+    $flow->handle(stasisStart('agent-leg', ['agent']));
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2, mode: 'whisper');
+    $flow->handle(stasisStart('monitor-leg', ['monitor']));
+
+    // 🔴 Fed to the SWITCHBOARD, not to the handler, because the half being proved here
+    // is that the tap was put in the phone-book at all. Recording's own taps are not, and
+    // are silently dropped at this line — so a tap that was never registered would make
+    // this test pass for the wrong reason if the event were handed straight over.
+    $switchboard->handle(channelDestroyed('tap-leg'));
+
+    // The call is untouched and the supervisor can start again without a page refresh.
+    expect($flow->isServingAgent(6))->toBeTrue();
+});
+
+it('lets a real transfer end the coaching session rather than leaving the coach talking to nobody', function () {
+    directoryOfPhones([6 => 'PJSIP/1100', 7 => 'PJSIP/1101', 2 => 'PJSIP/1105']);
+
+    // Agent 6 takes the call; the transfer then books agent 7, the same first-then-second
+    // shape the conference case above uses.
+    app()->instance(AgentRouter::class, new class extends AgentRouter
+    {
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
+        {
+            return isset($this->rung) ? 7 : ($this->rung = 6);
+        }
+
+        public function releaseReservation(int $tenantId, int $userId): void {}
+    });
+
+    $telephony = fakeTelephony();
+    expectLiveCall($telephony);
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('snoop')->once()->andReturn('tap-leg');
+    $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
+
+    // The transfer itself: ring agent 7, slip them into the live conversation, take
+    // agent 6 out and hang their line up.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1101', 'agent')->andReturn('transfer-leg');
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-1', 'transfer-leg');
+    $telephony->shouldReceive('removeFromBridge')->once()->with('conv-1', 'agent-leg');
+    $telephony->shouldReceive('hangup')->once()->with('agent-leg');
+
+    // 🔴 And with it, the coach. Agent 6's line is the one the tap sits on, so Asterisk
+    // ends the tap and the supervisor's half of this is over. Without it they carry on
+    // talking into a line that stopped existing — which while listening merely sounds
+    // broken, but while coaching reads exactly like an agent ignoring them.
+    $telephony->shouldReceive('hangup')->once()->with('monitor-leg');
+    $telephony->shouldReceive('endConversation')->once()->with('monitor-conv');
+
+    $switchboard = new Switchboard($telephony);
+    $flow = new CallToAgentFlow($telephony, $switchboard);
+    $flow->handle(stasisStart('caller-leg', []));
+    $flow->handle(stasisStart('agent-leg', ['agent']));
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2, mode: 'whisper');
+    $flow->handle(stasisStart('monitor-leg', ['monitor']));
+
+    $flow->beginTransfer(3);
+    $flow->handle(stasisStart('transfer-leg', ['agent']));   // agent 7 picks up, agent 6 is dropped
+    $switchboard->handle(channelDestroyed('agent-leg'));
+    $switchboard->handle(channelDestroyed('tap-leg'));       // Asterisk ends the tap with its line
+
+    expect($flow->isServingAgent(7))->toBeTrue()
+        ->and($flow->isServingAgent(6))->toBeFalse();
 });

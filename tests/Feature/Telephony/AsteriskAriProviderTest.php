@@ -236,6 +236,30 @@ it('starts a recording as two snoops on the leg — what they say and what they 
         && ariParams($request)['name'] === 'call-1-heard');
 });
 
+it('leaves the whisper direction off the request entirely when a tap is silent', function () {
+    Http::fake(['*/channels/agent-leg/snoop*' => Http::response(['id' => 'tap-leg'])]);
+
+    expect($this->telephony->snoop('agent-leg', 'both'))->toBe('tap-leg');
+
+    // 🔴 'none' is the engine's OWN default, so it is left off rather than sent. A silent
+    // tap's request is byte-identical to the one recording has made on every call this
+    // system has ever carried, and a proven request does not get edited to add a
+    // parameter meaning "behave as you already do".
+    Http::assertSent(fn (Request $request): bool => ariParams($request)
+        === ['spy' => 'both', 'app' => 'hcmis-test', 'appArgs' => 'snoop']);
+});
+
+it('sends the whisper direction that puts a coach in the agents ear, and only then', function () {
+    Http::fake(['*/channels/agent-leg/snoop*' => Http::response(['id' => 'tap-leg'])]);
+
+    expect($this->telephony->snoop('agent-leg', 'both', 'out'))->toBe('tap-leg');
+
+    // 'out' is the audio written TO that line — what the agent hears. 'in' would be the
+    // audio read FROM it, which is what carries on to the customer.
+    Http::assertSent(fn (Request $request): bool => ariParams($request)
+        === ['spy' => 'both', 'app' => 'hcmis-test', 'appArgs' => 'snoop', 'whisper' => 'out']);
+});
+
 it('stops both sides of a recording and releases the snoop legs', function () {
     Http::fake(['*' => Http::response()]);
 

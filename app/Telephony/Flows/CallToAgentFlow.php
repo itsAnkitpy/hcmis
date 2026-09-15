@@ -1591,30 +1591,32 @@ class CallToAgentFlow
     }
 
     /**
-     * A supervisor asked to listen in on this call (SM slice 2). Ring their own phone;
+     * A supervisor asked to monitor this call (SM slices 2-3). Ring their own phone;
      * everything else waits until they pick up, because there is nothing to feed a tap
      * into before then.
      *
      * 🔴 THE CALL ITSELF DOES NOT MOVE. No state change, no new member in the
      * participant set, no touch of the conversation the caller and agent are in. That is
-     * the whole reason this slice is small: a listener is not a participant, so none of
+     * the whole reason this slice is small: a monitor is not a participant, so none of
      * the machinery that manages participants has to learn about them.
      *
      * Silence is the default rather than something we switch on: a tap that only spies
      * carries no audio back into the call, so the supervisor's microphone reaches nobody
-     * however loudly they cough. Slice 3 turns that into coaching by setting the whisper
-     * direction on the same call.
+     * however loudly they cough. $mode 'whisper' is slice 3 — the same tap, with audio
+     * pushed into the AGENT's ear as well. Any other value is silent, so a mode this
+     * method does not recognise can only ever under-share.
      *
      * Four ways this quietly does nothing, all of them right:
      *  - the call is not in a state with a conversation to tap;
-     *  - this supervisor is already listening (a double-click must not ring them twice);
+     *  - this supervisor is already monitoring (a double-click must not ring them twice,
+     *    and pressing the other mode's button needs a Stop first — see MonitorLeg);
      *  - the named agent is not connected to this call (they hung up, or a transfer
      *    moved the call to somebody else between the board's 15-second refresh and the
      *    click);
      *  - the supervisor holds no phone (PP-12) — the button is hidden for them, but the
      *    signal is reachable from any browser, so it is refused here too.
      */
-    public function beginListen(int $agentUserId, int $supervisorUserId): void
+    public function beginMonitor(int $agentUserId, int $supervisorUserId, string $mode = 'listen'): void
     {
         if ($this->state !== CallFlowState::InCall && $this->state !== CallFlowState::AddingAgent) {
             return;
@@ -1637,11 +1639,12 @@ class CallToAgentFlow
         // follows, and what makes the pickup route to this handler rather than being
         // mistaken for a new call.
         $legId = $this->telephony->placeCall($endpoint, 'monitor');
-        $this->monitors[$legId] = new MonitorLeg($legId, userId: $supervisorUserId, agentUserId: $agentUserId);
+        $this->monitors[$legId] = new MonitorLeg($legId, userId: $supervisorUserId, agentUserId: $agentUserId, mode: $mode);
         $this->registry->registerLeg($legId, $this);
 
-        Log::info('Listen in: ringing the supervisor so they can hear this call.', [
+        Log::info('Monitor: ringing the supervisor so they can hear this call.', [
             'ticket' => $this->ticketNumber,
+            'mode' => $mode,
             'agentUser' => $agentUserId,
             'supervisorUser' => $supervisorUserId,
             'monitorLeg' => $legId,
@@ -1666,6 +1669,24 @@ class CallToAgentFlow
      * The agent is looked up again here rather than trusted from the ring: a transfer
      * completing in those few seconds hands the call to somebody else entirely, and
      * listening to a line that no longer exists is worse than not listening at all.
+     *
+     * 🔴 SLICE 3, AND IT IS THIS ONE WORD. 'out' is the audio being written TO the
+     * agent's line — what the agent hears — so the supervisor lands in the agent's ear
+     * and nowhere else. 'in' would be the audio read FROM that line, which is what goes
+     * on to the customer, and is therefore the leak this feature must never have.
+     * Asterisk 20 maps the spy and whisper directions through the same translation
+     * (res_stasis_snoop.c), which is why recording's own two taps use these same two
+     * words for said-vs-heard.
+     *
+     * Anything other than the exact word 'whisper' taps silently, so an unrecognised
+     * mode can only ever under-share.
+     *
+     * The tap is put in the switchboard's phone-book so that its DEATH is noticed. A
+     * transfer completing under a live session, or the agent leaving a call that carries
+     * on without them, hangs up the line this tap sits on. Without this the supervisor is
+     * left holding a live phone wired to nothing — which merely sounds broken while
+     * listening, but while coaching is worse: they talk, nobody hears them, and it reads
+     * exactly like an agent ignoring them.
      */
     private function onMonitorAnswered(string $legId): void
     {
@@ -1678,7 +1699,7 @@ class CallToAgentFlow
         $agentLegId = $this->connectedLegOf($monitor->agentUserId);
 
         if ($agentLegId === null) {
-            Log::info('Listen in: the agent left this call while the supervisor was picking up — nothing to listen to.', [
+            Log::info('Monitor: the agent left this call while the supervisor was picking up — nothing to monitor.', [
                 'ticket' => $this->ticketNumber,
                 'supervisorUser' => $monitor->userId,
             ]);
@@ -1688,15 +1709,23 @@ class CallToAgentFlow
             return;
         }
 
-        $monitor->tapLegId = $this->telephony->snoop($agentLegId, spy: 'both');
+        $monitor->tapLegId = $this->telephony->snoop(
+            $agentLegId,
+            spy: 'both',
+            whisper: $monitor->mode === 'whisper' ? 'out' : 'none',
+        );
         $monitor->conversationId = $this->telephony->join($monitor->tapLegId, $legId);
+        $this->registry->registerLeg($monitor->tapLegId, $this);
 
-        Log::info('Listen in: the supervisor is hearing the call; neither the agent nor the customer hears them.', [
-            'ticket' => $this->ticketNumber,
-            'agentUser' => $monitor->agentUserId,
-            'supervisorUser' => $monitor->userId,
-            'tap' => $monitor->tapLegId,
-        ]);
+        Log::info($monitor->mode === 'whisper'
+            ? 'Monitor: the supervisor is coaching this agent; the customer cannot hear them.'
+            : 'Monitor: the supervisor is hearing the call; neither the agent nor the customer hears them.', [
+                'ticket' => $this->ticketNumber,
+                'mode' => $monitor->mode,
+                'agentUser' => $monitor->agentUserId,
+                'supervisorUser' => $monitor->userId,
+                'tap' => $monitor->tapLegId,
+            ]);
     }
 
     /**
@@ -1960,8 +1989,9 @@ class CallToAgentFlow
      * leaving ends the whole call; a *ringing* added agent ending is a no-answer (release
      * + drop, the call carries on with whoever was connected); a *connected* agent ending
      * is a hang-up (drop them, continue if any connected agent remains, else the caller is
-     * alone -> end). Snoop legs and a freshly-dropped survivor match no tracked id and
-     * fall through untouched.
+     * alone -> end). A monitoring tap dying ends that supervisor's session only.
+     * Recording's snoops and a freshly-dropped survivor match no tracked id and fall
+     * through untouched.
      *
      * @param  array<string, mixed>  $event
      */
@@ -2086,8 +2116,9 @@ class CallToAgentFlow
                 // The supervisor put their phone down (SM slice 2) — the Stop button and
                 // a closed tab both arrive here, because both simply hang the leg up. The
                 // call carries on completely untouched; nobody on it ever knew.
-                Log::info('Listen in: the supervisor stopped listening; the call is unaffected.', [
+                Log::info('Monitor: the supervisor stopped; the call is unaffected.', [
                     'ticket' => $this->ticketNumber,
+                    'mode' => $monitor->mode,
                     'supervisorUser' => $monitor->userId,
                 ]);
 
@@ -2096,10 +2127,32 @@ class CallToAgentFlow
                 return;
             }
 
+            // 🔴 THE TAP DIED UNDER A LIVE SESSION (SM slice 3). Asterisk ends a tap when
+            // the line it sits on goes away, and that line goes away on two ordinary
+            // events this system already has: a cold transfer swapping the agent leg, and
+            // an agent leaving a call that carries on with somebody else. The call is
+            // fine; the supervisor's half is not. End their session so their phone hangs
+            // up, which tells them plainly, rather than leaving them talking into a line
+            // that stopped existing.
+            foreach ($this->monitors as $monitor) {
+                if ($monitor->tapLegId === $legId) {
+                    Log::info('Monitor: the agent line this session was tapping has gone — ending the supervisor\'s session.', [
+                        'ticket' => $this->ticketNumber,
+                        'mode' => $monitor->mode,
+                        'agentUser' => $monitor->agentUserId,
+                        'supervisorUser' => $monitor->userId,
+                    ]);
+
+                    $this->stopMonitor($monitor);
+
+                    return;
+                }
+            }
+
             $agent = $this->agents[$legId] ?? null;
 
             if ($agent === null) {
-                return;   // not a leg we track (a snoop, a freshly-dropped survivor)
+                return;   // not a leg we track (a recording snoop, a freshly-dropped survivor)
             }
 
             if (! $agent->connected) {

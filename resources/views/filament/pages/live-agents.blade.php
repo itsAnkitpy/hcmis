@@ -14,17 +14,26 @@
          error, it is simply absent, because most people who can read this board have no
          reason to hold a phone. --}}
     <div x-data="supervisorPhone(@js($this->getPhoneConfig()))" x-show="state !== 'none'" x-cloak
+         x-on:monitoring-started.window="mode = $event.detail.mode"
          class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm dark:border-white/10 dark:bg-gray-900">
         <span class="flex items-center gap-2 font-medium text-gray-950 dark:text-white">
-            <span class="size-2 rounded-full" :class="state === 'ready' || state === 'listening' ? 'bg-success-500' : 'bg-gray-400'"></span>
+            <span class="size-2 rounded-full"
+                  :class="state === 'listening' && mode === 'whisper' ? 'bg-warning-500' : (state === 'ready' || state === 'listening' ? 'bg-success-500' : 'bg-gray-400')"></span>
             Your phone
         </span>
+        {{-- SM slice 3: the live line has to say which mode it is in, because the two make
+             OPPOSITE promises about who can hear you. A single reassuring sentence covering
+             both would be wrong half the time, and it is wrong in the direction that matters
+             — a supervisor who believes they are silent while the agent can hear them. --}}
         <span class="text-gray-500 dark:text-gray-400"
-              x-text="{
-                  ready: 'Registered on {{ $this->getPhoneConfig()['extension'] }} — ready to listen in.',
-                  listening: 'Listening in. The agent and the customer cannot hear you.',
-                  offline: 'Connecting…',
-              }[state] ?? 'Connecting…'"></span>
+              x-text="state === 'listening'
+                  ? (mode === 'whisper'
+                      ? 'Coaching. The agent hears you; the customer does not.'
+                      : 'Listening in. The agent and the customer cannot hear you.')
+                  : ({
+                      ready: 'Registered on {{ $this->getPhoneConfig()['extension'] }} — ready to listen in.',
+                      offline: 'Connecting…',
+                  }[state] ?? 'Connecting…')"></span>
         <span x-show="error" x-cloak class="text-danger-600 dark:text-danger-400"
               x-text="'Registration failed: ' + error"></span>
 
@@ -39,7 +48,8 @@
             size="xs"
             color="danger"
             outlined
-        >Stop listening</x-filament::button>
+            x-text="mode === 'whisper' ? 'Stop coaching' : 'Stop listening'"
+        ></x-filament::button>
 
         {{-- The far side's voice plays here; hidden, but audio still flows (D2). Nothing
              rings this phone in slice 1 — the sink is what slice 2's listen leg needs. --}}
@@ -366,7 +376,7 @@
                                              reserved a column for. Only on a row that is mid-call,
                                              and only for a reader holding a phone of their own —
                                              otherwise it would be a button that does nothing. --}}
-                                        @if ($this->hasPhone() && $row['canListen'])
+                                        @if ($this->hasPhone() && $row['canMonitor'])
                                             <x-filament::button
                                                 size="xs"
                                                 color="gray"
@@ -374,6 +384,18 @@
                                                 icon="heroicon-m-signal"
                                                 wire:click="listenTo({{ $row['id'] }})"
                                             >Listen</x-filament::button>
+                                            {{-- SM slice 3. Warning-coloured, not grey: unlike Listen
+                                                 this one opens the supervisor's microphone onto a live
+                                                 call, and the two buttons sit side by side. Not danger
+                                                 either — that colour belongs to force-logout in the
+                                                 same column, and coaching an agent is not destructive. --}}
+                                            <x-filament::button
+                                                size="xs"
+                                                color="warning"
+                                                outlined
+                                                icon="heroicon-m-megaphone"
+                                                wire:click="whisperTo({{ $row['id'] }})"
+                                            >Whisper</x-filament::button>
                                         @endif
                                         @if ($this->canForceLogOut() && $row['canLogOut'])
                                             {{-- Outlined, not solid: on a twenty-agent floor a

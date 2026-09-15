@@ -240,13 +240,21 @@ class Switchboard implements HandlerRegistry
             // wrongly refuse a hold to our own global staff on an outbound call.
             'hold' => $this->guard($handler, fn () => $handler->beginHold($agentUserId)),
             'resume' => $this->guard($handler, fn () => $handler->resumeHold()),
-            // SM slice 2: a supervisor listens in. No company needed, for the same reason
+            // SM slices 2-3: a supervisor monitors. No company needed, for the same reason
             // hold needs none — nothing is reserved, so there is no board to read. The
             // supervisor is named separately from the agent because they are two different
             // people, which is the whole shape of this signal.
+            //
+            // 🔴 TWO NAMES, NOT ONE NAME PLUS A MODE ON THE WIRE. The signal name is the
+            // mode, so a browser can no more ask for coaching it was not offered than it
+            // can invent a verb — an unknown name already falls to the harmless default
+            // below. That is why there is no list of allowed modes anywhere in this path.
             'listen' => $supervisorUserId === null
                 ? null
-                : $this->guard($handler, fn () => $handler->beginListen($agentUserId, $supervisorUserId)),
+                : $this->guard($handler, fn () => $handler->beginMonitor($agentUserId, $supervisorUserId)),
+            'whisper' => $supervisorUserId === null
+                ? null
+                : $this->guard($handler, fn () => $handler->beginMonitor($agentUserId, $supervisorUserId, 'whisper')),
             default => null,   // an unknown signal is harmlessly ignored
         };
     }

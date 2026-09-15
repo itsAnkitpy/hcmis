@@ -196,8 +196,8 @@ it('offers listening only on a row that is actually on a call', function () {
             ->all(),
     );
 
-    expect($rows[$onCall->getKey()]['canListen'])->toBeTrue()
-        ->and($rows[$ready->getKey()]['canListen'])->toBeFalse();
+    expect($rows[$onCall->getKey()]['canMonitor'])->toBeTrue()
+        ->and($rows[$ready->getKey()]['canMonitor'])->toBeFalse();
 });
 
 it('signals the phone program and audits the access when a supervisor listens in', function () {
@@ -228,6 +228,41 @@ it('signals the phone program and audits the access when a supervisor listens in
             ->where('log_name', 'call')
             ->where('event', 'live_call_monitored')
             ->where('causer_id', $this->supervisor->getKey())
+            ->exists())->toBeTrue();
+    });
+});
+
+it('sends the coaching signal and audits it as coaching, not as listening', function () {
+    $agent = clientUserWithRole($this->tenant, RoleName::Agent->value);
+    app(AgentPhoneWriter::class)->provisionFor($this->supervisor);
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnCall)->create();
+    });
+
+    // 🔴 SM slice 3: the SIGNAL NAME carries the mode, which is why the two buttons are
+    // two methods rather than one taking a mode from the browser. There is no mode
+    // argument anywhere on this path for a crafted request to bend.
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('signal')->once()->with('whisper', [
+        'agentUserId' => (string) $agent->getKey(),
+        'supervisorUserId' => (string) $this->supervisor->getKey(),
+    ]);
+    app()->instance(TelephonyProvider::class, $telephony);
+
+    $this->actingAs($this->supervisor->fresh());
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        Livewire::test(LiveAgents::class)->call('whisperTo', $agent->getKey());
+
+        // The audit row has to say WHICH, because the two are different accesses: one is
+        // hearing a customer, the other is also speaking into a live call. A trail that
+        // records both as "monitored" cannot answer the question it exists to answer.
+        expect(Activity::query()
+            ->where('log_name', 'call')
+            ->where('event', 'live_call_monitored')
+            ->where('causer_id', $this->supervisor->getKey())
+            ->where('properties->mode', 'whisper')
             ->exists())->toBeTrue();
     });
 });

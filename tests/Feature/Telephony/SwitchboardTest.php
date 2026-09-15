@@ -560,7 +560,7 @@ it('routes a listen signal to the call the named agent is on, and to no other', 
     // call under Mockery's strict matching — the proof the signal reached the RIGHT
     // handler, exactly as the transfer case above proves it for its own signal.
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'monitor')->andReturn('monitor-leg');
-    $telephony->shouldReceive('snoop')->once()->with('agent-B', 'both')->andReturn('tap-leg');
+    $telephony->shouldReceive('snoop')->once()->with('agent-B', 'both', 'none')->andReturn('tap-leg');
     $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
 
     $switchboard = new Switchboard($telephony);
@@ -574,6 +574,35 @@ it('routes a listen signal to the call the named agent is on, and to no other', 
     $switchboard->handle(stasisStart('monitor-leg', ['monitor']));   // the supervisor picks up
 
     expect($switchboard->activeCallCount())->toBe(2);   // still two calls; a listener is not one
+});
+
+it('routes a whisper signal as coaching, pointing the supervisor into the agents ear', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+    $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/111', 'outbound', '1800555000')->andReturn('caller-A');
+    $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
+    $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($session);
+
+    // 🔴 SM slice 3: the signal NAME is the mode. Nothing on the wire says 'whisper'
+    // except which arm it lands on, so there is no mode string for this method to have to
+    // trust — and an unknown name still falls to the harmless default, as the listen case
+    // above relies on too.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('snoop')->once()->with('agent-A', 'both', 'out')->andReturn('tap-leg');
+    $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
+
+    $switchboard = new Switchboard($telephony);
+
+    $switchboard->handle(stasisStart('agent-A', ['agent', '111', 'uuid-A', '6']));
+    $switchboard->handle(stasisStart('caller-A', ['outbound']));
+
+    $switchboard->handle(channelUserevent('whisper', ['agentUserId' => '6', 'supervisorUserId' => '2']));
+    $switchboard->handle(stasisStart('monitor-leg', ['monitor']));
+
+    expect($switchboard->activeCallCount())->toBe(1);   // still one call; a coach is not one
 });
 
 it('ignores a listen signal that does not say who is listening', function () {
