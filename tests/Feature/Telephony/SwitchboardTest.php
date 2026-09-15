@@ -534,3 +534,68 @@ it('drains an empty switchboard without complaint', function () {
 
     expect(true)->toBeTrue();
 });
+
+/*
+|--------------------------------------------------------------------------
+| SM slice 2 — the web's listen-in signal (ChannelUserevent) routing
+|--------------------------------------------------------------------------
+*/
+
+it('routes a listen signal to the call the named agent is on, and to no other', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+    $sessionA = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
+    $sessionB = new RecordingSession('caller-B', 'call-B', 'B-said', 'B-heard');
+
+    $telephony = fakeTelephony();
+    // Two outbound calls — one served by agent 6, one by agent 7.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/111', 'outbound', '1800555000')->andReturn('caller-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/222', 'outbound', '1800555000')->andReturn('caller-B');
+    $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
+    $telephony->shouldReceive('join')->once()->with('caller-B', 'agent-B')->andReturn('conv-B');
+    $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($sessionA);
+    $telephony->shouldReceive('startRecording')->once()->with('caller-B', Mockery::type('string'))->andReturn($sessionB);
+
+    // The listen fires for agent 7 ONLY. A tap naming agent-A would be an unexpected
+    // call under Mockery's strict matching — the proof the signal reached the RIGHT
+    // handler, exactly as the transfer case above proves it for its own signal.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('snoop')->once()->with('agent-B', 'both')->andReturn('tap-leg');
+    $telephony->shouldReceive('join')->once()->with('tap-leg', 'monitor-leg')->andReturn('monitor-conv');
+
+    $switchboard = new Switchboard($telephony);
+
+    $switchboard->handle(stasisStart('agent-A', ['agent', '111', 'uuid-A', '6']));
+    $switchboard->handle(stasisStart('caller-A', ['outbound']));
+    $switchboard->handle(stasisStart('agent-B', ['agent', '222', 'uuid-B', '7']));
+    $switchboard->handle(stasisStart('caller-B', ['outbound']));
+
+    $switchboard->handle(channelUserevent('listen', ['agentUserId' => '7', 'supervisorUserId' => '2']));
+    $switchboard->handle(stasisStart('monitor-leg', ['monitor']));   // the supervisor picks up
+
+    expect($switchboard->activeCallCount())->toBe(2);   // still two calls; a listener is not one
+});
+
+it('ignores a listen signal that does not say who is listening', function () {
+    fakeNumberDirectory();
+    fakeAgentRouter();
+    $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('answer')->once()->with('caller-A');
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-A');
+    $telephony->shouldReceive('join')->once()->andReturn('conv-A');
+    $telephony->shouldReceive('startRecording')->once()->andReturn($session);
+    // Nothing is rung and nothing is tapped. The supervisor is derived from web auth on
+    // the page that sent the signal, so a signal without one is malformed, not a request
+    // to listen as nobody.
+    $telephony->shouldNotReceive('snoop');
+
+    $switchboard = new Switchboard($telephony);
+    $switchboard->handle(stasisStart('caller-A', []));
+    $switchboard->handle(stasisStart('agent-A', ['agent']));
+
+    $switchboard->handle(channelUserevent('listen', ['agentUserId' => '6']));
+
+    expect($switchboard->activeCallCount())->toBe(1);
+});

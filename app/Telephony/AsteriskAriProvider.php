@@ -164,20 +164,23 @@ class AsteriskAriProvider implements TelephonyProvider
         return $this->command('GET', "/recordings/stored/{$recordingName}/file")->body();
     }
 
-    /**
-     * A snoop is a silent listener leg Asterisk attaches to a call leg — the
-     * only way ARI allows recording a leg that sits in a conversation (a
-     * direct record is refused; 2026-06-12 experiment). spy=in tapes what
-     * that party says, spy=out what they hear — both tone-verified. The
-     * 'snoop' tag tells the listener these are our taps, not calls.
-     */
-    private function snoop(string $legId, string $direction): string
+    public function snoop(string $legId, string $spy, string $whisper = 'none'): string
     {
-        return (string) $this->command('POST', "/channels/{$legId}/snoop", [
-            'spy' => $direction,
+        $params = [
+            'spy' => $spy,
             'app' => config('telephony.asterisk.app'),
             'appArgs' => 'snoop',
-        ])->json('id');
+        ];
+
+        // 🔴 'none' is ARI's own default, so it is LEFT OFF rather than sent. Recording
+        // has made this exact request on every call this system has ever carried, and
+        // there is no reason to change one byte of it to add a parameter that means
+        // "behave as you already do". Whisper rides only when it is actually asked for.
+        if ($whisper !== 'none') {
+            $params['whisper'] = $whisper;
+        }
+
+        return (string) $this->command('POST', "/channels/{$legId}/snoop", $params)->json('id');
     }
 
     private function record(string $legId, string $name): void

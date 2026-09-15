@@ -102,7 +102,7 @@ class Switchboard implements HandlerRegistry
      *  - []  (untagged outside caller)          -> a NEW inbound call: make a handler.
      *  - ['agent', <number>, <uuid?>]           -> a NEW outbound call (the agent-first leg):
      *                                              make a handler.
-     *  - ['dialer'] / ['agent'] / ['outbound'] with no known leg
+     *  - ['dialer'] / ['agent'] / ['outbound'] / ['monitor'] with no known leg
      *                                           -> a leg WE placed whose handler is gone
      *                                              (a restart mid-call): hung up, R8.
      *  - anything else with no known leg        -> dropped (not ours to end).
@@ -152,7 +152,7 @@ class Switchboard implements HandlerRegistry
         // Ending it is the honest outcome. Nothing in this process can serve that call:
         // its client, its lead, its booked desk and its ticket all died with the handler.
         // The desk is put back by the reservation reaper within the minute.
-        if (in_array($args, [['dialer'], ['agent'], ['outbound']], true)) {
+        if (in_array($args, [['dialer'], ['agent'], ['outbound'], ['monitor']], true)) {
             Log::warning('A leg we placed arrived with no handler to receive it — ending it rather than leaving the line silent.', [
                 'leg' => $legId,
                 'tag' => $args[0],
@@ -214,6 +214,9 @@ class Switchboard implements HandlerRegistry
         $variables = $event['userevent'] ?? [];
         $agentUserId = isset($variables['agentUserId']) ? (int) $variables['agentUserId'] : null;
         $tenantId = isset($variables['tenantId']) ? (int) $variables['tenantId'] : null;
+        // SM slice 2: WHO is listening, as well as who is being listened to. Derived from
+        // web auth on the page that sent it, never read off the browser.
+        $supervisorUserId = isset($variables['supervisorUserId']) ? (int) $variables['supervisorUserId'] : null;
 
         if ($agentUserId === null) {
             return;
@@ -237,6 +240,13 @@ class Switchboard implements HandlerRegistry
             // wrongly refuse a hold to our own global staff on an outbound call.
             'hold' => $this->guard($handler, fn () => $handler->beginHold($agentUserId)),
             'resume' => $this->guard($handler, fn () => $handler->resumeHold()),
+            // SM slice 2: a supervisor listens in. No company needed, for the same reason
+            // hold needs none — nothing is reserved, so there is no board to read. The
+            // supervisor is named separately from the agent because they are two different
+            // people, which is the whole shape of this signal.
+            'listen' => $supervisorUserId === null
+                ? null
+                : $this->guard($handler, fn () => $handler->beginListen($agentUserId, $supervisorUserId)),
             default => null,   // an unknown signal is harmlessly ignored
         };
     }

@@ -16,13 +16,30 @@
     <div x-data="supervisorPhone(@js($this->getPhoneConfig()))" x-show="state !== 'none'" x-cloak
          class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm dark:border-white/10 dark:bg-gray-900">
         <span class="flex items-center gap-2 font-medium text-gray-950 dark:text-white">
-            <span class="size-2 rounded-full" :class="state === 'ready' ? 'bg-success-500' : 'bg-gray-400'"></span>
+            <span class="size-2 rounded-full" :class="state === 'ready' || state === 'listening' ? 'bg-success-500' : 'bg-gray-400'"></span>
             Your phone
         </span>
         <span class="text-gray-500 dark:text-gray-400"
-              x-text="state === 'ready' ? 'Registered on {{ $this->getPhoneConfig()['extension'] }} — ready to listen in.' : 'Connecting…'"></span>
+              x-text="{
+                  ready: 'Registered on {{ $this->getPhoneConfig()['extension'] }} — ready to listen in.',
+                  listening: 'Listening in. The agent and the customer cannot hear you.',
+                  offline: 'Connecting…',
+              }[state] ?? 'Connecting…'"></span>
         <span x-show="error" x-cloak class="text-danger-600 dark:text-danger-400"
               x-text="'Registration failed: ' + error"></span>
+
+        {{-- SM slice 2: stopping is hanging up, so the button is purely browser-side —
+             no second signal, no second verb on the listener. The leg ending is what
+             releases the tap and folds the mixer, which is also what happens if this tab
+             is simply closed. --}}
+        <x-filament::button
+            x-show="state === 'listening'"
+            x-cloak
+            x-on:click="phone.hangup()"
+            size="xs"
+            color="danger"
+            outlined
+        >Stop listening</x-filament::button>
 
         {{-- The far side's voice plays here; hidden, but audio still flows (D2). Nothing
              rings this phone in slice 1 — the sink is what slice 2's listen leg needs. --}}
@@ -69,6 +86,9 @@
             $overstayed = count(array_filter($rows, fn (array $row): bool => $row['overstayed']));
             $rows = $this->visibleRows($rows);
             $onStuckTab = $this->tab === 'stuck';
+            // SM slice 2: the last column now carries two different buttons. It shows for
+            // anyone who can use either — a QC with no phone still sees nothing extra.
+            $showsActions = $this->canForceLogOut() || $this->hasPhone();
         @endphp
 
         {{-- The tab strip (LB-9): the head count first, then one tab per state, each
@@ -275,7 +295,7 @@
                                     Calls today <span class="text-xs {{ $markClass('callsToday') }}">{{ $mark('callsToday') }}</span>
                                 </button>
                             </th>
-                            @if ($this->canForceLogOut())
+                            @if ($showsActions)
                                 <th class="px-3 py-2 font-medium" style="text-align:right">&nbsp;</th>
                             @endif
                         </tr>
@@ -340,9 +360,22 @@
                                      tab can never catch — an agent who went home leaving the machine
                                      on. Their screen keeps punching, so the board keeps them Ready
                                      and the router keeps ringing a dead desk. Never on a live call. --}}
-                                @if ($this->canForceLogOut())
-                                    <td class="px-3 py-2" style="text-align:right">
-                                        @if ($row['canLogOut'])
+                                @if ($showsActions)
+                                    <td class="px-3 py-2 whitespace-nowrap" style="text-align:right">
+                                        {{-- SM slice 2: the listen-in the page's own docblock
+                                             reserved a column for. Only on a row that is mid-call,
+                                             and only for a reader holding a phone of their own —
+                                             otherwise it would be a button that does nothing. --}}
+                                        @if ($this->hasPhone() && $row['canListen'])
+                                            <x-filament::button
+                                                size="xs"
+                                                color="gray"
+                                                outlined
+                                                icon="heroicon-m-signal"
+                                                wire:click="listenTo({{ $row['id'] }})"
+                                            >Listen</x-filament::button>
+                                        @endif
+                                        @if ($this->canForceLogOut() && $row['canLogOut'])
                                             {{-- Outlined, not solid: on a twenty-agent floor a
                                                  column of solid red pulls the eye away from the
                                                  over-break flag, which is the thing that actually
@@ -360,7 +393,7 @@
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="{{ ($this->showsClient() ? 6 : 5) + ($this->canForceLogOut() ? 1 : 0) }}" class="px-3 py-6 text-gray-400" style="text-align:center">
+                                <td colspan="{{ ($this->showsClient() ? 6 : 5) + ($showsActions ? 1 : 0) }}" class="px-3 py-6 text-gray-400" style="text-align:center">
                                     {{ $this->tab === 'floor' ? 'No agents are on the floor right now.' : 'Nobody is in this state right now.' }}
                                 </td>
                             </tr>

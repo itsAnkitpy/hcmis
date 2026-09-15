@@ -93,6 +93,22 @@ class CallToAgentFlow
     private array $agents = [];
 
     /**
+     * The supervisors listening in on this call right now (SM slice 2), keyed by their
+     * own leg id. A COLLECTION rather than one pair: two supervisors on one call costs
+     * barely more here than a scalar would, and SQ-3 warned this is the one thing that
+     * is expensive to retrofit into the leg model once it has been assumed impossible.
+     *
+     * 🔴 A monitor is NOT a member of $agents and never becomes one. Everything that
+     * decides who is on the call — isServingAgent, connectedAgents, the transfer's
+     * "drop the current agent", the 3-way cap — walks that set, and a listener appearing
+     * in it would be dropped by a transfer, counted towards the cap, and treated as
+     * somebody the caller can hear. It is a separate set for exactly that reason.
+     *
+     * @var array<string, MonitorLeg>
+     */
+    private array $monitors = [];
+
+    /**
      * Why a second agent is currently being rung in (B2.4b CD-5): transfer (drop the
      * existing agent when B answers) vs conference (keep them — the 3-way). Set when the
      * ring starts (beginAddedAgent), read once on B's answer, then cleared. Null whenever
@@ -408,6 +424,8 @@ class CallToAgentFlow
      *                           user id (B2.4a, so an outbound call is transferable),
      *                           and the client the console was sitting in (CS-4).
      *   ['outbound']         -> outbound customer pickup (the customer leg we placed).
+     *   ['monitor']          -> a supervisor's own phone answering, so we can tap the
+     *                           agent's line and feed it to them (SM slice 2).
      *   []                   -> an untagged outside caller (inbound entry).
      *
      * @param  array<string, mixed>  $event
@@ -418,6 +436,15 @@ class CallToAgentFlow
         $args = $event['args'] ?? null;
 
         if ($args === ['snoop']) {
+            return;
+        }
+
+        if ($args === ['monitor']) {
+            // A supervisor picked up the phone we rang them on (SM slice 2). Their
+            // browser answers by itself (R1), so this lands a moment after the button
+            // was pressed with nobody having clicked anything.
+            $this->onMonitorAnswered($legId);
+
             return;
         }
 
@@ -1564,6 +1591,171 @@ class CallToAgentFlow
     }
 
     /**
+     * A supervisor asked to listen in on this call (SM slice 2). Ring their own phone;
+     * everything else waits until they pick up, because there is nothing to feed a tap
+     * into before then.
+     *
+     * 🔴 THE CALL ITSELF DOES NOT MOVE. No state change, no new member in the
+     * participant set, no touch of the conversation the caller and agent are in. That is
+     * the whole reason this slice is small: a listener is not a participant, so none of
+     * the machinery that manages participants has to learn about them.
+     *
+     * Silence is the default rather than something we switch on: a tap that only spies
+     * carries no audio back into the call, so the supervisor's microphone reaches nobody
+     * however loudly they cough. Slice 3 turns that into coaching by setting the whisper
+     * direction on the same call.
+     *
+     * Four ways this quietly does nothing, all of them right:
+     *  - the call is not in a state with a conversation to tap;
+     *  - this supervisor is already listening (a double-click must not ring them twice);
+     *  - the named agent is not connected to this call (they hung up, or a transfer
+     *    moved the call to somebody else between the board's 15-second refresh and the
+     *    click);
+     *  - the supervisor holds no phone (PP-12) — the button is hidden for them, but the
+     *    signal is reachable from any browser, so it is refused here too.
+     */
+    public function beginListen(int $agentUserId, int $supervisorUserId): void
+    {
+        if ($this->state !== CallFlowState::InCall && $this->state !== CallFlowState::AddingAgent) {
+            return;
+        }
+
+        foreach ($this->monitors as $monitor) {
+            if ($monitor->userId === $supervisorUserId) {
+                return;
+            }
+        }
+
+        $endpoint = $this->directory->endpointFor($supervisorUserId);
+
+        if ($endpoint === null || $this->connectedLegOf($agentUserId) === null) {
+            return;
+        }
+
+        // Registered the instant the id comes back, which is BEFORE the leg's own
+        // arrival reaches us on the event pipe — the house rule every leg we place
+        // follows, and what makes the pickup route to this handler rather than being
+        // mistaken for a new call.
+        $legId = $this->telephony->placeCall($endpoint, 'monitor');
+        $this->monitors[$legId] = new MonitorLeg($legId, userId: $supervisorUserId, agentUserId: $agentUserId);
+        $this->registry->registerLeg($legId, $this);
+
+        Log::info('Listen in: ringing the supervisor so they can hear this call.', [
+            'ticket' => $this->ticketNumber,
+            'agentUser' => $agentUserId,
+            'supervisorUser' => $supervisorUserId,
+            'monitorLeg' => $legId,
+        ]);
+    }
+
+    /**
+     * The supervisor's phone picked up (SM slice 2). Now there is somewhere to send the
+     * audio, so tap the agent's line and put the tap and the supervisor into a mixer of
+     * their own.
+     *
+     * 🔴 TAPPED ON THE AGENT'S LINE, NOT THE CUSTOMER'S, and the reason is not
+     * preference. Recording already holds two taps on the customer's line; the agent's
+     * carries none, so this is the FIRST one there rather than a third one stacked on a
+     * line that is already busy (SQ-6). `both` on the agent's line is the whole
+     * conversation anyway — what the agent says, plus what the agent hears, which is the
+     * customer.
+     *
+     * A mixer of its own, never the call's, so that ending a monitoring session folds
+     * something no participant is standing in.
+     *
+     * The agent is looked up again here rather than trusted from the ring: a transfer
+     * completing in those few seconds hands the call to somebody else entirely, and
+     * listening to a line that no longer exists is worse than not listening at all.
+     */
+    private function onMonitorAnswered(string $legId): void
+    {
+        $monitor = $this->monitors[$legId] ?? null;
+
+        if ($monitor === null || $monitor->tapLegId !== null) {
+            return;
+        }
+
+        $agentLegId = $this->connectedLegOf($monitor->agentUserId);
+
+        if ($agentLegId === null) {
+            Log::info('Listen in: the agent left this call while the supervisor was picking up — nothing to listen to.', [
+                'ticket' => $this->ticketNumber,
+                'supervisorUser' => $monitor->userId,
+            ]);
+
+            $this->stopMonitor($monitor);
+
+            return;
+        }
+
+        $monitor->tapLegId = $this->telephony->snoop($agentLegId, spy: 'both');
+        $monitor->conversationId = $this->telephony->join($monitor->tapLegId, $legId);
+
+        Log::info('Listen in: the supervisor is hearing the call; neither the agent nor the customer hears them.', [
+            'ticket' => $this->ticketNumber,
+            'agentUser' => $monitor->agentUserId,
+            'supervisorUser' => $monitor->userId,
+            'tap' => $monitor->tapLegId,
+        ]);
+    }
+
+    /**
+     * End one monitoring session and leave the call exactly as it was: release the tap,
+     * put the supervisor's phone down, fold their mixer away.
+     *
+     * Every step is best-effort, because the usual way this runs is that something has
+     * already gone: the supervisor hung up, or the call ended underneath them, and half
+     * of these legs are dead before we ask. A refusal on one must not skip the next.
+     *
+     * The leg stays in the switchboard's phone-book, which is harmless — it points at a
+     * live handler that no longer knows the leg, so its events are ignored, and the
+     * handler's own teardown clears every entry at once.
+     */
+    private function stopMonitor(MonitorLeg $monitor): void
+    {
+        unset($this->monitors[$monitor->legId]);
+
+        if ($monitor->tapLegId !== null) {
+            rescue(fn () => $this->telephony->hangup((string) $monitor->tapLegId), report: false);
+        }
+
+        rescue(fn () => $this->telephony->hangup($monitor->legId), report: false);
+
+        if ($monitor->conversationId !== null) {
+            rescue(fn () => $this->telephony->endConversation((string) $monitor->conversationId), report: false);
+        }
+    }
+
+    /**
+     * End every monitoring session on this call — the call is going away under them.
+     * Called from the two teardown doors (endCall, hangupHeldLegs), which between them
+     * cover every way a call ends: the caller hanging up, the last agent leaving, a
+     * refused verb, and the switchboard's bug backstop.
+     *
+     * 🔴 Without this a supervisor is left holding a live phone connected to a tap on a
+     * line that no longer exists — silence they have no way to end except by hanging up,
+     * and a tap channel and a bridge left on the switch for good.
+     */
+    private function stopAllMonitors(): void
+    {
+        foreach ($this->monitors as $monitor) {
+            $this->stopMonitor($monitor);
+        }
+    }
+
+    /** Which leg is this agent talking on right now, if they are on this call at all. */
+    private function connectedLegOf(int $agentUserId): ?string
+    {
+        foreach ($this->agents as $agent) {
+            if ($agent->connected && $agent->userId === $agentUserId) {
+                return $agent->legId;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Ring a free agent (B) into a live call while the caller stays with the current
      * agent(s) — the caller is never left alone (the never-strand rule, shared by cold
      * transfer and conference). B answering arrives as their agent-leg StasisStart and
@@ -1888,6 +2080,22 @@ class CallToAgentFlow
                 return;
             }
 
+            $monitor = $this->monitors[$legId] ?? null;
+
+            if ($monitor !== null) {
+                // The supervisor put their phone down (SM slice 2) — the Stop button and
+                // a closed tab both arrive here, because both simply hang the leg up. The
+                // call carries on completely untouched; nobody on it ever knew.
+                Log::info('Listen in: the supervisor stopped listening; the call is unaffected.', [
+                    'ticket' => $this->ticketNumber,
+                    'supervisorUser' => $monitor->userId,
+                ]);
+
+                $this->stopMonitor($monitor);
+
+                return;
+            }
+
             $agent = $this->agents[$legId] ?? null;
 
             if ($agent === null) {
@@ -1957,6 +2165,10 @@ class CallToAgentFlow
      */
     private function endCall(string $endedLegId): void
     {
+        // SM slice 2: the listeners go before anything else, while their tap's target is
+        // still up — the call is ending under them and nobody else will release them.
+        $this->stopAllMonitors();
+
         $recording = $this->recording;
         $conversationId = (string) $this->conversationId;
         $legsToHangUp = array_filter($this->allLegIds(), fn (string $legId): bool => $legId !== $endedLegId);
@@ -2106,9 +2318,16 @@ class CallToAgentFlow
         return $legIds;
     }
 
-    /** Best-effort hang up every leg we still hold (caller + all agent legs). */
+    /**
+     * Best-effort hang up every leg we still hold (caller + all agent legs), and release
+     * any supervisor listening in (SM slice 2) — this is the error door, abort() and the
+     * switchboard's backstop, and a listener left behind by a crashed call is the same
+     * orphan as one left behind by a normal ending.
+     */
     private function hangupHeldLegs(): void
     {
+        $this->stopAllMonitors();
+
         foreach ($this->allLegIds() as $legId) {
             rescue(fn () => $this->telephony->hangup($legId), report: false);
         }
@@ -2182,6 +2401,7 @@ class CallToAgentFlow
         $this->dialedLeadId = null;
         $this->dialedCampaignId = null;
         $this->agents = [];
+        $this->monitors = [];
         $this->addedAgentIntent = null;
         $this->conversationId = null;
         $this->correlationId = null;

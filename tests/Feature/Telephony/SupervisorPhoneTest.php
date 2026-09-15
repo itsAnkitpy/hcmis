@@ -9,9 +9,11 @@ use App\Models\Tenant;
 use App\Models\User;
 use App\Telephony\AgentPhoneWriter;
 use App\Telephony\AgentRouter;
+use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Livewire\Livewire;
+use Spatie\Activitylog\Models\Activity;
 use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
@@ -151,4 +153,124 @@ it('hands nothing to a reader who was never issued a phone', function () {
 
     expect($config['extension'])->toBeNull()
         ->and($config['password'])->toBeNull();
+});
+
+// --- SM slice 2: the Listen button, and what happens when it is pressed ---
+
+/**
+ * The gap slice 1 left open. The phone panel already hides itself for a reader with no
+ * phone, but a button on a ROW would still have been clickable for them and would have
+ * silently done nothing — which reads as a broken screen rather than as a capability
+ * they do not have.
+ */
+it('offers listening only to a reader who holds a phone of their own', function () {
+    $qc = clientUserWithRole($this->tenant, RoleName::Qc->value);
+
+    $this->actingAs($qc->fresh());
+    TenantContext::run($this->tenant->id, function (): void {
+        expect(Livewire::test(LiveAgents::class)->instance()->hasPhone())->toBeFalse();
+    });
+
+    app(AgentPhoneWriter::class)->provisionFor($this->supervisor);
+    $this->actingAs($this->supervisor->fresh());
+    TenantContext::run($this->tenant->id, function (): void {
+        expect(Livewire::test(LiveAgents::class)->instance()->hasPhone())->toBeTrue();
+    });
+});
+
+it('offers listening only on a row that is actually on a call', function () {
+    $onCall = clientUserWithRole($this->tenant, RoleName::Agent->value);
+    $ready = clientUserWithRole($this->tenant, RoleName::Agent->value);
+
+    TenantContext::run($this->tenant->id, function () use ($onCall, $ready): void {
+        AgentPresence::factory()->forUser($onCall)->status(PresenceStatus::OnCall)->create();
+        AgentPresence::factory()->forUser($ready)->status(PresenceStatus::Ready)->create();
+    });
+
+    $this->actingAs($this->supervisor->fresh());
+
+    $rows = TenantContext::run(
+        $this->tenant->id,
+        fn (): array => collect(Livewire::test(LiveAgents::class)->instance()->roster())
+            ->keyBy('id')
+            ->all(),
+    );
+
+    expect($rows[$onCall->getKey()]['canListen'])->toBeTrue()
+        ->and($rows[$ready->getKey()]['canListen'])->toBeFalse();
+});
+
+it('signals the phone program and audits the access when a supervisor listens in', function () {
+    $agent = clientUserWithRole($this->tenant, RoleName::Agent->value);
+    app(AgentPhoneWriter::class)->provisionFor($this->supervisor);
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnCall)->create();
+    });
+
+    // 🔴 The supervisor is named from web auth, never from the browser — the button
+    // sends only which agent to listen to.
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('signal')->once()->with('listen', [
+        'agentUserId' => (string) $agent->getKey(),
+        'supervisorUserId' => (string) $this->supervisor->getKey(),
+    ]);
+    app()->instance(TelephonyProvider::class, $telephony);
+
+    $this->actingAs($this->supervisor->fresh());
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        Livewire::test(LiveAgents::class)->call('listenTo', $agent->getKey());
+
+        // SM-5, pulled forward from slice 4: hearing a live customer is an access to
+        // their voice, filed the same way a recording playback already is.
+        expect(Activity::query()
+            ->where('log_name', 'call')
+            ->where('event', 'live_call_monitored')
+            ->where('causer_id', $this->supervisor->getKey())
+            ->exists())->toBeTrue();
+    });
+});
+
+it('refuses to listen to an agent whose call has already ended', function () {
+    $agent = clientUserWithRole($this->tenant, RoleName::Agent->value);
+    app(AgentPhoneWriter::class)->provisionFor($this->supervisor);
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::WrappingUp)->create();
+    });
+
+    // The board refreshes every fifteen seconds, so a click can always name somebody
+    // who has since hung up. Nothing is signalled and nothing is audited.
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldNotReceive('signal');
+    app()->instance(TelephonyProvider::class, $telephony);
+
+    $this->actingAs($this->supervisor->fresh());
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        Livewire::test(LiveAgents::class)->call('listenTo', $agent->getKey());
+
+        expect(Activity::query()->where('event', 'live_call_monitored')->exists())->toBeFalse();
+    });
+});
+
+it('refuses to listen at all when the supervisor holds no phone', function () {
+    $agent = clientUserWithRole($this->tenant, RoleName::Agent->value);
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnCall)->create();
+    });
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldNotReceive('signal');
+    app()->instance(TelephonyProvider::class, $telephony);
+
+    $this->actingAs($this->supervisor->fresh());   // no phone issued
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        Livewire::test(LiveAgents::class)->call('listenTo', $agent->getKey());
+
+        expect(Activity::query()->where('event', 'live_call_monitored')->exists())->toBeFalse();
+    });
 });

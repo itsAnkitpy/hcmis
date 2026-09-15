@@ -239,6 +239,37 @@ class Audit
     }
 
     /**
+     * Record that a supervisor listened in on a live call (SM-5). On the `call` stream
+     * beside recording playback, because it is the same act for the same reason: a
+     * customer's voice is personal data (DPDP / FR-QC05), and hearing it live is no less
+     * an access than playing it back an hour later. The plan put this in slice 4 with
+     * barge; it is one write, and leaving a gap where a supervisor can hear a live
+     * customer and nothing records it was the wrong side to err on.
+     *
+     * The subject is the agent's BOARD ROW rather than the agent, for the reason
+     * agentForcedOffline spells out: every audit row is filed under a client, the users
+     * table has no client column, and a note filed against the agent would land in
+     * whichever client the supervisor happens to be sitting in — nowhere at all for our
+     * own global staff.
+     *
+     * There is no `calls` row to point at. A live call exists only in the listener's
+     * memory until it is wrapped up, so the moment plus who-listened-to-whom is the whole
+     * of what can honestly be written here.
+     */
+    public static function monitoringStarted(AgentPresence $presence, string $mode = 'listen'): void
+    {
+        self::record('call', fn (ActivityLogger $log) => $log
+            ->performedOn($presence)
+            ->event('live_call_monitored')
+            ->withProperties(self::withoutNulls([
+                'mode' => $mode,
+                'agent_id' => $presence->user_id,
+                'agent_name' => $presence->user?->name,
+            ]))
+            ->log("live call {$mode}"));
+    }
+
+    /**
      * Record that a supervisor forced a stuck agent offline from the Live Agents board
      * (LB-15). On the `presence` stream: the board row is overwritten in place and keeps
      * no history of its own, so without this line an agent asking "why was I logged out

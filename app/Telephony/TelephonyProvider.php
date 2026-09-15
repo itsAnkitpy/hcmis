@@ -129,6 +129,27 @@ interface TelephonyProvider
     public function isAnswered(string $legId): bool;
 
     /**
+     * Attach a SILENT TAP to a leg and hand back the tap's own leg id (SM slice 2).
+     * Recording has used this privately since B1 D4; supervisor monitoring is what
+     * makes it part of the contract.
+     *
+     * $spy is which half of that person's audio the tap picks up: 'in' what they say,
+     * 'out' what they hear, 'both' the whole conversation, 'none' nothing. $whisper is
+     * audio pushed the other way, INTO that leg, heard by them and by nobody else on
+     * the call — 'none' by default, which is silent listening. Every value of both was
+     * container-verified in the B2.4 design pass.
+     *
+     * 🔴 THE WHISPER DIRECTION IS HERE FROM DAY ONE ON PURPOSE. Silent listening and
+     * coaching are the same call with one parameter changed, so slice 3 is an argument
+     * rather than a second method — the same "keep the plumbing general" move TD-7 made
+     * for the handler lookup.
+     *
+     * The tap is a real leg: it enters our app tagged as infrastructure, it can be put
+     * into a conversation like any other leg, and it is released by hanging it up.
+     */
+    public function snoop(string $legId, string $spy, string $whisper = 'none'): string;
+
+    /**
      * Record both sides of a leg's call (B1 D4): what that person says and
      * what they hear, as two separate files — the pair a queued job later
      * merges into the stereo MP3 (caller left, agent right, PW5-4).

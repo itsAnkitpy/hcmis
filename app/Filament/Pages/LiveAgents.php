@@ -16,6 +16,7 @@ use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
 use App\Telephony\AgentDirectory;
 use App\Telephony\LiveCallCounts;
+use App\Telephony\TelephonyProvider;
 use App\Tenancy\TenantContext;
 use BackedEnum;
 use Filament\Notifications\Notification;
@@ -130,6 +131,17 @@ class LiveAgents extends Page
     }
 
     /**
+     * Does the reader hold a phone of their own (SM slice 2)? The Listen button is drawn
+     * only for someone who does — slice 1's panel already hides itself for anyone else,
+     * but a button on a ROW would still have been clickable and would have silently done
+     * nothing, which reads as a broken screen rather than as an absent capability.
+     */
+    public function hasPhone(): bool
+    {
+        return $this->getPhoneConfig()['extension'] !== null;
+    }
+
+    /**
      * One row per currently-active agent (LB-1), most-actionable first: on a call,
      * then wrapping up, then ready, then on break — and within a state the longest
      * time-in-status first, so a stretched call or an overstayed break surfaces.
@@ -139,7 +151,7 @@ class LiveAgents extends Page
      * and today's per-agent call count from the counting layer. All tenant-walled by
      * the request context.
      *
-     * @return array<int, array{id: int|null, name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, startedAtMs: int|null, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int, client: string|null, canLogOut: bool}>
+     * @return array<int, array{id: int|null, name: string, status: PresenceStatus, statusLabel: string, statusColor: string, inStatusMinutes: int, startedAtMs: int|null, breakCategory: string|null, limitMinutes: int|null, overstayed: bool, callsToday: int, client: string|null, canLogOut: bool, canListen: bool}>
      */
     public function roster(): array
     {
@@ -191,6 +203,9 @@ class LiveAgents extends Page
                 'client' => $this->showsClient() ? ($presence->tenant?->name ?? '—') : null,
                 // LB-8: never on a row that is mid-call. See stuckRoster() for why.
                 'canLogOut' => $status !== PresenceStatus::OnCall,
+                // SM slice 2, the mirror image: listening is only offered on a row that IS
+                // mid-call, because there is nothing to listen to otherwise.
+                'canListen' => $status === PresenceStatus::OnCall,
             ];
         })->all();
 
@@ -454,6 +469,76 @@ class LiveAgents extends Page
 
         Notification::make()
             ->title("{$name} was logged out")
+            ->success()
+            ->send();
+    }
+
+    /**
+     * Listen in on an agent's live call (SM slice 2). Silent: the agent and the customer
+     * hear nothing, and the call is not touched in any way.
+     *
+     * Three things happen. The agent's board row is read, which is what proves they are
+     * on a call AND which client they belong to (the row is client-owned; the tenant wall
+     * means a team leader simply cannot find somebody else's agent here). The access is
+     * written to the audit log inside that client, for the same reason every recording
+     * playback is (SM-5). Then the same kind of control signal Transfer and Conference
+     * already send goes to the running phone program, which finds the live call and rings
+     * this supervisor's own phone.
+     *
+     * 🔴 WHO IS LISTENING COMES FROM THE SERVER, never from the browser. The button sends
+     * only which agent to listen to; the supervisor is whoever is logged in.
+     *
+     * Every guard is re-checked here rather than trusted from the view, exactly as
+     * forceLogOut does: the buttons are drawn only for permitted readers on permitted
+     * rows, and the method is still reachable from any browser.
+     *
+     * 🔴 SQ-4 settled for this slice: the gate is the board's own (team leader / QC /
+     * global staff), not a new permission. Listening is invisible to the customer and
+     * this page is already walled to exactly the people who supervise a floor. Barge is
+     * the one that puts a third voice on a customer's call, and splitting the permission
+     * belongs with it in slice 4.
+     */
+    public function listenTo(int $agentUserId): void
+    {
+        abort_unless(static::canAccess(), 403);
+
+        if (! $this->hasPhone()) {
+            Notification::make()
+                ->title('You have no phone to listen on')
+                ->body('Ask an administrator to issue you one from your user record.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        $presence = AgentPresence::query()->where('user_id', $agentUserId)->first();
+
+        if ($presence === null || $presence->status !== PresenceStatus::OnCall) {
+            Notification::make()
+                ->title('Nothing to listen to')
+                ->body('That agent is not on a call any more, or their call ended since this page last refreshed.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        $name = $presence->user?->name ?? 'The agent';
+
+        // Pinned to the agent's own client for the write, the same reason forceLogOut
+        // pins it: a team leader is already sitting in it, our global staff sit in none,
+        // and an audit row with no client is a row nobody inside that client can read.
+        TenantContext::run((int) $presence->tenant_id, fn () => Audit::monitoringStarted($presence));
+
+        app(TelephonyProvider::class)->signal('listen', [
+            'agentUserId' => (string) $agentUserId,
+            'supervisorUserId' => (string) auth()->id(),
+        ]);
+
+        Notification::make()
+            ->title("Listening in on {$name}")
+            ->body('Your phone will pick up by itself. Press Stop on your phone panel when you are done.')
             ->success()
             ->send();
     }
