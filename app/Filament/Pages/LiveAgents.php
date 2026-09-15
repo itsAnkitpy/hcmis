@@ -14,6 +14,7 @@ use App\Models\Call;
 use App\Models\Tenant;
 use App\Reporting\CallReportFilters;
 use App\Reporting\CallReportService;
+use App\Telephony\AgentDirectory;
 use App\Telephony\LiveCallCounts;
 use App\Tenancy\TenantContext;
 use BackedEnum;
@@ -103,6 +104,29 @@ class LiveAgents extends Page
     public function getSubheading(): ?string
     {
         return 'Everyone on the floor right now — refreshes every 15 seconds.';
+    }
+
+    /**
+     * The supervisor's own browser phone (SM-2): the same per-user identity the agent
+     * console registers with, resolved for whoever is reading the board.
+     *
+     * 🔴 This registers a phone. It does NOT join the routing pool. Membership is
+     * decided by a board row (AgentRouter::reserveFreeAgent reads status + freshness
+     * + extension), and nothing on this page writes one — the row is created only by
+     * SetAgentPresence, which this page calls in exactly one place, to force somebody
+     * else Offline. So a supervisor may hold a registered phone all day and never be
+     * handed a customer (SM-3, pinned by SupervisorPhoneTest).
+     *
+     * Self-gating for anyone who should not have a phone: the directory returns nulls
+     * for a user with no number or no key (PP-12), and the panel then says so rather
+     * than registering as somebody else. A QC who only reviews recordings is never
+     * issued one, so they never register.
+     *
+     * @return array{extension: ?string, password: ?string, wsUrl: ?string, sipDomain: string}
+     */
+    public function getPhoneConfig(): array
+    {
+        return app(AgentDirectory::class)->browserIdentityFor((int) auth()->id());
     }
 
     /**

@@ -26,7 +26,7 @@ class EditUser extends EditRecord
     protected static string $resource = UserResource::class;
 
     /**
-     * The retire / re-issue pair for an agent's phone (SEC-1, PP-19).
+     * The three phone actions: issue (SM-1), retire and re-issue (SEC-1, PP-19).
      *
      * 🔴 Retiring is a deliberate act and not an automatic one, because there is
      * nothing automatic to hang it on: HCIMS cannot switch off or delete a user
@@ -34,16 +34,63 @@ class EditUser extends EditRecord
      * that is also how a role gets corrected, and PP-9 exists to stop a correction
      * churning a phone.
      *
-     * Only one of the two is ever on screen, and neither appears for someone who has
-     * no phone. Re-issue is not a nicety: without it, a phone retired by mistake
+     * Exactly one is ever on screen, and the three conditions partition every user:
+     * no number at all (issue), a number with no key (re-issue), a working key
+     * (retire). Re-issue is not a nicety: without it, a phone retired by mistake
      * could never be brought back, because provisioning skips anyone who already
      * holds a number.
+     *
+     * This page is already walled to global staff (UserPolicy::update), so none of
+     * the three carries a gate of its own.
      *
      * @return array<int, Action>
      */
     protected function getHeaderActions(): array
     {
         return [
+            // SM-1: the only path in the admin to a phone for someone who is not an
+            // agent. Becoming an agent provisions one automatically
+            // (AssignTenantRole::givePhoneIfNowAnAgent); Team Leader and QC trigger
+            // nothing, so a supervisor who needs to hear a live call had no route to
+            // a phone at all. The writer is already role-agnostic — this is the
+            // missing trigger, not missing machinery.
+            //
+            // 🔴 A phone is NOT a place in the call queue. Who may be handed a call is
+            // decided by presence (AgentRouter::reserveFreeAgent reads the board, not
+            // roles), and only a screen that announces itself Ready creates a board
+            // row. Issuing a phone here writes no board row, so it cannot put anyone
+            // in line for a customer (SM-3, pinned by SupervisorPhoneTest).
+            Action::make('issue_phone')
+                ->label('Issue a phone')
+                ->icon(Heroicon::OutlinedPhone)
+                ->visible(fn (): bool => $this->record->sip_extension === null)
+                ->requiresConfirmation()
+                ->modalHeading('Give this person a phone?')
+                ->modalDescription('They get the next free number and a key of their own, and they can register it from Live Agents. Their roles do not change, and this does not put them in line to be handed calls.')
+                ->modalSubmitActionLabel('Issue the phone')
+                ->action(function (): void {
+                    /** @var User $user */
+                    $user = $this->record;
+
+                    // ponytail: no 23505 catch. Two admins issuing in the same instant
+                    // both read the same number and the second write fails loudly on
+                    // the unique index (PP-1) — a 500 on a button, nothing written,
+                    // click again. AssignTenantRole catches it because a 500 there
+                    // would also lose the role write; here there is nothing to lose.
+                    // Add the catch if this ever stops being a one-admin action.
+                    $extension = app(AgentPhoneWriter::class)->provisionFor($user);
+
+                    // No audit line of its own: `sip_extension` is on the user's
+                    // activity-logged attributes, so the number landing on their row
+                    // records itself. Retire and re-issue need one precisely because
+                    // nothing on the row moves for either.
+                    Notification::make()
+                        ->success()
+                        ->title("Phone {$extension} issued")
+                        ->body('They can register it from the Live Agents screen. It stays theirs — the number is never handed to anyone else.')
+                        ->send();
+                }),
+
             Action::make('retire_phone')
                 ->label("Retire this agent's phone")
                 ->icon(Heroicon::OutlinedPhoneXMark)

@@ -1,4 +1,34 @@
 <x-filament-panels::page>
+    @vite('resources/js/supervisor-phone.js')
+
+    {{-- SM-2: the supervisor's own phone, registered here rather than on a screen of
+         its own — this page is already the team leader's floor board, already walled to
+         the right audience, and already lists who is on a call. The listen / whisper /
+         barge controls (slices 2-4) land in this same panel.
+
+         🔴 OUTSIDE the polled block below, for the same reason the call clock is: the
+         board replaces its whole contents every 15 seconds, and a registered SIP phone
+         inside it would be torn down and rebuilt on every tick.
+
+         Anyone with no phone issued to them sees nothing at all — the panel is not an
+         error, it is simply absent, because most people who can read this board have no
+         reason to hold a phone. --}}
+    <div x-data="supervisorPhone(@js($this->getPhoneConfig()))" x-show="state !== 'none'" x-cloak
+         class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm dark:border-white/10 dark:bg-gray-900">
+        <span class="flex items-center gap-2 font-medium text-gray-950 dark:text-white">
+            <span class="size-2 rounded-full" :class="state === 'ready' ? 'bg-success-500' : 'bg-gray-400'"></span>
+            Your phone
+        </span>
+        <span class="text-gray-500 dark:text-gray-400"
+              x-text="state === 'ready' ? 'Registered on {{ $this->getPhoneConfig()['extension'] }} — ready to listen in.' : 'Connecting…'"></span>
+        <span x-show="error" x-cloak class="text-danger-600 dark:text-danger-400"
+              x-text="'Registration failed: ' + error"></span>
+
+        {{-- The far side's voice plays here; hidden, but audio still flows (D2). Nothing
+             rings this phone in slice 1 — the sink is what slice 2's listen leg needs. --}}
+        <audio x-ref="supervisorAudio" autoplay class="hidden"></audio>
+    </div>
+
     {{-- The running clock behind the "For" column, copied from the agent console's own
          strip (agent-console.js: `now` + formatClock) so a duration is spelled the same
          on the agent's screen and the supervisor's — 4:07, or 1:02:07 past the hour.
