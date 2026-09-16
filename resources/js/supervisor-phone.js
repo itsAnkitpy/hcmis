@@ -6,7 +6,9 @@ import { AgentPhone } from './telephony/agent-phone';
  * The agent console's state machine minus everything an agent does: no dialling,
  * no wrap-up, no breaks, no lead. All that is left is "register this browser as
  * this person's phone and say whether it worked" — which is the whole of slice 1.
- * Listen is slice 2 and whisper slice 3 (below); barge is slice 4.
+ * Listen is slice 2, whisper slice 3 and barge slice 4 — and all three are the same
+ * state machine, because a monitoring leg is a monitoring leg however the audio is
+ * wired on the switch. Nothing here chooses or can change that wiring.
  *
  * 🔴 It never writes the who's-free board. That is the entire never-Ready rule
  * (SM-3): a supervisor is kept out of the routing pool by having no board row, not
@@ -32,9 +34,9 @@ const supervisorPhone = (config) => ({
     // 'ready'     — registered with the switch.
     // 'listening' — a monitoring leg is up and the supervisor is hearing a live call.
     state: 'none',
-    // Which button started the session, 'listen' or 'whisper' (SM slice 3). It only
-    // decides what this panel SAYS: the audio itself is settled on the switch when the
-    // tap is made, and nothing here can change it. It arrives as a browser event from
+    // Which button started the session — 'listen', 'whisper' or 'barge' (SM slices 3-4).
+    // It only decides what this panel SAYS: the audio itself is settled on the switch
+    // when the session is made, and nothing here can change it. It arrives as a browser event from
     // the button rather than as rendered markup, so that starting a session cannot
     // redraw the panel and tear down a registered phone.
     mode: 'listen',

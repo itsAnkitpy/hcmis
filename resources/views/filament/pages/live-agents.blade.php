@@ -18,18 +18,21 @@
          class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm dark:border-white/10 dark:bg-gray-900">
         <span class="flex items-center gap-2 font-medium text-gray-950 dark:text-white">
             <span class="size-2 rounded-full"
-                  :class="state === 'listening' && mode === 'whisper' ? 'bg-warning-500' : (state === 'ready' || state === 'listening' ? 'bg-success-500' : 'bg-gray-400')"></span>
+                  :class="state === 'listening' && mode === 'barge' ? 'bg-danger-500' : (state === 'listening' && mode === 'whisper' ? 'bg-warning-500' : (state === 'ready' || state === 'listening' ? 'bg-success-500' : 'bg-gray-400'))"></span>
             Your phone
         </span>
-        {{-- SM slice 3: the live line has to say which mode it is in, because the two make
-             OPPOSITE promises about who can hear you. A single reassuring sentence covering
-             both would be wrong half the time, and it is wrong in the direction that matters
-             — a supervisor who believes they are silent while the agent can hear them. --}}
+        {{-- SM slices 3-4: the live line has to say which mode it is in, because the three
+             make OPPOSITE promises about who can hear you. A single reassuring sentence
+             covering all of them would be wrong two thirds of the time, and it is wrong in
+             the direction that matters — a supervisor who believes they are silent while a
+             customer can hear them. Barge is the only one that names the recording, because
+             it is the only one that is on it (SQ-1). --}}
         <span class="text-gray-500 dark:text-gray-400"
               x-text="state === 'listening'
-                  ? (mode === 'whisper'
-                      ? 'Coaching. The agent hears you; the customer does not.'
-                      : 'Listening in. The agent and the customer cannot hear you.')
+                  ? ({
+                      whisper: 'Coaching. The agent hears you; the customer does not.',
+                      barge: 'On the call. Everyone hears you, and you are on the recording.',
+                  }[mode] ?? 'Listening in. The agent and the customer cannot hear you.')
                   : ({
                       ready: 'Registered on {{ $this->getPhoneConfig()['extension'] }} — ready to listen in.',
                       offline: 'Connecting…',
@@ -48,7 +51,7 @@
             size="xs"
             color="danger"
             outlined
-            x-text="mode === 'whisper' ? 'Stop coaching' : 'Stop listening'"
+            x-text="({ whisper: 'Stop coaching', barge: 'Leave the call' })[mode] ?? 'Stop listening'"
         ></x-filament::button>
 
         {{-- The far side's voice plays here; hidden, but audio still flows (D2). Nothing
@@ -396,6 +399,21 @@
                                                 icon="heroicon-m-megaphone"
                                                 wire:click="whisperTo({{ $row['id'] }})"
                                             >Whisper</x-filament::button>
+                                            {{-- SM slice 4, and the ONLY button in this column
+                                                 with a right of its own (SM-4): listening and
+                                                 coaching ride the board's gate, barge does not.
+                                                 Danger-coloured because unlike the other two it
+                                                 is heard by the customer, which is the same
+                                                 reason force-logout in this column is. --}}
+                                            @if ($this->canBarge())
+                                                <x-filament::button
+                                                    size="xs"
+                                                    color="danger"
+                                                    outlined
+                                                    icon="heroicon-m-user-plus"
+                                                    wire:click="bargeInto({{ $row['id'] }})"
+                                                >Barge</x-filament::button>
+                                            @endif
                                         @endif
                                         @if ($this->canForceLogOut() && $row['canLogOut'])
                                             {{-- Outlined, not solid: on a twenty-agent floor a

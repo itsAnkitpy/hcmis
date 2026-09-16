@@ -537,7 +537,7 @@ it('drains an empty switchboard without complaint', function () {
 
 /*
 |--------------------------------------------------------------------------
-| SM slice 2 — the web's listen-in signal (ChannelUserevent) routing
+| SM slices 2-4 — the web's monitoring signals (ChannelUserevent) routing
 |--------------------------------------------------------------------------
 */
 
@@ -603,6 +603,35 @@ it('routes a whisper signal as coaching, pointing the supervisor into the agents
     $switchboard->handle(stasisStart('monitor-leg', ['monitor']));
 
     expect($switchboard->activeCallCount())->toBe(1);   // still one call; a coach is not one
+});
+
+it('routes a barge signal by putting the supervisor into the calls own conversation', function () {
+    config()->set('telephony.outbound.dial_prefix', 'PJSIP/');
+    config()->set('telephony.outbound.caller_id', '1800555000');
+    $session = new RecordingSession('caller-A', 'call-A', 'A-said', 'A-heard');
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/111', 'outbound', '1800555000')->andReturn('caller-A');
+    $telephony->shouldReceive('join')->once()->with('caller-A', 'agent-A')->andReturn('conv-A');
+    $telephony->shouldReceive('startRecording')->once()->with('caller-A', Mockery::type('string'))->andReturn($session);
+
+    // 🔴 SM slice 4: a third name on the same pipe, and still no mode on the wire. The
+    // extra right barge needs (SM-4) is checked on the board where the button is pressed
+    // — this program holds no web session and can ask about no roles, which is why every
+    // permission in the system lives on that side.
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-A', 'monitor-leg');
+    $telephony->shouldNotReceive('snoop');
+
+    $switchboard = new Switchboard($telephony);
+
+    $switchboard->handle(stasisStart('agent-A', ['agent', '111', 'uuid-A', '6']));
+    $switchboard->handle(stasisStart('caller-A', ['outbound']));
+
+    $switchboard->handle(channelUserevent('barge', ['agentUserId' => '6', 'supervisorUserId' => '2']));
+    $switchboard->handle(stasisStart('monitor-leg', ['monitor']));
+
+    expect($switchboard->activeCallCount())->toBe(1);   // still one call; a barging supervisor is not one
 });
 
 it('ignores a listen signal that does not say who is listening', function () {

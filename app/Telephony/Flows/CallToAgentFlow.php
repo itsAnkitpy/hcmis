@@ -1591,7 +1591,7 @@ class CallToAgentFlow
     }
 
     /**
-     * A supervisor asked to monitor this call (SM slices 2-3). Ring their own phone;
+     * A supervisor asked to monitor this call (SM slices 2-4). Ring their own phone;
      * everything else waits until they pick up, because there is nothing to feed a tap
      * into before then.
      *
@@ -1605,6 +1605,10 @@ class CallToAgentFlow
      * however loudly they cough. $mode 'whisper' is slice 3 — the same tap, with audio
      * pushed into the AGENT's ear as well. Any other value is silent, so a mode this
      * method does not recognise can only ever under-share.
+     *
+     * $mode 'barge' is slice 4, and it is the one mode that is audible to the customer —
+     * on purpose, and gated by its own permission on the board (SM-4). It still does not
+     * make the supervisor a participant: see onMonitorAnswered.
      *
      * Four ways this quietly does nothing, all of them right:
      *  - the call is not in a state with a conversation to tap;
@@ -1654,7 +1658,7 @@ class CallToAgentFlow
     /**
      * The supervisor's phone picked up (SM slice 2). Now there is somewhere to send the
      * audio, so tap the agent's line and put the tap and the supervisor into a mixer of
-     * their own.
+     * their own — or, for a barge, put their line straight into the call.
      *
      * 🔴 TAPPED ON THE AGENT'S LINE, NOT THE CUSTOMER'S, and the reason is not
      * preference. Recording already holds two taps on the customer's line; the agent's
@@ -1709,6 +1713,39 @@ class CallToAgentFlow
             return;
         }
 
+        // 🔴 SLICE 4, AND IT IS THIS BRANCH. Barge does not tap anything: the
+        // supervisor's own line joins the call's conversation, which is the same verb
+        // and the same bridge a conferenced third agent already uses. So all three
+        // parties hear each other for free, and there is no second audio path to get
+        // the direction of wrong.
+        //
+        // 🔴 NEITHER tapLegId NOR conversationId IS SET, and that is what makes stopping
+        // safe. Teardown hangs up the tap it names and ends the conversation it names;
+        // for a barge those fields would name the CALL's own bridge and the supervisor
+        // leaving would take the customer's call down with them. Leaving both null means
+        // stopping a barge is exactly "hang the supervisor's line up", which Asterisk
+        // removes from the bridge on its own.
+        //
+        // The supervisor still never enters $agents, so no timing stamp, no handoff row
+        // and no per-agent count can ever name them (SM-5). A barge is audible; it is
+        // still not participation.
+        //
+        // Barging while the customer is parked on hold reaches the agent only, because
+        // the held line is out of this conversation. That is the honest behaviour and
+        // needs no special case.
+        if ($monitor->mode === 'barge') {
+            $this->telephony->addToBridge((string) $this->conversationId, $legId);
+
+            Log::info('Monitor: the supervisor joined this call — everybody on it can hear them.', [
+                'ticket' => $this->ticketNumber,
+                'mode' => $monitor->mode,
+                'agentUser' => $monitor->agentUserId,
+                'supervisorUser' => $monitor->userId,
+            ]);
+
+            return;
+        }
+
         $monitor->tapLegId = $this->telephony->snoop(
             $agentLegId,
             spy: 'both',
@@ -1731,6 +1768,11 @@ class CallToAgentFlow
     /**
      * End one monitoring session and leave the call exactly as it was: release the tap,
      * put the supervisor's phone down, fold their mixer away.
+     *
+     * 🔴 A barge has neither a tap nor a mixer of its own, so this narrows to one line —
+     * hang the supervisor's phone up — and the switch takes their line out of the call's
+     * bridge. Every other party is untouched, which is slice 4's "the supervisor leaving
+     * does not end the call".
      *
      * Every step is best-effort, because the usual way this runs is that something has
      * already gone: the supervisor hung up, or the call ended underneath them, and half
@@ -2115,7 +2157,14 @@ class CallToAgentFlow
             if ($monitor !== null) {
                 // The supervisor put their phone down (SM slice 2) — the Stop button and
                 // a closed tab both arrive here, because both simply hang the leg up. The
-                // call carries on completely untouched; nobody on it ever knew.
+                // call carries on completely untouched.
+                //
+                // 🔴 THIS BRANCH IS WHAT KEEPS A BARGE FROM ENDING THE CALL. A barging
+                // supervisor's line is inside the call's own bridge, so without being
+                // caught here first it would fall through to the participant rules below
+                // — where the last connected agent leaving ends the call. It is caught
+                // here because monitors are looked up before agents, and a monitor is
+                // never in $agents to be found by them.
                 Log::info('Monitor: the supervisor stopped; the call is unaffected.', [
                     'ticket' => $this->ticketNumber,
                     'mode' => $monitor->mode,

@@ -477,3 +477,105 @@ it('lets a real transfer end the coaching session rather than leaving the coach 
     expect($flow->isServingAgent(7))->toBeTrue()
         ->and($flow->isServingAgent(6))->toBeFalse();
 });
+
+/*
+|--------------------------------------------------------------------------
+| SM slice 4 — barge
+|--------------------------------------------------------------------------
+|
+| The one mode the customer can hear, and the one that is not a tap at all: the
+| supervisor's own line joins the call's conversation, the same verb a conferenced
+| third agent already uses.
+|
+| Everything mode-blind in this file covers barge too — the refusals, the double-click
+| guard, the two-supervisors case. So these cases assert only what barge changes: that
+| it joins instead of tapping, that leaving does not take the call with it, and that a
+| supervisor who is audible is still not a participant (SM-5).
+*/
+
+it('puts a barging supervisor into the calls own conversation instead of tapping anything', function () {
+    directoryOfPhones([6 => 'PJSIP/1100', 2 => 'PJSIP/1105']);
+
+    $telephony = fakeTelephony();
+    expectLiveCall($telephony);
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
+
+    // 🔴 The whole of slice 4. Into conv-1 — the CALL's own bridge, holding the customer
+    // and the agent — which is why all three hear each other with no second audio path
+    // to point the wrong way.
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-1', 'monitor-leg');
+
+    // No tap and no mixer of their own. Both would be wrong rather than merely wasteful:
+    // a tap would put the supervisor's voice on a second path as well, and a mixer of
+    // their own is the thing teardown ends — which for a barge would be the call's.
+    $telephony->shouldNotReceive('snoop');
+    $telephony->shouldNotReceive('join');
+
+    $flow = liveCallWithAgentSix($telephony);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2, mode: 'barge');
+    $flow->handle(stasisStart('monitor-leg', ['monitor']));
+});
+
+it('leaves the call running when a barging supervisor hangs up, and never ends the calls own bridge', function () {
+    directoryOfPhones([6 => 'PJSIP/1100', 2 => 'PJSIP/1105']);
+
+    $telephony = fakeTelephony();
+    expectLiveCall($telephony);
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-1', 'monitor-leg');
+
+    // Stopping a barge is one verb: hang the supervisor's own line up. Asterisk takes a
+    // destroyed channel out of its bridge without being asked.
+    $telephony->shouldReceive('hangup')->once()->with('monitor-leg');
+
+    // 🔴 THE TWO THINGS THAT WOULD END A CUSTOMER'S CALL. Mockery fails on either, and
+    // they are named rather than left to the strict mock so a reader sees what is being
+    // guarded: the call's bridge must survive, and so must both the legs in it.
+    $telephony->shouldNotReceive('endConversation')->with('conv-1');
+    $telephony->shouldNotReceive('hangup')->with('caller-leg');
+    $telephony->shouldNotReceive('hangup')->with('agent-leg');
+
+    $flow = liveCallWithAgentSix($telephony);
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2, mode: 'barge');
+    $flow->handle(stasisStart('monitor-leg', ['monitor']));
+
+    // The supervisor presses Leave the call, or simply closes the tab — both are a
+    // hang-up and both arrive here.
+    $flow->handle(channelDestroyed('monitor-leg'));
+
+    expect($flow->isServingAgent(6))->toBeTrue();
+});
+
+it('never makes a barging supervisor a participant, so no per-agent figure can move', function () {
+    directoryOfPhones([6 => 'PJSIP/1100', 2 => 'PJSIP/1105']);
+
+    $telephony = fakeTelephony();
+    expectLiveCall($telephony);
+    $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1105', 'monitor')->andReturn('monitor-leg');
+    $telephony->shouldReceive('addToBridge')->once()->with('conv-1', 'monitor-leg');
+    $telephony->shouldReceive('hangup')->once()->with('monitor-leg');
+
+    $flow = liveCallWithAgentSix($telephony);
+
+    // 🔴 SM-5, THE HALF SLICE 2 COULD NOT PROVE. Every per-agent number in this system —
+    // the productivity report, agent detail, the abandoned rate — is built by counting
+    // rows filed against a participant, and participation is exactly this membership
+    // test. A supervisor who reached it would land in all of them at once as an extra
+    // agent on somebody else's call.
+    //
+    // Checked before, during and after, because barge is the one mode that puts their
+    // line in the same bridge as the agent's — which is precisely what would make a
+    // careless implementation add them to the participant set.
+    expect($flow->isServingAgent(2))->toBeFalse();
+
+    $flow->beginMonitor(agentUserId: 6, supervisorUserId: 2, mode: 'barge');
+    $flow->handle(stasisStart('monitor-leg', ['monitor']));
+
+    expect($flow->isServingAgent(2))->toBeFalse()
+        ->and($flow->isServingAgent(6))->toBeTrue();
+
+    $flow->handle(channelDestroyed('monitor-leg'));
+
+    expect($flow->isServingAgent(2))->toBeFalse()
+        ->and($flow->isServingAgent(6))->toBeTrue();
+});

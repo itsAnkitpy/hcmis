@@ -309,3 +309,86 @@ it('refuses to listen at all when the supervisor holds no phone', function () {
         expect(Activity::query()->where('event', 'live_call_monitored')->exists())->toBeFalse();
     });
 });
+
+// --- SM-4 / slice 4: barge is a second right, not the board's own ---
+
+it('offers barge to a team leader and never to a QC reviewer who can still listen', function () {
+    $qc = clientUserWithRole($this->tenant, RoleName::Qc->value);
+
+    // 🔴 THE WHOLE OF SM-4 IN ONE CASE. QC keeps the board, keeps Listen and keeps
+    // Whisper — those are invisible to the customer. Barge puts a third voice on a live
+    // customer call, and someone whose job is grading recordings is not automatically
+    // someone who should interrupt one.
+    $this->actingAs($qc->fresh());
+    TenantContext::run($this->tenant->id, function (): void {
+        $page = Livewire::test(LiveAgents::class)->instance();
+
+        expect($page->canBarge())->toBeFalse()
+            ->and($page::canAccess())->toBeTrue();
+    });
+
+    $this->actingAs($this->supervisor->fresh());
+    TenantContext::run($this->tenant->id, function (): void {
+        expect(Livewire::test(LiveAgents::class)->instance()->canBarge())->toBeTrue();
+    });
+});
+
+it('sends the barge signal and audits it as barging, not as listening', function () {
+    $agent = clientUserWithRole($this->tenant, RoleName::Agent->value);
+    app(AgentPhoneWriter::class)->provisionFor($this->supervisor);
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnCall)->create();
+    });
+
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('signal')->once()->with('barge', [
+        'agentUserId' => (string) $agent->getKey(),
+        'supervisorUserId' => (string) $this->supervisor->getKey(),
+    ]);
+    app()->instance(TelephonyProvider::class, $telephony);
+
+    $this->actingAs($this->supervisor->fresh());
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        Livewire::test(LiveAgents::class)->call('bargeInto', $agent->getKey());
+
+        // The trail has to say which of the three it was. Barging is the access a
+        // customer could actually notice, and it is the one that lands on the recording
+        // (SQ-1, answered the other way for this slice) — a row reading "monitored"
+        // cannot tell it apart from silent listening.
+        expect(Activity::query()
+            ->where('log_name', 'call')
+            ->where('event', 'live_call_monitored')
+            ->where('causer_id', $this->supervisor->getKey())
+            ->where('properties->mode', 'barge')
+            ->exists())->toBeTrue();
+    });
+});
+
+it('refuses a barge from someone who may listen but holds no right to barge', function () {
+    $agent = clientUserWithRole($this->tenant, RoleName::Agent->value);
+    $qc = clientUserWithRole($this->tenant, RoleName::Qc->value);
+    app(AgentPhoneWriter::class)->provisionFor($qc);
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        AgentPresence::factory()->forUser($agent)->status(PresenceStatus::OnCall)->create();
+    });
+
+    // 🔴 The button is not drawn for them, and the method is still reachable from any
+    // browser — which is the only reason this check exists in the method at all. Nothing
+    // is signalled and nothing is audited.
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldNotReceive('signal');
+    app()->instance(TelephonyProvider::class, $telephony);
+
+    $this->actingAs($qc->fresh());
+
+    TenantContext::run($this->tenant->id, function () use ($agent): void {
+        Livewire::test(LiveAgents::class)
+            ->call('bargeInto', $agent->getKey())
+            ->assertForbidden();
+
+        expect(Activity::query()->where('event', 'live_call_monitored')->exists())->toBeFalse();
+    });
+});

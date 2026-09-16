@@ -240,7 +240,7 @@ class Switchboard implements HandlerRegistry
             // wrongly refuse a hold to our own global staff on an outbound call.
             'hold' => $this->guard($handler, fn () => $handler->beginHold($agentUserId)),
             'resume' => $this->guard($handler, fn () => $handler->resumeHold()),
-            // SM slices 2-3: a supervisor monitors. No company needed, for the same reason
+            // SM slices 2-4: a supervisor monitors. No company needed, for the same reason
             // hold needs none — nothing is reserved, so there is no board to read. The
             // supervisor is named separately from the agent because they are two different
             // people, which is the whole shape of this signal.
@@ -255,6 +255,14 @@ class Switchboard implements HandlerRegistry
             'whisper' => $supervisorUserId === null
                 ? null
                 : $this->guard($handler, fn () => $handler->beginMonitor($agentUserId, $supervisorUserId, 'whisper')),
+            // SM slice 4. A third name on the same pipe, for the same reason: the name IS
+            // the mode. The extra right barge needs (SM-4) is enforced where the button
+            // is pressed, not here — this program has no web session to ask about roles,
+            // which is exactly why every other permission in the system lives on that
+            // side too.
+            'barge' => $supervisorUserId === null
+                ? null
+                : $this->guard($handler, fn () => $handler->beginMonitor($agentUserId, $supervisorUserId, 'barge')),
             default => null,   // an unknown signal is harmlessly ignored
         };
     }

@@ -203,8 +203,9 @@ class LiveAgents extends Page
                 'client' => $this->showsClient() ? ($presence->tenant?->name ?? '—') : null,
                 // LB-8: never on a row that is mid-call. See stuckRoster() for why.
                 'canLogOut' => $status !== PresenceStatus::OnCall,
-                // SM slices 2-3, the mirror image: listening and coaching are only offered
-                // on a row that IS mid-call, because there is nothing to hear otherwise.
+                // SM slices 2-4, the mirror image: listening, coaching and barging are
+                // only offered on a row that IS mid-call, because there is nothing to
+                // hear or join otherwise.
                 'canMonitor' => $status === PresenceStatus::OnCall,
             ];
         })->all();
@@ -414,6 +415,29 @@ class LiveAgents extends Page
     }
 
     /**
+     * Who may put their own voice on a customer's live call (SM-4, SQ-4 answered for
+     * slice 4): team leaders and our own global staff, and nobody else.
+     *
+     * 🔴 A SECOND RIGHT, NOT THE BOARD'S OWN ONE, and the argument is the same one
+     * Genesys and Amazon Connect both settled on: listening is invisible to the customer,
+     * barging is a third voice on their call. A trainer or a QC reviewer who should hear
+     * calls is not automatically someone who should interrupt one. So QC keeps Listen and
+     * Whisper — which this page's own gate already grants — and loses only this.
+     *
+     * Same holders as force-logout today, and deliberately a method of its own rather
+     * than a call to that one: they are two different rights that happen to be held by
+     * the same people this month, and collapsing them would quietly move barge the next
+     * time somebody changes who can log an agent out.
+     */
+    public function canBarge(): bool
+    {
+        $user = auth()->user();
+
+        return $user !== null
+            && ($user->operatesGlobally() || $user->hasRole(RoleName::TeamLeader->value));
+    }
+
+    /**
      * Force a stuck agent offline (LB-8, LB-12, LB-15). Three things happen, all inside
      * the target agent's own client context: the board row goes Offline, the open diary
      * entry is closed THROUGH THE DOOR (never around it — an entry left open forever is
@@ -501,7 +525,25 @@ class LiveAgents extends Page
     }
 
     /**
-     * The shared body of both buttons (SM slices 2-3).
+     * Join an agent's live call as a third voice (SM slice 4). The agent AND the customer
+     * both hear the supervisor, and the supervisor is on the recording — unlike coaching,
+     * where the two audio paths never meet (SQ-1, asked again for barge and answered the
+     * other way).
+     *
+     * 🔴 THE ONE METHOD ON THIS PAGE WITH A RIGHT OF ITS OWN. Re-checked here rather than
+     * trusted from the view, exactly as forceLogOut does: the Barge button is drawn only
+     * for someone who holds it, and this method is still reachable from any browser by
+     * somebody who does not.
+     */
+    public function bargeInto(int $agentUserId): void
+    {
+        abort_unless($this->canBarge(), 403);
+
+        $this->beginMonitoring($agentUserId, 'barge');
+    }
+
+    /**
+     * The shared body of all three buttons (SM slices 2-4).
      *
      * Three things happen. The agent's board row is read, which is what proves they are
      * on a call AND which client they belong to (the row is client-owned; the tenant wall
@@ -518,11 +560,11 @@ class LiveAgents extends Page
      * forceLogOut does: the buttons are drawn only for permitted readers on permitted
      * rows, and the method is still reachable from any browser.
      *
-     * 🔴 SQ-4 settled for this slice: the gate is the board's own (team leader / QC /
-     * global staff), not a new permission. Listening is invisible to the customer and
-     * this page is already walled to exactly the people who supervise a floor. Barge is
-     * the one that puts a third voice on a customer's call, and splitting the permission
-     * belongs with it in slice 4.
+     * 🔴 SQ-4, in full. Listening and coaching ride the board's own gate (team leader /
+     * QC / global staff) because they are invisible to the customer and this page is
+     * already walled to exactly the people who supervise a floor. Barge carries a second
+     * right on top, checked in bargeInto before it ever reaches here — this method is
+     * shared, so the stricter of the two gates cannot live in it.
      */
     private function beginMonitoring(int $agentUserId, string $mode): void
     {
@@ -565,10 +607,18 @@ class LiveAgents extends Page
         ]);
 
         Notification::make()
-            ->title($mode === 'whisper' ? "Coaching {$name}" : "Listening in on {$name}")
-            ->body($mode === 'whisper'
-                ? "Your phone will pick up by itself. {$name} will hear you; the customer will not."
-                : 'Your phone will pick up by itself. Press Stop on your phone panel when you are done.')
+            ->title(match ($mode) {
+                'whisper' => "Coaching {$name}",
+                'barge' => "Joining {$name}'s call",
+                default => "Listening in on {$name}",
+            })
+            ->body(match ($mode) {
+                'whisper' => "Your phone will pick up by itself. {$name} will hear you; the customer will not.",
+                // Said plainly because it is the one thing a supervisor can get wrong
+                // here, and the cost of getting it wrong lands on a customer.
+                'barge' => "Your phone will pick up by itself. {$name} AND the customer will hear you, and you will be on the recording.",
+                default => 'Your phone will pick up by itself. Press Stop on your phone panel when you are done.',
+            })
             ->success()
             ->send();
 
