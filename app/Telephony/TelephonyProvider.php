@@ -101,8 +101,14 @@ interface TelephonyProvider
      */
     public function stopHoldMusic(string $legId): void;
 
-    /** End a leg's call. Works on any leg we know the id of, even after it left us. */
-    public function hangup(string $legId): void;
+    /**
+     * End a leg's call. Works on any leg we know the id of, even after it left us.
+     *
+     * `$reason` is what an UNANSWERED caller's network is told (inbound-audio AU-2): `busy`
+     * plays a busy tone. Left out, Asterisk sends "declined", which networks often play as
+     * "not in service".
+     */
+    public function hangup(string $legId, ?string $reason = null): void;
 
     /** Fold away an emptied conversation so the voice box doesn't accumulate them. */
     public function endConversation(string $conversationId): void;

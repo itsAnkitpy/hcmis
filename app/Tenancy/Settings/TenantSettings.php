@@ -3,6 +3,7 @@
 namespace App\Tenancy\Settings;
 
 use App\Enums\CampaignTemplate;
+use App\Enums\ClosedHours;
 use Livewire\Wireable;
 
 /**
@@ -30,6 +31,7 @@ class TenantSettings implements Wireable
      * @param  SlaShape  $sla
      * @param  array<int, DispositionShape>  $dispositions
      * @param  ScriptsShape  $scripts  call type (opening|objection|closing) => script text
+     * @param  array<int, string>  $holidays  whole closed days, `Y-m-d` on the client's clock (AU-7)
      */
     public function __construct(
         public array $hours = [],
@@ -42,6 +44,8 @@ class TenantSettings implements Wireable
         public array $scripts = [],
         public bool $portalAccess = false,
         public ?CampaignTemplate $campaignTemplate = null,
+        public ClosedHours $closedHours = ClosedHours::Off,
+        public array $holidays = [],
     ) {}
 
     /**
@@ -65,6 +69,8 @@ class TenantSettings implements Wireable
             scripts: $data['scripts'] ?? [],
             portalAccess: (bool) ($data['portal_access'] ?? false),
             campaignTemplate: isset($data['campaign_template']) ? CampaignTemplate::tryFrom((string) $data['campaign_template']) : null,
+            closedHours: ClosedHours::tryFrom((string) ($data['closed_hours'] ?? '')) ?? ClosedHours::Off,
+            holidays: $data['holidays'] ?? [],
         );
     }
 
@@ -80,6 +86,8 @@ class TenantSettings implements Wireable
             'scripts' => $this->scripts,
             'portal_access' => $this->portalAccess,
             'campaign_template' => $this->campaignTemplate?->value,
+            'closed_hours' => $this->closedHours->value,
+            'holidays' => $this->holidays,
         ];
     }
 

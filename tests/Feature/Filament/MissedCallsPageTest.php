@@ -2,6 +2,7 @@
 
 use App\Enums\CallDirection;
 use App\Enums\CallOutcome;
+use App\Enums\MissedReason;
 use App\Enums\RoleName;
 use App\Filament\Pages\MissedCalls;
 use App\Models\Call;
@@ -164,6 +165,8 @@ it('says how each caller was lost in plain words (QD-6)', function () {
         $page = new MissedCalls;
 
         expect($page->reasonFor(missedCall(['outcome' => CallOutcome::Abandoned])))->toBe('They gave up waiting')
-            ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::NoAnswer])))->toBe('We stopped waiting');
+            ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::NoAnswer])))->toBe('We stopped waiting')
+            // inbound-audio slice 1 (AU-3): the stored reason wins over the outcome's text.
+            ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::NoAnswer, 'missed_reason' => MissedReason::ClosedHours])))->toBe('Called while closed');
     });
 });

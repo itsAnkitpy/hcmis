@@ -6,6 +6,7 @@ use App\Audit\LogsModelActivity;
 use App\Enums\CallDirection;
 use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
+use App\Enums\MissedReason;
 use App\Support\PhoneNumber;
 use App\Tenancy\BelongsToTenant;
 use Database\Factories\CallFactory;
@@ -82,6 +83,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $answered_at
  * @property Carbon|null $ended_at
  * @property CallEndedBy|null $ended_by
+ * @property MissedReason|null $missed_reason
  * @property int|null $hold_seconds
  * @property int|null $duration_seconds
  * @property string|null $recording_disk
@@ -111,6 +113,8 @@ class Call extends Model
         'answered_at',
         'ended_at',
         'ended_by',
+        // inbound-audio slice 1: why a caller is on Missed Calls, beside `outcome`.
+        'missed_reason',
         // hold.md H-1/H-7: how long this caller spent on hold, as one total. The single
         // deliberate exception to CT-1 — a call held three times has no pair of moments.
         'hold_seconds',
@@ -133,6 +137,7 @@ class Call extends Model
             'answered_at' => 'datetime',
             'ended_at' => 'datetime',
             'ended_by' => CallEndedBy::class,
+            'missed_reason' => MissedReason::class,
             'hold_seconds' => 'integer',
             'duration_seconds' => 'integer',
         ];

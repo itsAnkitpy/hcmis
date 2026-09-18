@@ -3,11 +3,14 @@
 namespace App\Models;
 
 use App\Audit\LogsModelActivity;
+use App\Enums\ClosedHours;
 use App\Enums\TenantStatus;
 use App\Tenancy\InvalidTenantTransitionException;
 use App\Tenancy\Observers\TenantObserver;
 use App\Tenancy\Settings\TenantSettings;
 use App\Tenancy\Settings\TenantSettingsCast;
+use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
 use Database\Factories\TenantFactory;
 use Illuminate\Database\Eloquent\Attributes\ObservedBy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -101,6 +104,47 @@ class Tenant extends Model
     public function reportTimezone(): string
     {
         return $this->timezone ?? (string) config('app.report_timezone');
+    }
+
+    /**
+     * The office hours sign (inbound-audio.md slice 1): is this client closed to callers at
+     * this moment? Read on the client's own clock — the same zone the Reporting section
+     * says business hours are written on.
+     *
+     * Never closed while the switch is off (AU-1). Otherwise open only inside a shift: a
+     * weekday's opening time up to its closing time, where a closing time at or before the
+     * opening time runs into the next morning (AU-6), so equal times mean 24 hours (S164).
+     * A holiday stops that day's shift from starting; a shift that began the day before
+     * runs on into it (AUQ-2, S164). That is why yesterday's shift is checked too.
+     */
+    public function isClosedAt(CarbonInterface $moment): bool
+    {
+        if ($this->settings->closedHours === ClosedHours::Off) {
+            return false;
+        }
+
+        $now = CarbonImmutable::instance($moment)->setTimezone($this->reportTimezone());
+
+        foreach ([$now->subDay(), $now] as $day) {
+            $hours = $this->settings->hours[strtolower($day->englishDayOfWeek)] ?? null;
+
+            if ($hours === null || in_array($day->toDateString(), $this->settings->holidays, true)) {
+                continue;
+            }
+
+            $opens = $day->setTimeFromTimeString($hours['open']);
+            $closes = $day->setTimeFromTimeString($hours['close']);
+
+            if ($closes <= $opens) {
+                $closes = $closes->addDay();
+            }
+
+            if ($now >= $opens && $now < $closes) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

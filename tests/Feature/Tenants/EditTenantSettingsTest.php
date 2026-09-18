@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\CampaignTemplate;
+use App\Enums\ClosedHours;
 use App\Enums\RoleName;
 use App\Filament\Resources\Tenants\Pages\EditTenant;
 use App\Models\Tenant;
@@ -126,4 +127,32 @@ it('hydrates the Edit form with the current settings (closed days come back as n
             'hours.sunday.is_open' => false,
             'sla.max_attempts' => 3,
         ]);
+});
+
+it('saves the closed-hours switch and holiday dates, and a date comes back unchanged (inbound-audio slice 1)', function () {
+    $tenant = Tenant::factory()->create([
+        'settings' => ['dispositions' => [['code' => 'X', 'label' => 'X', 'is_contact' => false, 'is_sale' => false]]],
+    ]);
+
+    Livewire::test(EditTenant::class, ['record' => $tenant->getRouteKey()])
+        ->fillForm([
+            'closed_hours' => ClosedHours::NoPickup->value,
+            'holidays' => [['date' => '2026-10-02'], ['date' => '2026-01-26']],
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    $settings = $tenant->fresh()->settings;
+
+    // 🔴 S118: the panel reads dates in the client's zone (Asia/Kolkata here, 5½ hours
+    // ahead of the app clock). A date-only field converted on the way through slips a day.
+    expect($settings->closedHours)->toBe(ClosedHours::NoPickup)
+        ->and($settings->holidays)->toBe(['2026-01-26', '2026-10-02']);
+
+    Livewire::test(EditTenant::class, ['record' => $tenant->getRouteKey()])
+        ->assertFormSet(function (array $state): array {
+            expect(array_column($state['holidays'], 'date'))->toBe(['2026-01-26', '2026-10-02']);
+
+            return ['closed_hours' => ClosedHours::NoPickup->value];
+        });
 });

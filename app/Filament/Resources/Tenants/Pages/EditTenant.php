@@ -41,6 +41,8 @@ class EditTenant extends EditRecord
         $data['sla'] = $settings['sla'] ?? [];
         $data['dispositions'] = $settings['dispositions'] ?? [];
         $data['scripts'] = $settings['scripts'] ?? [];
+        $data['closed_hours'] = $settings['closed_hours'];
+        $data['holidays'] = $settings['holidays'];
 
         return $data;
     }
@@ -64,10 +66,12 @@ class EditTenant extends EditRecord
             $data['scripts'] ?? [],
             fn ($v) => $v !== null && $v !== ''
         );
+        $settings['closed_hours'] = $data['closed_hours'] ?? ($current['closed_hours'] ?? null);
+        $settings['holidays'] = collect($data['holidays'] ?? [])->filter()->unique()->sort()->values()->all();
 
         $data['settings'] = $settings;
 
-        unset($data['hours'], $data['sla'], $data['dispositions'], $data['scripts']);
+        unset($data['hours'], $data['sla'], $data['dispositions'], $data['scripts'], $data['closed_hours'], $data['holidays']);
 
         return $data;
     }

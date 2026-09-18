@@ -199,6 +199,16 @@ it('hangs up a leg', function () {
         && $request->url() === 'http://voice.test:8088/ari/channels/leg-caller');
 });
 
+it('hangs up a leg with a reason, so an unanswered caller hears busy (inbound-audio AU-2)', function () {
+    Http::fake(['*' => Http::response()]);
+
+    $this->telephony->hangup('leg-caller', 'busy');
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
+        && str_starts_with($request->url(), 'http://voice.test:8088/ari/channels/leg-caller?')
+        && ariParams($request) === ['reason' => 'busy']);
+});
+
 it('ends a conversation', function () {
     Http::fake(['*' => Http::response()]);
 

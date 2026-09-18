@@ -2,8 +2,10 @@
 
 namespace App\Filament\Resources\Tenants\Schemas;
 
+use App\Enums\ClosedHours;
 use App\Tenancy\Settings\BusinessHoursForm;
 use DateTimeZone;
+use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
@@ -111,8 +113,33 @@ class TenantForm
                     ->hiddenOn('create'),
 
                 Section::make('Business hours')
-                    ->description('Per-day operating hours. Toggle a day off to mark it closed.')
-                    ->schema(BusinessHoursForm::fields())
+                    ->description('Per-day operating hours, on the client\'s own clock. Toggle a day off to mark it closed. A closing time earlier than the opening time runs into the next morning; the same time for both means open 24 hours.')
+                    ->schema([
+                        // inbound-audio slice 1 (AU-1): off by default, because most saved
+                        // hours are the onboarding form's untouched defaults.
+                        Select::make('closed_hours')
+                            ->label('When closed')
+                            ->options(collect(ClosedHours::cases())->mapWithKeys(
+                                fn (ClosedHours $choice): array => [$choice->value => $choice->label()],
+                            )->all())
+                            ->default(ClosedHours::Off->value)
+                            ->selectablePlaceholder(false)
+                            ->required()
+                            ->helperText('Off: every call is answered, whatever the hours say. No pick-up: outside these hours, on a closed day or on a holiday, the call is not answered, the caller hears a busy tone, and they go on Missed Calls.'),
+                        ...BusinessHoursForm::fields(),
+                        Repeater::make('holidays')
+                            ->label('Holidays')
+                            ->simple(
+                                // 🔴 Pinned for the same reason as the hour pickers (S118): a
+                                // date read in the client's zone and saved in another slips a day.
+                                DatePicker::make('date')
+                                    ->required()
+                                    ->timezone(config('app.timezone')),
+                            )
+                            ->defaultItems(0)
+                            ->addActionLabel('Add a holiday')
+                            ->helperText('Closed all day. A night shift that started the evening before still runs to its end.'),
+                    ])
                     ->collapsible()
                     ->collapsed()
                     ->hiddenOn('create'),

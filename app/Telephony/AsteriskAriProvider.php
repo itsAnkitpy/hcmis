@@ -103,9 +103,9 @@ class AsteriskAriProvider implements TelephonyProvider
         $this->command('DELETE', "/channels/{$legId}/moh");
     }
 
-    public function hangup(string $legId): void
+    public function hangup(string $legId, ?string $reason = null): void
     {
-        $this->command('DELETE', "/channels/{$legId}");
+        $this->command('DELETE', "/channels/{$legId}", $reason === null ? [] : ['reason' => $reason]);
     }
 
     public function endConversation(string $conversationId): void

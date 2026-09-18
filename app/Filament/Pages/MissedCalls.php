@@ -111,12 +111,15 @@ class MissedCalls extends Page
         return Call::asClock($call->waitedSeconds());
     }
 
-    /** Plain words for how a caller ended up on this list (QD-6). */
+    /**
+     * Plain words for how a caller ended up on this list (QD-6). A stored reason wins
+     * ("called while closed", inbound-audio AU-3); without one, the outcome says it.
+     */
     public function reasonFor(Call $call): string
     {
-        return $call->outcome === CallOutcome::Abandoned
+        return $call->missed_reason?->label() ?? ($call->outcome === CallOutcome::Abandoned
             ? 'They gave up waiting'
-            : 'We stopped waiting';
+            : 'We stopped waiting');
     }
 
     /**

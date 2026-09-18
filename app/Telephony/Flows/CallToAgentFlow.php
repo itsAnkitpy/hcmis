@@ -7,6 +7,7 @@ namespace App\Telephony\Flows;
 use App\Enums\CallDirection;
 use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
+use App\Enums\MissedReason;
 use App\Models\Call;
 use App\Models\CallHandoff;
 use App\Models\Campaign;
@@ -590,7 +591,24 @@ class CallToAgentFlow
         }
 
         $this->tenantId = $tenantId;
-        $this->loadQueueSettings($tenantId);
+        $tenant = $this->loadQueueSettings($tenantId);
+
+        // inbound-audio slice 1: the office hours sign, read BEFORE answering — the dialplan
+        // hands the call over unanswered, so "don't pick up" is still possible here (AU-2).
+        // Closed beats a Ready agent (AU-5). "busy" because no reason sends "declined",
+        // which networks play as "not in service". A missing client row reads as open.
+        if ($tenant?->isClosedAt(now()) === true) {
+            rescue(fn () => $this->telephony->hangup($callerLegId, 'busy'), report: false);
+            Log::info('Inbound call: the client is closed — ending the call unanswered as busy.', [
+                'ticket' => $this->ticketNumber,
+                'tenant' => $tenantId,
+                'caller' => $callerLegId,
+            ]);
+            $this->recordMissedCall(CallOutcome::NoAnswer, MissedReason::ClosedHours);
+            $this->dispose();
+
+            return;
+        }
 
         $this->telephony->answer($callerLegId);
 
@@ -611,13 +629,18 @@ class CallToAgentFlow
      * back to the config defaults when the client has set none — and when there is no
      * client row at all, which is the flow tests' posture (they prove call mechanics
      * against a stub number-directory, with no `tenants` row behind the label).
+     *
+     * Returns the client row it read, so the inbound door can check its hours without a
+     * second lookup.
      */
-    private function loadQueueSettings(int $tenantId): void
+    private function loadQueueSettings(int $tenantId): ?Tenant
     {
         $tenant = Tenant::query()->find($tenantId);
 
         $this->ringSeconds = $tenant?->ringSeconds();
         $this->maxHoldSeconds = $tenant?->maxHoldSeconds();
+
+        return $tenant;
     }
 
     /**
@@ -1140,7 +1163,7 @@ class CallToAgentFlow
      * ring-out was one. The guard lets it through on `dialedLeadId`, which a console
      * outbound call never has, so that call is still kept out.
      */
-    private function recordMissedCall(CallOutcome $outcome): void
+    private function recordMissedCall(CallOutcome $outcome, ?MissedReason $reason = null): void
     {
         if ($this->tenantId === null || ($this->startedAt === null && $this->dialedLeadId === null)) {
             return;
@@ -1205,6 +1228,7 @@ class CallToAgentFlow
                 // invisible only because nothing else ever filled it. The wait is now
                 // computed from these two moments wherever it is shown.
                 'ended_at' => $endedAt,
+                'missed_reason' => $reason,
             ])),
             function (Throwable $exception) use ($filedOutcome): void {
                 Log::warning('Missed-call record write failed — the caller will not appear in the missed-call list.', [
