@@ -1201,6 +1201,14 @@ class CallToAgentFlow
                 [$this->waitingMessageUrl],
             );
             $this->holdMusicOn = false;
+
+            Log::info('The waiting caller is hearing the client\'s announcement; their music is paused.', [
+                'ticket' => $this->ticketNumber,
+                'tenant' => $this->tenantId,
+                'caller' => $this->callerLegId,
+                'waitedSeconds' => (int) $this->startedAt?->diffInSeconds(now()),
+                'playback' => $this->waitingMessagePlaybackId,
+            ]);
         } catch (AriConnectionLost $exception) {
             throw $exception;
         } catch (TelephonyException $exception) {
