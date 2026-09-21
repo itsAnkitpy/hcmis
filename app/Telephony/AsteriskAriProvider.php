@@ -115,12 +115,29 @@ class AsteriskAriProvider implements TelephonyProvider
      * 🔴 ONE COMMA-JOINED VALUE, NOT A REPEATED PARAMETER. Asterisk splits `media` on
      * commas into the play's list; sending `media=a&media=b` keeps only the last (S165).
      *
+     * 🔴 EVERY ADDRESS IS PREFIXED `sound:`, AND A BARE WEB ADDRESS SILENTLY PLAYS
+     * NOTHING. res_stasis_playback.c matches the value against six known schemes
+     * (`sound:`, `recording:`, `number:`, `digits:`, `characters:`, `tone:`) and sends
+     * anything else to a branch that logs "scheme is unsupported" and skips it — the
+     * play still reports success and still finishes, so the call behaves normally and
+     * the caller simply hears silence. Found on staging S167: the voice box never even
+     * requested the file. With the prefix, Asterisk strips it and hands the rest to the
+     * file player, which treats anything containing `://` as remote and pulls it through
+     * the HTTP media cache (main/file.c, is_remote_path / ast_media_cache_retrieve) —
+     * the same cache hold music already uses.
+     *
+     * This is the ONE place the prefix is added, because it is engine spelling: the
+     * contract above speaks in plain web addresses, as every other verb here does.
+     *
      * @param  array<int, string>  $mediaUris
      */
     public function play(string $legId, array $mediaUris): string
     {
         return (string) $this->command('POST', "/channels/{$legId}/play", [
-            'media' => implode(',', $mediaUris),
+            'media' => implode(',', array_map(
+                static fn (string $uri): string => 'sound:'.$uri,
+                $mediaUris,
+            )),
         ])->json('id');
     }
 

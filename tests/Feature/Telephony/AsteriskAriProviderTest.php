@@ -339,10 +339,11 @@ it('plays a sound on the caller\'s own leg and hands back the play\'s id', funct
 
     expect($playbackId)->toBe('playback-7');
 
-    // `media` rides the QUERY STRING, which is what the 20 branch's spec marks it as.
+    // `media` rides the QUERY STRING, which is what the 20 branch's spec marks it as,
+    // and the address carries the `sound:` scheme — see the test below for why.
     Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
         && $request->url() === 'http://voice.test:8088/ari/channels/caller-leg/play?'
-            .http_build_query(['media' => 'https://hcmis.test/closed-message/1/abc.wav']));
+            .http_build_query(['media' => 'sound:https://hcmis.test/closed-message/1/abc.wav']));
 });
 
 it('joins several sounds into ONE comma-separated media value, never a repeated one', function () {
@@ -355,7 +356,25 @@ it('joins several sounds into ONE comma-separated media value, never a repeated 
     $this->telephony->play('caller-leg', ['https://hcmis.test/one.wav', 'https://hcmis.test/two.wav']);
 
     Http::assertSent(fn (Request $request): bool => $request->url() === 'http://voice.test:8088/ari/channels/caller-leg/play?'
-        .http_build_query(['media' => 'https://hcmis.test/one.wav,https://hcmis.test/two.wav']));
+        .http_build_query(['media' => 'sound:https://hcmis.test/one.wav,sound:https://hcmis.test/two.wav']));
+});
+
+it('🔴 prefixes every address with the scheme, or the caller hears silence', function () {
+    // THE S167 STAGING BUG, pinned. res_stasis_playback.c matches the media value
+    // against six known schemes and sends anything else to a branch that logs "scheme
+    // is unsupported" and skips it — WITHOUT failing the play. So the call answers,
+    // the play reports success, the finish event arrives, we hang up on cue, and the
+    // caller hears nothing at all. The voice box never even requests the file, which is
+    // how it was caught: the web log showed no fetch from the box.
+    Http::fake(['*' => Http::response(['id' => 'playback-7'])]);
+
+    $this->telephony->play('caller-leg', ['https://hcmis.test/closed-message/1/abc.wav']);
+
+    Http::assertSent(function (Request $request): bool {
+        parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+        return str_starts_with((string) ($query['media'] ?? ''), 'sound:https://');
+    });
 });
 
 it('stops a play that is still running', function () {
