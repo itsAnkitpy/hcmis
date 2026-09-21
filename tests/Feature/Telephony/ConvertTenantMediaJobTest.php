@@ -195,3 +195,23 @@ it('replaces a client\'s closed message without touching their music', function 
     expect($tenant->fresh()->hold_music_path)->toBe($musicPath)
         ->and(Storage::disk('local')->exists($musicPath))->toBeTrue();
 });
+
+// --- slice 5: the third sound, the waiting announcement ---
+
+it('stores a waiting announcement under its own kind, padded like any other speech', function () {
+    fakeSox('WAITING-WAV');
+    $tenant = Tenant::factory()->create();
+
+    runConversionFor($tenant, 'waiting-message/pending/1/eeff0011/waiting.mp3', TenantMedia::WaitingMessage);
+
+    $expected = "waiting-message/{$tenant->id}/".hash('sha256', 'WAITING-WAV').'.wav';
+
+    expect($tenant->fresh()->waiting_message_path)->toBe($expected)
+        ->and($tenant->fresh()->closed_message_path)->toBeNull()
+        ->and($tenant->fresh()->hold_music_path)->toBeNull()
+        // Speech, so the second of silence rides on the end — the same reason the closed
+        // message gets one, and the same reason music never does.
+        ->and(DB::table('asterisk.musiconhold')->count())->toBe(0);
+
+    Process::assertRan(fn (PendingProcess $process): bool => in_array('pad', $process->command, true));
+});

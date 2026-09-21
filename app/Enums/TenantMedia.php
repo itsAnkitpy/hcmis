@@ -31,12 +31,16 @@ enum TenantMedia: string
     /** The "we're closed" announcement (slice 4, AU-2's third choice). Played once. */
     case ClosedMessage = 'closed-message';
 
+    /** The "thanks for waiting" announcement (slice 5, AU-15). Played every 60s of waiting. */
+    case WaitingMessage = 'waiting-message';
+
     /** The client column holding the converted file's path, or null when there is none. */
     public function pathColumn(): string
     {
         return match ($this) {
             self::HoldMusic => 'hold_music_path',
             self::ClosedMessage => 'closed_message_path',
+            self::WaitingMessage => 'waiting_message_path',
         };
     }
 
@@ -46,6 +50,7 @@ enum TenantMedia: string
         return match ($this) {
             self::HoldMusic => 'hold_music_rights_confirmed',
             self::ClosedMessage => 'closed_message_rights_confirmed',
+            self::WaitingMessage => 'waiting_message_rights_confirmed',
         };
     }
 
@@ -55,6 +60,7 @@ enum TenantMedia: string
         return match ($this) {
             self::HoldMusic => 'hold_music_upload',
             self::ClosedMessage => 'closed_message_upload',
+            self::WaitingMessage => 'waiting_message_upload',
         };
     }
 
@@ -71,6 +77,7 @@ enum TenantMedia: string
         return match ($this) {
             self::HoldMusic => 0,
             self::ClosedMessage => 1,
+            self::WaitingMessage => 1,
         };
     }
 

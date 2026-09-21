@@ -102,6 +102,8 @@ class TenantForm
 
                 TenantMediaSection::make(TenantMedia::ClosedMessage),
 
+                TenantMediaSection::make(TenantMedia::WaitingMessage),
+
                 // call-export.md CE-10. Same reasoning as the waiting-room settings
                 // above: a real column, blank means the system default, and the change
                 // reaches the audit trail — because changing this moves calls between

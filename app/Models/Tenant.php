@@ -63,6 +63,8 @@ class Tenant extends Model
         'hold_music_rights_confirmed',
         'closed_message_path',
         'closed_message_rights_confirmed',
+        'waiting_message_path',
+        'waiting_message_rights_confirmed',
         'settings',
     ];
 
@@ -161,6 +163,15 @@ class Tenant extends Model
     public function closedMessageUrl(): ?string
     {
         return $this->mediaUrl(TenantMedia::ClosedMessage);
+    }
+
+    /**
+     * The waiting-area announcement's address (slice 5), or null when the client has
+     * uploaded none — and null is what makes a waiting caller hear music only (AU-15).
+     */
+    public function waitingMessageUrl(): ?string
+    {
+        return $this->mediaUrl(TenantMedia::WaitingMessage);
     }
 
     /**
@@ -289,7 +300,7 @@ class Tenant extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed', 'closed_message_path', 'closed_message_rights_confirmed'];
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed', 'closed_message_path', 'closed_message_rights_confirmed', 'waiting_message_path', 'waiting_message_rights_confirmed'];
     }
 
     protected function activityLogName(): string

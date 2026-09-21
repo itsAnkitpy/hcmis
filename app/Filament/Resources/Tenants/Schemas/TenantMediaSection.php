@@ -95,6 +95,7 @@ class TenantMediaSection
         return match ($kind) {
             TenantMedia::HoldMusic => 'Upload music',
             TenantMedia::ClosedMessage => 'Upload the message',
+            TenantMedia::WaitingMessage => 'Upload the message',
         };
     }
 
@@ -103,6 +104,7 @@ class TenantMediaSection
         return match ($kind) {
             TenantMedia::HoldMusic => 'Hold music',
             TenantMedia::ClosedMessage => 'Closed message',
+            TenantMedia::WaitingMessage => 'Waiting message',
         };
     }
 
@@ -111,6 +113,7 @@ class TenantMediaSection
         return match ($kind) {
             TenantMedia::HoldMusic => 'What a caller hears while they wait for an agent. Leave empty and they hear the standard music.',
             TenantMedia::ClosedMessage => 'What a caller hears outside business hours when "When closed" is set to play a message. The call ends once it has played.',
+            TenantMedia::WaitingMessage => 'What a waiting caller hears every minute while they hold. The music pauses for it and resumes afterwards. Leave empty and they hear music only.',
         };
     }
 
@@ -119,6 +122,7 @@ class TenantMediaSection
         return match ($kind) {
             TenantMedia::HoldMusic => 'Hold music',
             TenantMedia::ClosedMessage => 'The closed message',
+            TenantMedia::WaitingMessage => 'The waiting message',
         };
     }
 
@@ -127,6 +131,7 @@ class TenantMediaSection
         return match ($kind) {
             TenantMedia::HoldMusic => 'We have the rights to play this music to callers',
             TenantMedia::ClosedMessage => 'We have the right to play this recording to callers',
+            TenantMedia::WaitingMessage => 'We have the right to play this recording to callers',
         };
     }
 
@@ -135,6 +140,7 @@ class TenantMediaSection
         return match ($kind) {
             TenantMedia::HoldMusic => 'Confirm you have the rights to play this music to callers.',
             TenantMedia::ClosedMessage => 'Confirm you have the right to play this recording to callers.',
+            TenantMedia::WaitingMessage => 'Confirm you have the right to play this recording to callers.',
         };
     }
 
@@ -143,6 +149,7 @@ class TenantMediaSection
         return match ($kind) {
             TenantMedia::HoldMusic => 'On-hold music is licensable in India in its own right — IPRS names "Music on Hold" in its own tariff. Ticking this is recorded against your name.',
             TenantMedia::ClosedMessage => 'A recording of your own words needs nothing else. If it contains music or anything you did not record, you need the rights to it. Ticking this is recorded against your name.',
+            TenantMedia::WaitingMessage => 'A recording of your own words needs nothing else. If it contains music or anything you did not record, you need the rights to it. Ticking this is recorded against your name.',
         };
     }
 }

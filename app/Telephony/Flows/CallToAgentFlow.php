@@ -76,6 +76,17 @@ use Throwable;
  */
 class CallToAgentFlow
 {
+    /**
+     * How often a waiting caller hears the client's own announcement (AU-15). ONE
+     * constant for every client, not a per-client setting — Asterisk's own queue sample
+     * uses the same sixty seconds and plays its first announcement a minute in.
+     *
+     * ponytail: it lands between 60 and about 65 seconds on a quiet switch, because the
+     * sweep that carries it is paced by the listener's own event read. That is the
+     * rhythm, not a guarantee, and it is the reason this is not a scheduler.
+     */
+    private const WAITING_MESSAGE_EVERY_SECONDS = 60;
+
     private CallFlowState $state = CallFlowState::Idle;
 
     private ?string $callerLegId = null;
@@ -189,6 +200,35 @@ class CallToAgentFlow
      * greeting — ending a call that was never playing a closed message.
      */
     private ?string $closedMessagePlaybackId = null;
+
+    /**
+     * The client's "thanks for waiting" announcement, ready to play (inbound-audio
+     * slice 5, AU-15), read from the same client row as the two queue settings and the
+     * music name. Null means this client uploaded none, and null is what makes a waiting
+     * caller hear music only.
+     */
+    private ?string $waitingMessageUrl = null;
+
+    /**
+     * The waiting announcement playing to this caller right now, by the id the engine
+     * gave the play. Null whenever none is playing — which is also how we know there is
+     * nothing to stop when a desk frees up.
+     */
+    private ?string $waitingMessagePlaybackId = null;
+
+    /**
+     * When this caller last heard the waiting announcement. Null until the first one, and
+     * the clock then runs from ARRIVAL (Ankit, S168 Q1) — the same zero the hold limit
+     * uses, so the two agree.
+     *
+     * 🔴 THE CLOCK DOES NOT PAUSE WHILE A DESK RINGS, the announcement simply waits its
+     * turn. A caller who spent forty seconds listening to one desk ring has been waiting
+     * the whole time from their side, so they hear it about twenty seconds after they are
+     * put back rather than starting again from sixty. The alternative — restarting the
+     * count on every return to the waiting area — means a caller handed past three desks
+     * may never hear it at all.
+     */
+    private ?Carbon $lastWaitingMessageAt = null;
 
     /**
      * The agents who have let THIS caller's ring run out, and the moment each one's phone
@@ -696,6 +736,7 @@ class CallToAgentFlow
         $this->ringSeconds = $tenant?->ringSeconds();
         $this->maxHoldSeconds = $tenant?->maxHoldSeconds();
         $this->holdMusicClass = $tenant?->holdMusicClass();
+        $this->waitingMessageUrl = $tenant?->waitingMessageUrl();
 
         return $tenant;
     }
@@ -1071,8 +1112,16 @@ class CallToAgentFlow
         $reservedAgentId = $this->reserveNextAgent();
 
         if ($reservedAgentId === null) {
+            $this->playWaitingMessageIfDue();
+
             return;   // still nobody free — keep holding
         }
+
+        // A desk beats an announcement, always: the caller is never made to finish
+        // listening (AU-15). Stopping it here also hands the music back, because
+        // ringAgent's first act is to start the music if the line is silent — and the
+        // announcement left it silent.
+        $this->stopWaitingMessage();
 
         // The music deliberately keeps playing through the ring (S88 review #3). The
         // caller is not joined to this agent until they pick up, so stopping it here
@@ -1105,6 +1154,95 @@ class CallToAgentFlow
 
         $this->telephony->stopHoldMusic((string) $this->callerLegId);
         $this->holdMusicOn = false;
+    }
+
+    /**
+     * Play the client's waiting announcement if this caller is due one (slice 5, AU-15).
+     * Rides the waiting-area sweep the listener already runs — no scheduler, no timer
+     * class, nothing new running.
+     *
+     * 🔴 INBOUND CALLERS ONLY (AU-15, S163). The waiting area also holds customers the
+     * dialer rang, and a "thanks for calling us" to somebody WE rang is nonsense. The
+     * lead id is the marker: only the dialer ever sets one, so no second flag is needed.
+     *
+     * 🔴 THE MUSIC NOTE IS CLEARED BECAUSE THE MUSIC REALLY HAS STOPPED. Handing a file
+     * to a line switches off whatever was feeding it, and hold music is exactly that
+     * (main/file.c, openstream_internal -> ast_deactivate_generator). Asterisk leaves its
+     * OWN "music on" marker set, and ours would have said the same — so the restart
+     * afterwards would have been skipped as a no-op and the caller would have held the
+     * rest of their wait in silence. Both restarts run through the usual idempotent door.
+     *
+     * A refused play is swallowed on purpose: the announcement is optional, the wait is
+     * not, and the sweep's own error path would have ended the call. The clock is stamped
+     * either way, so a client whose file cannot be fetched is retried next minute rather
+     * than every second.
+     */
+    private function playWaitingMessageIfDue(): void
+    {
+        if ($this->waitingMessageUrl === null || $this->dialedLeadId !== null) {
+            return;
+        }
+
+        if ($this->waitingMessagePlaybackId !== null) {
+            return;   // one is already playing
+        }
+
+        $since = $this->lastWaitingMessageAt ?? $this->startedAt;
+
+        if ($since === null || $since->copy()->addSeconds(self::WAITING_MESSAGE_EVERY_SECONDS)->isFuture()) {
+            return;
+        }
+
+        $this->lastWaitingMessageAt = now();
+
+        try {
+            $this->waitingMessagePlaybackId = $this->telephony->play(
+                (string) $this->callerLegId,
+                [$this->waitingMessageUrl],
+            );
+            $this->holdMusicOn = false;
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException $exception) {
+            Log::warning('The waiting announcement could not be started; the caller keeps their music.', [
+                'ticket' => $this->ticketNumber,
+                'tenant' => $this->tenantId,
+                'caller' => $this->callerLegId,
+                'why' => $exception->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Stop the waiting announcement early. A no-op whenever none is playing, which is
+     * most of the time.
+     *
+     * 🔴 A REFUSAL HERE IS NOT AN ERROR. An announcement that ended a moment ago no
+     * longer exists, so the engine answers "not found" and our phone layer turns every
+     * refusal into an exception — which the sweep's own handler would answer by tearing
+     * the call down. The announcement runs a few seconds and the sweep runs every second,
+     * so a desk freeing up as the announcement ends is not rare: the caller would be hung
+     * up on because their message finished on time.
+     *
+     * Nothing else needs stopping. The other two endings — the hold limit running out and
+     * the caller hanging up — drop the line, which ends any sound on it.
+     */
+    private function stopWaitingMessage(): void
+    {
+        if ($this->waitingMessagePlaybackId === null) {
+            return;
+        }
+
+        $playbackId = $this->waitingMessagePlaybackId;
+        $this->waitingMessagePlaybackId = null;
+
+        try {
+            $this->telephony->stopPlayback($playbackId);
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException) {
+            // It had already finished. There was nothing left to stop.
+        }
     }
 
     /**
@@ -2131,11 +2269,35 @@ class CallToAgentFlow
      */
     private function onPlaybackFinished(array $event): void
     {
+        $playbackId = $event['playback']['id'] ?? null;
+
+        // The waiting announcement ran out on its own and the caller is still holding
+        // (slice 5): give them their music back. This is R4 — handing a file to a line
+        // stops the music and nothing turns it back on but us. The client's own track
+        // picks up where it stopped rather than starting again (res_musiconhold.c saves
+        // the position when the file takes over).
+        //
+        // A play that FAILED arrives here too, as the same event with its own state, and
+        // wants the same thing: music back, and another try in a minute.
+        //
+        // No "we sent the stop" flag is needed (Ankit, S168 Q2). The engine reports a
+        // play we stopped exactly as one that ran out, but a caller whose announcement we
+        // cut short has already left the waiting area by the time this lands — and the id
+        // was cleared when we stopped it.
+        if ($this->state === CallFlowState::Waiting
+            && $this->waitingMessagePlaybackId !== null
+            && $playbackId === $this->waitingMessagePlaybackId) {
+            $this->waitingMessagePlaybackId = null;
+            $this->startHoldMusicIfSilent();
+
+            return;
+        }
+
         if ($this->state !== CallFlowState::PlayingClosedMessage) {
             return;
         }
 
-        if (($event['playback']['id'] ?? null) !== $this->closedMessagePlaybackId) {
+        if ($playbackId !== $this->closedMessagePlaybackId) {
             return;
         }
 
@@ -2644,6 +2806,9 @@ class CallToAgentFlow
         $this->maxHoldSeconds = null;
         $this->holdMusicClass = null;
         $this->closedMessagePlaybackId = null;
+        $this->waitingMessageUrl = null;
+        $this->waitingMessagePlaybackId = null;
+        $this->lastWaitingMessageAt = null;
         $this->rangOutAt = [];
         $this->pendingReservedTenantId = null;
         $this->pendingReservedAgentId = null;

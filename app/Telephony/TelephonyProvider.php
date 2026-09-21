@@ -128,9 +128,16 @@ interface TelephonyProvider
     /**
      * Stop a play early (inbound-audio slice 4, reused by slices 5 and 6).
      *
-     * 🔴 A STOPPED PLAY STILL REPORTS `done`, exactly like one that ran out (S165), so
-     * the engine cannot tell the caller why it ended — whoever asked for the stop has
-     * to remember that they did. Safe on a play that has already finished.
+     * 🔴 A STOPPED PLAY STILL REPORTS `done`, exactly like one that ran out (S165,
+     * re-read at the 20 branch in S168: res_stasis_playback.c's state_to_string prints
+     * `done` for stopped, complete AND cancelled alike). The engine cannot tell the
+     * caller why a play ended.
+     *
+     * 🔴 NOT SAFE ON A PLAY THAT HAS ALREADY FINISHED — corrected S168, this comment
+     * used to claim it was. The playback object is unlinked the moment the play ends, so
+     * Asterisk answers 404 (resource_playbacks.c) and AsteriskAriProvider::command turns
+     * every refusal into a TelephonyException. Callers must swallow that themselves; see
+     * CallToAgentFlow::stopWaitingMessage for why it matters on a live call.
      */
     public function stopPlayback(string $playbackId): void;
 
