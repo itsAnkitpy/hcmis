@@ -324,3 +324,45 @@ it('stops the hold music before the caller\'s call connects (QD-1)', function ()
     Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
         && $request->url() === 'http://voice.test:8088/ari/channels/caller-leg/moh');
 });
+
+/*
+| inbound-audio slice 4 — the playback pair. Endpoints and parameter names verified
+| against the Asterisk 20 branch's own API spec (rest-api/api-docs/channels.json and
+| playbacks.json), not against tutorials: POST /channels/{id}/play takes `media` as a
+| query value and answers with a Playback object; DELETE /playbacks/{id} stops one.
+*/
+
+it('plays a sound on the caller\'s own leg and hands back the play\'s id', function () {
+    Http::fake(['*' => Http::response(['id' => 'playback-7', 'state' => 'playing'])]);
+
+    $playbackId = $this->telephony->play('caller-leg', ['https://hcmis.test/closed-message/1/abc.wav']);
+
+    expect($playbackId)->toBe('playback-7');
+
+    // `media` rides the QUERY STRING, which is what the 20 branch's spec marks it as.
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && $request->url() === 'http://voice.test:8088/ari/channels/caller-leg/play?'
+            .http_build_query(['media' => 'https://hcmis.test/closed-message/1/abc.wav']));
+});
+
+it('joins several sounds into ONE comma-separated media value, never a repeated one', function () {
+    // 🔴 S165 measured this on the box: Asterisk splits `media` on commas into the play's
+    // list, and sending the parameter twice keeps only the LAST value. Slice 6 times its
+    // menu wait by appending a silent file this way, so getting it wrong would silently
+    // drop the greeting and play only the silence.
+    Http::fake(['*' => Http::response(['id' => 'playback-7'])]);
+
+    $this->telephony->play('caller-leg', ['https://hcmis.test/one.wav', 'https://hcmis.test/two.wav']);
+
+    Http::assertSent(fn (Request $request): bool => $request->url() === 'http://voice.test:8088/ari/channels/caller-leg/play?'
+        .http_build_query(['media' => 'https://hcmis.test/one.wav,https://hcmis.test/two.wav']));
+});
+
+it('stops a play that is still running', function () {
+    Http::fake(['*' => Http::response([])]);
+
+    $this->telephony->stopPlayback('playback-7');
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
+        && $request->url() === 'http://voice.test:8088/ari/playbacks/playback-7');
+});

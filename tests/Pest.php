@@ -520,3 +520,27 @@ function createAsteriskMusicTables(): void
         primary key (name, position)
     )');
 }
+
+/**
+ * A sound finished playing (inbound-audio slice 4).
+ *
+ * 🔴 THE LINE IS NOT WHERE EVERY OTHER EVENT PUTS IT. This event carries no top-level
+ * `channel`; the line is inside the playback object as `target_uri` = `channel:<id>`,
+ * which is exactly why the switchboard dropped it until slice 4 gave it its own case.
+ * Shaped from the 20 branch's own API spec (rest-api/api-docs/playbacks.json), not from
+ * a note. `state` is `done` for a play that ran out AND for one we stopped (S165).
+ *
+ * @return array<string, mixed>
+ */
+function playbackFinished(string $playbackId, string $legId, string $state = 'done'): array
+{
+    return [
+        'type' => 'PlaybackFinished',
+        'playback' => [
+            'id' => $playbackId,
+            'media_uri' => 'https://hcmis.test/closed-message/1/'.str_repeat('a', 64).'.wav',
+            'target_uri' => 'channel:'.$legId,
+            'state' => $state,
+        ],
+    ];
+}

@@ -1,8 +1,10 @@
 <?php
 
+use App\Enums\ClosedHours;
 use App\Enums\RoleName;
+use App\Enums\TenantMedia;
 use App\Filament\Resources\Tenants\Pages\EditTenant;
-use App\Jobs\ConvertHoldMusicJob;
+use App\Jobs\ConvertTenantMediaJob;
 use App\Models\ActivityLog;
 use App\Models\Tenant;
 use App\Models\User;
@@ -24,7 +26,7 @@ uses(RefreshDatabase::class);
  */
 beforeEach(function () {
     TenantContext::forget();
-    config()->set('telephony.hold_music.disk', 'local');
+    config()->set('telephony.media.disk', 'local');
     Storage::fake('local');
     Queue::fake();
 
@@ -162,7 +164,7 @@ it('queues the conversion rather than converting while the page waits', function
         ])
         ->call('save');
 
-    Queue::assertPushed(ConvertHoldMusicJob::class);
+    Queue::assertPushed(ConvertTenantMediaJob::class);
 });
 
 it('queues nothing when the save carried no new upload', function () {
@@ -170,5 +172,96 @@ it('queues nothing when the save carried no new upload', function () {
         ->fillForm(['name' => 'After'])
         ->call('save');
 
-    Queue::assertNotPushed(ConvertHoldMusicJob::class);
+    Queue::assertNotPushed(ConvertTenantMediaJob::class);
+});
+
+// --- slice 4: the second sound, and the choice that cannot be saved without it ---
+
+it('refuses "closed means a message" when the client has no message to play', function () {
+    // A caller would otherwise be picked up, held in silence and hung up on — worse than
+    // the busy tone they would have got.
+    editClient(editableClient())
+        ->fillForm(['closed_hours' => ClosedHours::Message->value])
+        ->call('save')
+        ->assertHasFormErrors(['closed_hours']);
+});
+
+it('allows the choice and its file in the same save', function () {
+    editClient(editableClient())
+        ->fillForm([
+            'closed_hours' => ClosedHours::Message->value,
+            'closed_message_upload' => UploadedFile::fake()->create('closed.mp3', 200, 'audio/mpeg'),
+            'closed_message_rights_confirmed' => true,
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    Queue::assertPushed(
+        ConvertTenantMediaJob::class,
+        fn (ConvertTenantMediaJob $job): bool => $job->kind === TenantMedia::ClosedMessage,
+    );
+});
+
+it('allows the choice when the client already has a message from an earlier save', function () {
+    $tenant = editableClient([
+        'closed_message_path' => 'closed-message/1/'.str_repeat('a', 64).'.wav',
+    ]);
+
+    editClient($tenant)
+        ->fillForm(['closed_hours' => ClosedHours::Message->value])
+        ->call('save')
+        ->assertHasNoFormErrors();
+});
+
+it('keeps "no pick-up" saveable with no message at all', function () {
+    editClient(editableClient())
+        ->fillForm(['closed_hours' => ClosedHours::NoPickup->value])
+        ->call('save')
+        ->assertHasNoFormErrors();
+});
+
+it('demands the rights tick for a closed message too, in its own words (AU-14)', function () {
+    editClient(editableClient())
+        ->fillForm([
+            'closed_message_upload' => UploadedFile::fake()->create('closed.mp3', 200, 'audio/mpeg'),
+            'closed_message_rights_confirmed' => false,
+        ])
+        ->call('save')
+        ->assertHasFormErrors(['closed_message_rights_confirmed']);
+});
+
+it('refuses a closed message that is neither MP3 nor WAV', function () {
+    editClient(editableClient())
+        ->fillForm([
+            'closed_message_upload' => UploadedFile::fake()->create('notes.pdf', 20, 'application/pdf'),
+            'closed_message_rights_confirmed' => true,
+        ])
+        ->call('save')
+        ->assertHasFormErrors(['closed_message_upload']);
+});
+
+it('records who ticked the closed message\'s rights box, and when (AU-14)', function () {
+    // 🔴 activitylog v5 keeps the before→after diff in `attribute_changes`, NOT in
+    // `properties` — an assertion on the old place passes against nothing (S166).
+    $tenant = editableClient();
+
+    editClient($tenant)
+        ->fillForm([
+            'closed_message_upload' => UploadedFile::fake()->create('closed.mp3', 200, 'audio/mpeg'),
+            'closed_message_rights_confirmed' => true,
+        ])
+        ->call('save');
+
+    // Ownerless, like every other client-row log entry — read it cross-client.
+    $entry = TenantContext::cross(fn () => ActivityLog::query()
+        ->where('log_name', 'tenant')
+        ->where('subject_id', $tenant->id)
+        ->where('event', 'updated')
+        ->latest('id')
+        ->first());
+    $changes = $entry?->attribute_changes ?? [];
+
+    expect($entry?->causer_id)->toBe($this->admin->id)
+        ->and($changes['attributes']['closed_message_rights_confirmed'] ?? null)->toBeTrue()
+        ->and($changes['old']['closed_message_rights_confirmed'] ?? null)->toBeFalse();
 });

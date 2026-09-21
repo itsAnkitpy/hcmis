@@ -83,6 +83,10 @@ class Switchboard implements HandlerRegistry
                 $this->onUserEvent($event);
 
                 return;
+            case 'PlaybackFinished':
+                $this->onPlaybackFinished($event);
+
+                return;
             default:
                 $legId = $event['channel']['id'] ?? '';
 
@@ -285,6 +289,41 @@ class Switchboard implements HandlerRegistry
     }
 
     /**
+     * A sound finished playing (inbound-audio slice 4, shared with slices 5 and 6).
+     *
+     * 🔴 THIS EVENT NEEDS ITS OWN CASE FOR THE SAME REASON RecordingFinished DOES: it
+     * carries NO top-level `channel`. Everything the default branch routes is keyed on
+     * `channel.id`, so until now this event matched no handler and was silently dropped —
+     * which is why nothing could ever act on a sound ending.
+     *
+     * The line is inside the playback object instead, as `target_uri` = `channel:<id>`
+     * (verified against the 20 branch's own API spec: Playback.target_uri is "URI for the
+     * channel or bridge to play the media on"). A bridge-targeted play would read
+     * `bridge:<id>` and match no handler, which is the right outcome — nothing plays to a
+     * bridge on our paths.
+     *
+     * Unlike the recording notebook, this stays plain routing: the handler that started
+     * the play is the handler that owns the leg, and it is still alive, because the play
+     * is happening on a call it is running.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function onPlaybackFinished(array $event): void
+    {
+        $targetUri = $event['playback']['target_uri'] ?? '';
+
+        if (! is_string($targetUri) || ! str_starts_with($targetUri, 'channel:')) {
+            return;
+        }
+
+        $legId = substr($targetUri, strlen('channel:'));
+
+        if (isset($this->handlers[$legId])) {
+            $this->dispatch($this->handlers[$legId], $event);
+        }
+    }
+
+    /**
      * One recording file finished. Tick its entry in the shared notebook; queue the
      * stereo merge only once both sides are confirmed (events are facts; a 2xx on the
      * stop request is not). Lives on the switchboard so a recording that confirms
@@ -410,6 +449,12 @@ class Switchboard implements HandlerRegistry
                 // adding one without it throws on every publish, which rescue() swallows
                 // into a log while the whole box's board silently stops updating.
                 CallFlowState::DialingCustomer => null,
+                // A caller being told the client is closed belongs in no column either
+                // (inbound-audio slice 4). They are answered, but nobody is talking to
+                // them, no desk is ringing, and they are not in the waiting area — so
+                // counting them anywhere would overstate one of the three numbers and,
+                // for `waiting`, would feed a longest-wait clock nobody is waiting on.
+                CallFlowState::PlayingClosedMessage => null,
                 CallFlowState::Idle => null,
             };
 

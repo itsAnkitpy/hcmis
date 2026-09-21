@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Audit\LogsModelActivity;
 use App\Enums\ClosedHours;
+use App\Enums\TenantMedia;
 use App\Enums\TenantStatus;
 use App\Tenancy\InvalidTenantTransitionException;
 use App\Tenancy\Observers\TenantObserver;
@@ -38,6 +39,8 @@ use Spatie\Permission\Models\Role;
  * @property string|null $timezone
  * @property string|null $hold_music_path
  * @property bool $hold_music_rights_confirmed
+ * @property string|null $closed_message_path
+ * @property bool $closed_message_rights_confirmed
  * @property TenantSettings $settings
  */
 #[ObservedBy([TenantObserver::class])]
@@ -58,6 +61,8 @@ class Tenant extends Model
         'timezone',
         'hold_music_path',
         'hold_music_rights_confirmed',
+        'closed_message_path',
+        'closed_message_rights_confirmed',
         'settings',
     ];
 
@@ -73,6 +78,7 @@ class Tenant extends Model
             'ring_seconds' => 'integer',
             'max_hold_seconds' => 'integer',
             'hold_music_rights_confirmed' => 'boolean',
+            'closed_message_rights_confirmed' => 'boolean',
             'settings' => TenantSettingsCast::class,
         ];
     }
@@ -118,24 +124,43 @@ class Tenant extends Model
     }
 
     /**
-     * The signed address the voice box fetches this client's music from, or null when
-     * there is none (AUQ-4). ONE place builds it, because two would eventually disagree
-     * and the signature would stop matching.
+     * The signed address the voice box fetches one of this client's sounds from, or null
+     * when they have not uploaded that one (AUQ-4). ONE place builds every sound's
+     * address, because two would eventually disagree and the signature would stop
+     * matching.
      *
-     * No expiry on purpose — see HoldMusicController for why. The file name IS its
+     * No expiry on purpose — see TenantMediaController for why. The file name IS its
      * SHA-256, so the address changes on every upload and the voice box's year-long
      * cached copy is discarded by the change of address alone.
      */
-    public function holdMusicUrl(): ?string
+    public function mediaUrl(TenantMedia $kind): ?string
     {
-        if (blank($this->hold_music_path)) {
+        $path = $this->{$kind->pathColumn()};
+
+        if (blank($path)) {
             return null;
         }
 
-        return URL::signedRoute('tenants.hold-music', [
+        return URL::signedRoute('tenants.media', [
+            'kind' => $kind->value,
             'tenant' => $this->id,
-            'hash' => basename($this->hold_music_path, '.wav'),
+            'hash' => basename((string) $path, '.wav'),
         ]);
+    }
+
+    /** The waiting-area music's address (slice 3). Read by HoldMusicWriter and the form. */
+    public function holdMusicUrl(): ?string
+    {
+        return $this->mediaUrl(TenantMedia::HoldMusic);
+    }
+
+    /**
+     * The closed announcement's address (slice 4), or null when the client has uploaded
+     * none — which is why "closed means a message" cannot be saved without one.
+     */
+    public function closedMessageUrl(): ?string
+    {
+        return $this->mediaUrl(TenantMedia::ClosedMessage);
     }
 
     /**
@@ -264,7 +289,7 @@ class Tenant extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed'];
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed', 'closed_message_path', 'closed_message_rights_confirmed'];
     }
 
     protected function activityLogName(): string

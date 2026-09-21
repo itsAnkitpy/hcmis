@@ -107,6 +107,28 @@ class AsteriskAriProvider implements TelephonyProvider
         $this->command('DELETE', "/channels/{$legId}/moh");
     }
 
+    /**
+     * ARI's playback pair (inbound-audio slice 4). Verified against the 20 branch's own
+     * API spec (rest-api/api-docs/channels.json): POST /channels/{id}/play takes `media`
+     * as a required query value and answers with a Playback object carrying its `id`.
+     *
+     * 🔴 ONE COMMA-JOINED VALUE, NOT A REPEATED PARAMETER. Asterisk splits `media` on
+     * commas into the play's list; sending `media=a&media=b` keeps only the last (S165).
+     *
+     * @param  array<int, string>  $mediaUris
+     */
+    public function play(string $legId, array $mediaUris): string
+    {
+        return (string) $this->command('POST', "/channels/{$legId}/play", [
+            'media' => implode(',', $mediaUris),
+        ])->json('id');
+    }
+
+    public function stopPlayback(string $playbackId): void
+    {
+        $this->command('DELETE', "/playbacks/{$playbackId}");
+    }
+
     public function hangup(string $legId, ?string $reason = null): void
     {
         $this->command('DELETE', "/channels/{$legId}", $reason === null ? [] : ['reason' => $reason]);

@@ -3,12 +3,12 @@
 namespace App\Filament\Resources\Tenants\Schemas;
 
 use App\Enums\ClosedHours;
+use App\Enums\TenantMedia;
 use App\Models\Tenant;
 use App\Tenancy\Settings\BusinessHoursForm;
+use Closure;
 use DateTimeZone;
-use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\DatePicker;
-use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
@@ -18,8 +18,6 @@ use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
-use Illuminate\Support\HtmlString;
-use Illuminate\Support\Str;
 
 /**
  * Tenant create / edit form (M3 Checkpoint A + B.5.1).
@@ -96,60 +94,13 @@ class TenantForm
                     ->columns(2)
                     ->hiddenOn('create'),
 
-                // inbound-audio slice 3 (AU-9, AU-11, AU-13, AU-14). Head office only,
-                // which TenantPolicy::update already enforces — editing a client is
-                // global staff, so AU-8 needs no new check here.
-                Section::make('Hold music')
-                    ->description('What a caller hears while they wait for an agent. Leave empty and they hear the standard music.')
-                    ->schema([
-                        // The field is deliberately never pre-filled with the current file:
-                        // it means "replace the music", and the player below is what shows
-                        // what is playing today. Filling it would also push Filament to
-                        // build a preview address for a file on a private local disk,
-                        // which the local driver cannot produce.
-                        FileUpload::make('hold_music_upload')
-                            ->label('Upload music')
-                            ->disk(config('telephony.hold_music.disk'))
-                            // A random per-upload sub-folder avoids name clashes while
-                            // keeping the original name, whose extension is how the audio
-                            // tool knows what it is reading (same shape as the lead import).
-                            ->directory(fn (?Tenant $record): string => 'hold-music/pending/'.$record?->id.'/'.Str::random(8))
-                            ->visibility('private')
-                            ->previewable(false)
-                            ->acceptedFileTypes(['audio/mpeg', 'audio/wav', 'audio/x-wav'])
-                            ->maxSize(10240)
-                            ->validationMessages([
-                                'mimetypes' => 'Hold music must be an MP3 or a WAV file.',
-                                'max' => 'Hold music must be 10 MB or smaller.',
-                            ])
-                            ->helperText('MP3 or WAV, up to 10 MB. It is converted to phone quality after you save, so it may take a moment to appear below.'),
+                // inbound-audio slices 3 and 4 (AU-9, AU-11, AU-13, AU-14). Head office
+                // only, which TenantPolicy::update already enforces — editing a client is
+                // global staff, so AU-8 needs no new check here. One builder, one section
+                // per sound: slices 5 and 8 add a case, not another fifty lines.
+                TenantMediaSection::make(TenantMedia::HoldMusic),
 
-                        // AU-14. Required only when something is actually being uploaded,
-                        // so saving any other setting on this page does not demand it again.
-                        // Who ticked it and when comes from the activity log, which keeps
-                        // this column's changes forever (D-M7-3).
-                        Checkbox::make('hold_music_rights_confirmed')
-                            ->label('We have the rights to play this music to callers')
-                            ->accepted(fn (Get $get): bool => filled($get('hold_music_upload')))
-                            ->validationMessages([
-                                'accepted' => 'Confirm you have the rights to play this music to callers.',
-                            ])
-                            ->helperText('On-hold music is licensable in India in its own right — IPRS names "Music on Hold" in its own tariff. Ticking this is recorded against your name.'),
-
-                        // AU-9 wants a play button, and Filament's upload field has none for
-                        // audio (a gap raised against Filament repeatedly and still open), so
-                        // this is a plain browser player pointed at the same signed address
-                        // the voice box uses. HoldMusicController lets a head-office user
-                        // through that address for exactly this.
-                        Placeholder::make('hold_music_player')
-                            ->label('Playing today')
-                            ->visible(fn (?Tenant $record): bool => filled($record?->hold_music_path))
-                            ->content(fn (Tenant $record): HtmlString => new HtmlString(
-                                '<audio controls preload="none" src="'.e((string) $record->holdMusicUrl()).'"></audio>',
-                            ))
-                            ->columnSpanFull(),
-                    ])
-                    ->hiddenOn('create'),
+                TenantMediaSection::make(TenantMedia::ClosedMessage),
 
                 // call-export.md CE-10. Same reasoning as the waiting-room settings
                 // above: a real column, blank means the system default, and the change
@@ -186,7 +137,26 @@ class TenantForm
                             ->default(ClosedHours::Off->value)
                             ->selectablePlaceholder(false)
                             ->required()
-                            ->helperText('Off: every call is answered, whatever the hours say. No pick-up: outside these hours, on a closed day or on a holiday, the call is not answered, the caller hears a busy tone, and they go on Missed Calls.'),
+                            // inbound-audio slice 4: this choice needs something to play.
+                            // Saved without a file, a caller would be picked up, held in
+                            // silence and hung up on — worse than not answering at all.
+                            // Reads the just-uploaded file as well as the saved one, so
+                            // turning the choice on and uploading in the same save works.
+                            ->rules([
+                                fn (Get $get, ?Tenant $record): Closure => function (string $attribute, mixed $value, Closure $fail) use ($get, $record): void {
+                                    if ($value !== ClosedHours::Message->value) {
+                                        return;
+                                    }
+
+                                    if (filled($get(TenantMedia::ClosedMessage->uploadField()))
+                                        || filled($record?->closed_message_path)) {
+                                        return;
+                                    }
+
+                                    $fail('Upload a closed message below before choosing to play one.');
+                                },
+                            ])
+                            ->helperText('Off: every call is answered, whatever the hours say. No pick-up: outside these hours, on a closed day or on a holiday, the call is not answered, the caller hears a busy tone, and they go on Missed Calls. A message: the call is answered, your closed message plays, the call ends, and they still go on Missed Calls.'),
                         ...BusinessHoursForm::fields(),
                         Repeater::make('holidays')
                             ->label('Holidays')

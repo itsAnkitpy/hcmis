@@ -59,6 +59,18 @@ enum CallFlowState
     case AddingAgent;
 
     /**
+     * The client is closed and has chosen to say so (inbound-audio slice 4, AU-2's third
+     * choice): the caller has been answered and their closed message is playing. The
+     * call ends when the message finishes, or when the caller hangs up on it.
+     *
+     * 🔴 A DEAD END, not a stage on the way anywhere. No desk is booked, no agent will
+     * be rung, and the missed-call row is already written — it is filed at the door, the
+     * moment the hours say closed, so no ending can lose it. Reached only from the
+     * inbound door, and left only by teardown.
+     */
+    case PlayingClosedMessage;
+
+    /**
      * The caller is answered and holding with music on, waiting for a desk to free
      * up (B2.3b-i QD-2). Reached from BOTH ways a caller used to be hung up on:
      * nobody was free when they arrived, and an agent let their phone ring out.

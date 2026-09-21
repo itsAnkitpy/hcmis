@@ -1,10 +1,11 @@
 <?php
 
+use App\Enums\TenantMedia;
 use App\Http\Controllers\AcceptInviteController;
 use App\Http\Controllers\CallExportController;
 use App\Http\Controllers\CallRecordingController;
-use App\Http\Controllers\HoldMusicController;
 use App\Http\Controllers\TenantContextController;
+use App\Http\Controllers\TenantMediaController;
 use App\Http\Middleware\SetCurrentTenant;
 use Illuminate\Support\Facades\Route;
 
@@ -34,19 +35,29 @@ Route::middleware(['auth', SetCurrentTenant::class])->group(function () {
     Route::get('/calls/export', CallExportController::class)->name('calls.export');
 });
 
-// inbound-audio slice 3 (AU-12, AUQ-4) — the client's hold music, fetched by the voice
-// box with no login. The signature IS the guard; HoldMusicController adds the address
-// check and the "is this still the client's file" check.
+// inbound-audio slices 3 and 4 (AU-12, AUQ-4) — a client's uploaded sounds, fetched by
+// the voice box with no login. The signature IS the guard; TenantMediaController adds the
+// address check and the "is this still the client's file" check.
+//
+// 🔴 {kind} IS FIRST, AND THAT IS NOT COSMETIC. Slice 3 shipped this as the literal word
+// `hold-music` in the same position, so hold music's addresses are unchanged to the byte:
+// the signature still matches, the voice box's cached copy stays valid, and the address
+// already written into Asterisk's `musiconhold_entry` row still resolves. Moving the kind
+// anywhere else would have needed that row rewritten before the next caller waited.
 //
 // The address ends in `.wav` on purpose: the voice box reads Content-Type first and the
 // address's ending second, and the signature it carries as query text does not confuse
 // that — Asterisk 20 parses the address and reads the PATH only (file_extension_from_url_path).
 // {hash} is the converted file's SHA-256, so a re-upload is always a new address and a
-// year-long cache can never replay music the client has replaced.
+// year-long cache can never replay a sound the client has replaced.
 Route::middleware(['web', 'signed'])->group(function () {
-    Route::get('/hold-music/{tenant}/{hash}.wav', HoldMusicController::class)
-        ->where(['tenant' => '[0-9]+', 'hash' => '[0-9a-f]{64}'])
-        ->name('tenants.hold-music');
+    Route::get('/{kind}/{tenant}/{hash}.wav', TenantMediaController::class)
+        ->where([
+            'kind' => implode('|', array_column(TenantMedia::cases(), 'value')),
+            'tenant' => '[0-9]+',
+            'hash' => '[0-9a-f]{64}',
+        ])
+        ->name('tenants.media');
 });
 
 // M3 Checkpoint C — accept-invite (signed URL, public route).

@@ -106,6 +106,35 @@ interface TelephonyProvider
     public function stopHoldMusic(string $legId): void;
 
     /**
+     * Play one or more sounds to a leg and hand back the play's own id (inbound-audio
+     * slice 4). The id is how the "it finished" event is matched back to the play we
+     * started — the event names the play, not the reason it ended.
+     *
+     * $mediaUris are full web addresses of our own files. SEVERAL SOUNDS ARE ONE PLAY,
+     * not several (S165): the engine takes them as one comma-joined value, sends one
+     * "started" per sound but only ONE "finished" at the end, and repeating the
+     * parameter keeps only the last. Slice 6 leans on that to time its silence.
+     *
+     * 🔴 The leg should be answered first. Playing into an UNANSWERED leg does not
+     * answer it — Asterisk signals progress instead (20 branch, res_stasis_playback.c:
+     * `if (ast_channel_state(chan) != AST_STATE_UP) ast_indicate(chan,
+     * AST_CONTROL_PROGRESS)`), so the caller would get early audio the carrier may or
+     * may not pass on. Revisit when the carrier is chosen (D-004).
+     *
+     * @param  array<int, string>  $mediaUris
+     */
+    public function play(string $legId, array $mediaUris): string;
+
+    /**
+     * Stop a play early (inbound-audio slice 4, reused by slices 5 and 6).
+     *
+     * 🔴 A STOPPED PLAY STILL REPORTS `done`, exactly like one that ran out (S165), so
+     * the engine cannot tell the caller why it ended — whoever asked for the stop has
+     * to remember that they did. Safe on a play that has already finished.
+     */
+    public function stopPlayback(string $playbackId): void;
+
+    /**
      * End a leg's call. Works on any leg we know the id of, even after it left us.
      *
      * `$reason` is what an UNANSWERED caller's network is told (inbound-audio AU-2): `busy`

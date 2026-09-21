@@ -108,12 +108,16 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Hold music — the client's own waiting-area music (AU-13)
+    | Media — the sounds a client uploads (AU-9, AU-12)
     |--------------------------------------------------------------------------
+    |
+    | ONE SETTING FOR EVERY SOUND, not one per sound: hold music (slice 3), the
+    | closed message (slice 4), and the waiting message and voicemail greeting
+    | after them all live on the same disk and are fetched by the same box.
     |
     | 'disk' is where the CONVERTED 8 kHz mono WAV lands, named by its content.
     | Private, like recordings — the only way it leaves the server is the signed
-    | route (HoldMusicController).
+    | route (TenantMediaController).
     |
     | 'fetch_ips' is the second half of AUQ-4: the addresses the voice box fetches
     | from. On staging it reaches us over the public web address, so the request
@@ -127,8 +131,8 @@ return [
     |
     */
 
-    'hold_music' => [
-        'disk' => env('TELEPHONY_HOLD_MUSIC_DISK', 'local'),
+    'media' => [
+        'disk' => env('TELEPHONY_MEDIA_DISK', 'local'),
         'fetch_ips' => array_values(array_filter(array_map(
             'trim',
             explode(',', (string) env('TELEPHONY_MEDIA_FETCH_IPS', '')),

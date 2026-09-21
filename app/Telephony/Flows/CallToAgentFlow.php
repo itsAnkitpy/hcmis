@@ -7,6 +7,7 @@ namespace App\Telephony\Flows;
 use App\Enums\CallDirection;
 use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
+use App\Enums\ClosedHours;
 use App\Enums\MissedReason;
 use App\Models\Call;
 use App\Models\CallHandoff;
@@ -177,6 +178,17 @@ class CallToAgentFlow
      * null is what makes the caller hear the stock music.
      */
     private ?string $holdMusicClass = null;
+
+    /**
+     * The closed message currently playing to this caller (inbound-audio slice 4), by the
+     * id the engine gave the play.
+     *
+     * 🔴 IT IS MATCHED, NOT ASSUMED. A "sound finished" event says which PLAY ended, not
+     * why, and a play stopped by us reports the same `done` as one that ran out (S165).
+     * Checking the id is what stops some other slice's sound — the waiting message, a menu
+     * greeting — ending a call that was never playing a closed message.
+     */
+    private ?string $closedMessagePlaybackId = null;
 
     /**
      * The agents who have let THIS caller's ring run out, and the moment each one's phone
@@ -413,6 +425,7 @@ class CallToAgentFlow
             match ($event['type'] ?? '') {
                 'StasisStart' => $this->onArrival($event),
                 'ChannelDestroyed', 'StasisEnd' => $this->onLegEnded($event),
+                'PlaybackFinished' => $this->onPlaybackFinished($event),
                 default => null,
             };
         } catch (AriConnectionLost $exception) {
@@ -608,13 +621,46 @@ class CallToAgentFlow
         // Closed beats a Ready agent (AU-5). "busy" because no reason sends "declined",
         // which networks play as "not in service". A missing client row reads as open.
         if ($tenant?->isClosedAt(now()) === true) {
+            // 🔴 THE ROW IS WRITTEN FIRST, BEFORE EITHER ENDING. AU-3 puts a closed-hours
+            // caller on Missed Calls whether or not they heard a message, and writing it
+            // here means no ending can lose it — not the message finishing, not the caller
+            // hanging up halfway through it, not a listener restart mid-message. Both
+            // branches below only decide what the LINE does.
+            $this->recordMissedCall(CallOutcome::NoAnswer, MissedReason::ClosedHours);
+
+            // Slice 4: the client has chosen to say why. Answer first, then play (AU-21's
+            // order is unchanged — the hours were read before anything was picked up).
+            // Playing into an unanswered leg would send early audio instead of answering,
+            // and the carrier is still undecided (D-004), so we pick up.
+            $closedMessageUrl = $tenant->settings->closedHours === ClosedHours::Message
+                ? $tenant->closedMessageUrl()
+                : null;
+
+            if ($closedMessageUrl !== null) {
+                $this->state = CallFlowState::PlayingClosedMessage;
+                $this->telephony->answer($callerLegId);
+                $this->closedMessagePlaybackId = $this->telephony->play($callerLegId, [$closedMessageUrl]);
+
+                Log::info('Inbound call: the client is closed — answering and playing their closed message.', [
+                    'ticket' => $this->ticketNumber,
+                    'tenant' => $tenantId,
+                    'caller' => $callerLegId,
+                ]);
+
+                return;
+            }
+
+            // No message to play, so do not answer into silence: end it unanswered with
+            // the busy reason (AU-2). The default sends "declined", which networks often
+            // play as "not in service". This is also the safety net for a client set to
+            // "closed means a message" whose file has gone — the edit form refuses that
+            // combination, but a caller must never be picked up and hung up on in silence.
             rescue(fn () => $this->telephony->hangup($callerLegId, 'busy'), report: false);
             Log::info('Inbound call: the client is closed — ending the call unanswered as busy.', [
                 'ticket' => $this->ticketNumber,
                 'tenant' => $tenantId,
                 'caller' => $callerLegId,
             ]);
-            $this->recordMissedCall(CallOutcome::NoAnswer, MissedReason::ClosedHours);
             $this->dispose();
 
             return;
@@ -2072,9 +2118,55 @@ class CallToAgentFlow
      *
      * @param  array<string, mixed>  $event
      */
+    /**
+     * The closed message finished playing (inbound-audio slice 4): end the call. The
+     * caller was never going to reach anyone — this is the whole of what the client
+     * chose — and their Missed Calls row was written at the door, so there is nothing
+     * left to do but hang up.
+     *
+     * Only OUR play ends the call. The engine says which play finished, not why, so an
+     * unmatched id is another slice's sound and is left alone.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function onPlaybackFinished(array $event): void
+    {
+        if ($this->state !== CallFlowState::PlayingClosedMessage) {
+            return;
+        }
+
+        if (($event['playback']['id'] ?? null) !== $this->closedMessagePlaybackId) {
+            return;
+        }
+
+        Log::info('Inbound call: the closed message finished — ending the call.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+        ]);
+
+        if ($this->callerLegId !== null) {
+            rescue(fn () => $this->telephony->hangup($this->callerLegId), report: false);
+        }
+
+        $this->dispose();
+    }
+
     private function onLegEnded(array $event): void
     {
         $legId = $event['channel']['id'] ?? '';
+
+        // The caller hung up on the closed message, or the hang-up we asked for above
+        // came back to us (inbound-audio slice 4). Either way the call is over and the
+        // Missed Calls row is already written — the door wrote it before a single sound
+        // played, precisely so this path never has to.
+        if ($this->state === CallFlowState::PlayingClosedMessage) {
+            if ($legId === $this->callerLegId) {
+                $this->dispose();
+            }
+
+            return;
+        }
 
         if ($this->state === CallFlowState::Waiting) {
             if ($legId === $this->callerLegId) {
@@ -2551,6 +2643,7 @@ class CallToAgentFlow
         $this->ringSeconds = null;
         $this->maxHoldSeconds = null;
         $this->holdMusicClass = null;
+        $this->closedMessagePlaybackId = null;
         $this->rangOutAt = [];
         $this->pendingReservedTenantId = null;
         $this->pendingReservedAgentId = null;
