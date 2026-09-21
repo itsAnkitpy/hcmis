@@ -147,7 +147,7 @@ it('holds the caller with music when the client is known but nobody is free (RD-
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
     $telephony->shouldNotReceive('hangup');
 
     $switchboard = new Switchboard($telephony);

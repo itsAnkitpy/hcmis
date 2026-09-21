@@ -402,8 +402,8 @@ it('hands the freed desk to the caller who has waited longest (QD-3 arrival orde
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-first');
     $telephony->shouldReceive('answer')->once()->with('caller-second');
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-first');
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-second');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-first', null);
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-second', null);
 
     $switchboard = new Switchboard($telephony);
     $switchboard->handle(stasisStart('caller-first', []));

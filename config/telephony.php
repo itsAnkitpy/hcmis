@@ -108,6 +108,35 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Hold music — the client's own waiting-area music (AU-13)
+    |--------------------------------------------------------------------------
+    |
+    | 'disk' is where the CONVERTED 8 kHz mono WAV lands, named by its content.
+    | Private, like recordings — the only way it leaves the server is the signed
+    | route (HoldMusicController).
+    |
+    | 'fetch_ips' is the second half of AUQ-4: the addresses the voice box fetches
+    | from. On staging it reaches us over the public web address, so the request
+    | arrives from the box's OWN public address, not 127.0.0.1 — measured in S165.
+    | The app trusts no proxies (bootstrap/app.php never calls trustProxies), so
+    | Laravel reads the real peer and an X-Forwarded-For header cannot fake it.
+    |
+    | EMPTY MEANS SIGNATURE ONLY. The unguessable signed address is the guard that
+    | always applies; this list is depth on top of it, and leaving it unset is what
+    | local development and the test suite run with.
+    |
+    */
+
+    'hold_music' => [
+        'disk' => env('TELEPHONY_HOLD_MUSIC_DISK', 'local'),
+        'fetch_ips' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('TELEPHONY_MEDIA_FETCH_IPS', '')),
+        ))),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Presence — the who's-free board (B2.2 PD-4)
     |--------------------------------------------------------------------------
     |

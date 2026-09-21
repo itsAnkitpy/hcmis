@@ -99,7 +99,7 @@ it('puts the caller in the waiting room when the agent never answers — never h
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
     $telephony->shouldReceive('placeCall')->once()->with('PJSIP/1003', 'agent', null, 20)->andReturn('agent-leg');
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
     $telephony->shouldNotReceive('hangup');
     $telephony->shouldNotReceive('join');
     $telephony->shouldNotReceive('startRecording');

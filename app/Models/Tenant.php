@@ -19,6 +19,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\URL;
 use Spatie\Permission\Models\Role;
 
 /**
@@ -35,6 +36,8 @@ use Spatie\Permission\Models\Role;
  * @property int|null $ring_seconds
  * @property int|null $max_hold_seconds
  * @property string|null $timezone
+ * @property string|null $hold_music_path
+ * @property bool $hold_music_rights_confirmed
  * @property TenantSettings $settings
  */
 #[ObservedBy([TenantObserver::class])]
@@ -53,6 +56,8 @@ class Tenant extends Model
         'ring_seconds',
         'max_hold_seconds',
         'timezone',
+        'hold_music_path',
+        'hold_music_rights_confirmed',
         'settings',
     ];
 
@@ -67,6 +72,7 @@ class Tenant extends Model
             'archived_at' => 'datetime',
             'ring_seconds' => 'integer',
             'max_hold_seconds' => 'integer',
+            'hold_music_rights_confirmed' => 'boolean',
             'settings' => TenantSettingsCast::class,
         ];
     }
@@ -89,6 +95,47 @@ class Tenant extends Model
     public function maxHoldSeconds(): int
     {
         return $this->max_hold_seconds ?? (int) config('telephony.queue.max_hold_seconds');
+    }
+
+    /**
+     * The name the voice box knows this client's waiting-area music by (AU-13), or null
+     * when the client has uploaded none — and null is what makes the caller hear the
+     * stock music, because no class name is sent at all (inbound-audio slice 3, Q4).
+     *
+     * Named after the id, never the slug: a client can be renamed, its id cannot, and a
+     * renamed class would orphan the row the voice box already holds. Asterisk's
+     * `musiconhold.name` is varchar(80) (read off staging 2026-09-21); this is far short
+     * of it.
+     *
+     * Passing the name for a client with no music would still be SAFE — S165 proved an
+     * unknown class falls back to the default — but it would make the voice box go to
+     * the database and miss on every hold start. Null keeps today's path, where `default`
+     * is already in memory.
+     */
+    public function holdMusicClass(): ?string
+    {
+        return filled($this->hold_music_path) ? 'tenant-'.$this->id : null;
+    }
+
+    /**
+     * The signed address the voice box fetches this client's music from, or null when
+     * there is none (AUQ-4). ONE place builds it, because two would eventually disagree
+     * and the signature would stop matching.
+     *
+     * No expiry on purpose — see HoldMusicController for why. The file name IS its
+     * SHA-256, so the address changes on every upload and the voice box's year-long
+     * cached copy is discarded by the change of address alone.
+     */
+    public function holdMusicUrl(): ?string
+    {
+        if (blank($this->hold_music_path)) {
+            return null;
+        }
+
+        return URL::signedRoute('tenants.hold-music', [
+            'tenant' => $this->id,
+            'hash' => basename($this->hold_music_path, '.wav'),
+        ]);
     }
 
     /**
@@ -217,7 +264,7 @@ class Tenant extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone'];
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed'];
     }
 
     protected function activityLogName(): string

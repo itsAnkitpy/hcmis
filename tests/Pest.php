@@ -468,3 +468,55 @@ function createAsteriskPhoneTables(): void
         qualify_frequency integer
     )');
 }
+
+/**
+ * Build Asterisk's two music-on-hold tables in the test database (inbound-audio
+ * slice 3). Same doctrine as createAsteriskPhoneTables() above — our migrations must
+ * never touch the `asterisk` schema, so the tests carry their own copy.
+ *
+ * Shapes, widths and BOTH value lists were read off the staging box on 2026-09-21
+ * (`\d asterisk.musiconhold`, `\d asterisk.musiconhold_entry`, `\dT+ asterisk.*`),
+ * so a value Asterisk would reject fails here rather than on the switch.
+ *
+ * 🔴 TWO TRAPS, both real on the box:
+ *  - the entry table carries a FOREIGN KEY to the class table, so the class must be
+ *    written first. HoldMusicWriter's ordering is not decoration.
+ *  - `loop_last` uses `asterisk.yesno_values`. There is a SEPARATE
+ *    `asterisk.yes_no_values` in the same schema with identical members; spelling it
+ *    the other way would build a copy that does not match the box.
+ *
+ * Safe to call with or without createAsteriskPhoneTables(), in either order.
+ */
+function createAsteriskMusicTables(): void
+{
+    DB::statement('create schema if not exists asterisk');
+
+    DB::statement('drop table if exists asterisk.musiconhold_entry');
+    DB::statement('drop table if exists asterisk.musiconhold');
+    DB::statement('drop type if exists asterisk.moh_mode_values');
+    DB::statement('drop type if exists asterisk.yesno_values');
+
+    DB::statement("create type asterisk.moh_mode_values as enum
+        ('custom', 'files', 'mp3nb', 'quietmp3nb', 'quietmp3', 'playlist')");
+
+    DB::statement("create type asterisk.yesno_values as enum ('yes', 'no')");
+
+    DB::statement('create table asterisk.musiconhold (
+        name varchar(80) primary key,
+        mode asterisk.moh_mode_values,
+        directory varchar(255),
+        application varchar(255),
+        digit varchar(1),
+        sort varchar(10),
+        format varchar(10),
+        stamp timestamp without time zone,
+        loop_last asterisk.yesno_values
+    )');
+
+    DB::statement('create table asterisk.musiconhold_entry (
+        name varchar(80) not null references asterisk.musiconhold(name),
+        position integer not null,
+        entry varchar(1024) not null,
+        primary key (name, position)
+    )');
+}

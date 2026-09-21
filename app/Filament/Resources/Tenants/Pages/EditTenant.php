@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Tenants\Pages;
 
 use App\Enums\TenantStatus;
 use App\Filament\Resources\Tenants\TenantResource;
+use App\Jobs\ConvertHoldMusicJob;
 use App\Models\Tenant;
 use App\Tenancy\Settings\BusinessHoursForm;
 use Filament\Actions\Action;
@@ -23,6 +24,14 @@ use Filament\Support\Icons\Heroicon;
 class EditTenant extends EditRecord
 {
     protected static string $resource = TenantResource::class;
+
+    /**
+     * The just-uploaded hold-music file, carried from save to afterSave (inbound-audio
+     * slice 3). It is not a column on the client, so it is lifted out of the form data
+     * before the write and acted on after it — the conversion job needs a saved client
+     * row to update, and dispatching before the save would race it.
+     */
+    private ?string $uploadedHoldMusicPath = null;
 
     /**
      * Flatten the TenantSettings DTO into top-level form keys (hours, sla,
@@ -71,9 +80,36 @@ class EditTenant extends EditRecord
 
         $data['settings'] = $settings;
 
-        unset($data['hours'], $data['sla'], $data['dispositions'], $data['scripts'], $data['closed_hours'], $data['holidays']);
+        // inbound-audio slice 3: the upload field is not a column. The rights tick box
+        // beside it IS one, so it saves — and is audited — with everything else here.
+        $this->uploadedHoldMusicPath = filled($data['hold_music_upload'] ?? null)
+            ? (string) $data['hold_music_upload']
+            : null;
+
+        unset($data['hours'], $data['sla'], $data['dispositions'], $data['scripts'], $data['closed_hours'], $data['holidays'], $data['hold_music_upload']);
 
         return $data;
+    }
+
+    /**
+     * Hand a fresh upload to the queue (inbound-audio slice 3, step 2). Queued, not
+     * inline: converting audio in the request would hold the page open, and nobody is
+     * waiting on it — the client keeps hearing their previous music, or the default,
+     * until it lands.
+     */
+    protected function afterSave(): void
+    {
+        if ($this->uploadedHoldMusicPath === null) {
+            return;
+        }
+
+        ConvertHoldMusicJob::dispatch(
+            $this->record,
+            (string) config('telephony.hold_music.disk'),
+            $this->uploadedHoldMusicPath,
+        );
+
+        $this->uploadedHoldMusicPath = null;
     }
 
     protected function getHeaderActions(): array

@@ -163,10 +163,20 @@ class CallToAgentFlow
      * how long ONE agent's phone rings, and how long this caller may hold in total
      * before we stop waiting. Null when the client has set neither (or, in the flow
      * tests, when no client row exists) — the config fallback applies at each use.
+     *
+     * The client's hold-music name is read on the same trip (see below).
      */
     private ?int $ringSeconds = null;
 
     private ?int $maxHoldSeconds = null;
+
+    /**
+     * The name the voice box knows this client's own waiting-area music by (AU-13),
+     * read alongside the two settings above and from the SAME client row, so per-client
+     * music costs no extra database read. Null means this client uploaded none, and
+     * null is what makes the caller hear the stock music.
+     */
+    private ?string $holdMusicClass = null;
 
     /**
      * The agents who have let THIS caller's ring run out, and the moment each one's phone
@@ -639,6 +649,7 @@ class CallToAgentFlow
 
         $this->ringSeconds = $tenant?->ringSeconds();
         $this->maxHoldSeconds = $tenant?->maxHoldSeconds();
+        $this->holdMusicClass = $tenant?->holdMusicClass();
 
         return $tenant;
     }
@@ -1035,7 +1046,7 @@ class CallToAgentFlow
             return;
         }
 
-        $this->telephony->startHoldMusic((string) $this->callerLegId);
+        $this->telephony->startHoldMusic((string) $this->callerLegId, $this->holdMusicClass);
         $this->holdMusicOn = true;
     }
 
@@ -2539,6 +2550,7 @@ class CallToAgentFlow
         $this->startedAt = null;
         $this->ringSeconds = null;
         $this->maxHoldSeconds = null;
+        $this->holdMusicClass = null;
         $this->rangOutAt = [];
         $this->pendingReservedTenantId = null;
         $this->pendingReservedAgentId = null;

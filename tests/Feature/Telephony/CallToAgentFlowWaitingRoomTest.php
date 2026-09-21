@@ -31,7 +31,7 @@ it('connects the waiting caller to the next agent who frees up, music playing ri
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
 
     $switchboard = new Switchboard($telephony);
     $flow = new CallToAgentFlow($telephony, $switchboard);
@@ -76,7 +76,7 @@ it('releases the agent booked by a sweep that never got as far as placing the le
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
 
     $switchboard = new Switchboard($telephony);
     $flow = new CallToAgentFlow($telephony, $switchboard);
@@ -103,7 +103,7 @@ it('does not ring the same agent again for a caller they already let ring out (Q
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once();
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');   // rung exactly ONCE
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
     $telephony->shouldNotReceive('hangup');
 
     $switchboard = new Switchboard($telephony);
@@ -124,7 +124,7 @@ it('rings that same desk again once its cooling-off has passed, so a small floor
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once();
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
     $telephony->shouldReceive('placeCall')->twice()->andReturn('agent-leg');   // rung, and rung AGAIN
     $telephony->shouldNotReceive('hangup');
 
@@ -259,7 +259,7 @@ it('notices an agent whose ringing leg leaves, and sends the caller to the waiti
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once();
     $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
     $telephony->shouldNotReceive('hangup');
 
     $switchboard = new Switchboard($telephony);

@@ -102,7 +102,7 @@ it('parks the caller with music on and puts them back on resume, storing the sec
         ->andReturn(new RecordingSession('caller-leg', 'call-1', 'snoop-said', 'snoop-heard'));
     // The music the waiting room already owns, on the caller's own line, both ways —
     // the ring's own copy stops when the agent picks up, so these two are the hold's.
-    $telephony->shouldReceive('startHoldMusic')->twice()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->twice()->with('caller-leg', null);
     $telephony->shouldReceive('stopHoldMusic')->twice()->with('caller-leg');
     // H-2: the caller's line leaves the conversation and comes back. The agent's line
     // never moves, and neither does the recording, which sits on the caller's line.

@@ -89,10 +89,14 @@ interface TelephonyProvider
      * already on. The leg must be answered first, or there is no call yet to play
      * anything into.
      *
-     * Which music plays is the engine's own configured set; per-client music is
-     * B2.3b-ii, and this signature is what it will grow a parameter on.
+     * `$mohClass` names the client's own music (inbound-audio slice 3, AU-13). NULL is
+     * not "no music": it means send no class at all, and the engine then plays its own
+     * configured set — the stock `default`, which it already holds in memory. That is
+     * exactly what a client who has uploaded nothing should hear, and it costs the
+     * engine no database lookup. A named class it does not know would also fall back to
+     * the default (proven S165), but only after a lookup that misses.
      */
-    public function startHoldMusic(string $legId): void;
+    public function startHoldMusic(string $legId, ?string $mohClass = null): void;
 
     /**
      * Stop the hold music on a leg (B2.3b-i QD-1) — called the moment we ring an

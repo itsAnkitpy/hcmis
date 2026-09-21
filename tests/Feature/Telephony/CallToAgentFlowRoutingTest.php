@@ -59,7 +59,7 @@ it('answers the caller and starts hold music when no agent is free (QD-4 — was
 
     $telephony = Mockery::mock(TelephonyProvider::class);
     $telephony->shouldReceive('answer')->once()->with('caller-leg');          // answered, or there is nothing to play into
-    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg');
+    $telephony->shouldReceive('startHoldMusic')->once()->with('caller-leg', null);
     $telephony->shouldNotReceive('hangup');
     $telephony->shouldNotReceive('placeCall');                                // still no blind ring
 

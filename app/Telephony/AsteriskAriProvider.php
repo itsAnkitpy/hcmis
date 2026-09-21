@@ -88,14 +88,18 @@ class AsteriskAriProvider implements TelephonyProvider
     }
 
     /**
-     * ARI's music-on-hold pair (B2.3b-i QD-1). No 'mohClass' is sent, so Asterisk
-     * plays the channel's own configured class — the stock `default` class verified
-     * on the server (five instrumentals in /usr/share/asterisk/moh). Per-client
-     * classes are B2.3b-ii and land as a parameter here.
+     * ARI's music-on-hold pair (B2.3b-i QD-1). With no class named, Asterisk plays the
+     * channel's own configured one — the stock `default` class verified on the server
+     * (five instrumentals in /usr/share/asterisk/moh), which it holds in memory.
+     *
+     * A named class is the client's own music (inbound-audio slice 3). Asterisk looks
+     * a class up in the database only when it is not already in memory, so a database
+     * class is re-read on every hold start — which is why changing a client's music
+     * reaches the next caller with no reload (S165 check 4).
      */
-    public function startHoldMusic(string $legId): void
+    public function startHoldMusic(string $legId, ?string $mohClass = null): void
     {
-        $this->command('POST', "/channels/{$legId}/moh");
+        $this->command('POST', "/channels/{$legId}/moh", $mohClass === null ? [] : ['mohClass' => $mohClass]);
     }
 
     public function stopHoldMusic(string $legId): void
