@@ -81,7 +81,7 @@ trait HandlesMenuUploads
                 TenantMedia::MenuGreeting,
                 $disk,
                 $this->uploadedGreeting,
-                $menu,
+                $menu->getKey(),
             );
         }
 
@@ -91,7 +91,7 @@ trait HandlesMenuUploads
                 TenantMedia::MenuOption,
                 $disk,
                 $uploadPath,
-                $menu,
+                $menu->getKey(),
                 (string) $key,
             );
         }

@@ -8,6 +8,7 @@ use App\Enums\TenantMedia;
 use App\Models\Menu;
 use App\Models\Tenant;
 use App\Telephony\HoldMusicWriter;
+use App\Tenancy\TenantContext;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -30,7 +31,7 @@ use Throwable;
  *
  * SLICE 6 ADDS AN OWNER, NOT A SECOND JOB. A menu's greeting and its per-key sounds
  * are converted exactly like a client's, but land on a MENU row rather than a client
- * column, because one client may have several menus. `$menu` says so; `$optionKey`
+ * column, because one client may have several menus. `$menuId` says so; `$optionKey`
  * picks the key inside it, or null for the greeting. Everything above this line —
  * the conversion, the padding, the content naming, the cache reasoning — is shared.
  *
@@ -55,7 +56,7 @@ class ConvertTenantMediaJob implements ShouldQueue
         public TenantMedia $kind,
         public string $uploadDisk,
         public string $uploadPath,
-        public ?Menu $menu = null,
+        public ?int $menuId = null,
         public ?string $optionKey = null,
     ) {}
 
@@ -102,8 +103,16 @@ class ConvertTenantMediaJob implements ShouldQueue
             // A client's sound has no such owner, so its previous file is deleted below.
             $previousPath = null;
 
-            if ($this->menu !== null) {
-                $this->menu->storeSoundPath($this->optionKey, $path);
+            if ($this->menuId !== null) {
+                // 🔴 THE ID, NOT THE ROW, and looked up inside the client's context —
+                // ImportLeadsJob's seam. A worker has no client selected, so carrying the
+                // menu itself made the queue restore a row the client wall hides, and the
+                // job died before it ever converted anything. Found on staging, S170;
+                // tests run this job inline, where the request's context is still set.
+                TenantContext::run(
+                    $this->tenant->id,
+                    fn () => Menu::findOrFail($this->menuId)->storeSoundPath($this->optionKey, $path),
+                );
             } else {
                 $previousPath = $this->tenant->{$this->kind->pathColumn()};
                 $this->tenant->update([$this->kind->pathColumn() => $path]);
@@ -139,7 +148,7 @@ class ConvertTenantMediaJob implements ShouldQueue
         Log::error('Tenant media: converting the client\'s upload failed; their previous file (or the default) is still in use.', [
             'tenant' => $this->tenant->id,
             'kind' => $this->kind->value,
-            'menu' => $this->menu?->id,
+            'menu' => $this->menuId,
             'option' => $this->optionKey,
             'upload' => $this->uploadPath,
             'why' => $exception?->getMessage() ?? 'media conversion failed',

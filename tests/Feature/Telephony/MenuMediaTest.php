@@ -193,8 +193,8 @@ it('queues one conversion job per uploaded menu sound, each naming its own key',
     $tenant = Tenant::factory()->create();
     $menu = TenantContext::run($tenant->id, fn (): Menu => Menu::factory()->create());
 
-    ConvertTenantMediaJob::dispatch($tenant, TenantMedia::MenuGreeting, 'media', 'pending/a.wav', $menu);
-    ConvertTenantMediaJob::dispatch($tenant, TenantMedia::MenuOption, 'media', 'pending/b.wav', $menu, '2');
+    ConvertTenantMediaJob::dispatch($tenant, TenantMedia::MenuGreeting, 'media', 'pending/a.wav', $menu->getKey());
+    ConvertTenantMediaJob::dispatch($tenant, TenantMedia::MenuOption, 'media', 'pending/b.wav', $menu->getKey(), '2');
 
     Queue::assertPushed(
         ConvertTenantMediaJob::class,

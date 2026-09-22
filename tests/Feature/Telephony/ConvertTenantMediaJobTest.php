@@ -2,8 +2,10 @@
 
 use App\Enums\TenantMedia;
 use App\Jobs\ConvertTenantMediaJob;
+use App\Models\Menu;
 use App\Models\Tenant;
 use App\Telephony\HoldMusicWriter;
+use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Process\Exceptions\ProcessFailedException;
 use Illuminate\Process\PendingProcess;
@@ -214,4 +216,28 @@ it('stores a waiting announcement under its own kind, padded like any other spee
         ->and(DB::table('asterisk.musiconhold')->count())->toBe(0);
 
     Process::assertRan(fn (PendingProcess $process): bool => in_array('pad', $process->command, true));
+});
+
+it('converts a menu sound on a worker that has no client selected (S170)', function () {
+    fakeSox('MENU-WAV');
+    $tenant = Tenant::factory()->create();
+    $menu = TenantContext::run($tenant->id, fn (): Menu => Menu::factory()->create());
+    Storage::disk('local')->put('pending/greeting.mp3', 'RAW-MP3-BYTES');
+
+    // 🔴 THE WHOLE POINT OF THIS TEST. A queue worker runs with no client in context and
+    // rebuilds the job from its stored payload, so a job carrying the menu ROW restored a
+    // row the client wall hides and died before converting anything — staging, S170. The
+    // serialize round trip is what the inline jobs in every other test never do.
+    TenantContext::forget();
+
+    $job = unserialize(serialize(
+        new ConvertTenantMediaJob($tenant, TenantMedia::MenuGreeting, 'local', 'pending/greeting.mp3', $menu->getKey())
+    ));
+
+    $job->handle(app(HoldMusicWriter::class));
+
+    $expected = TenantMedia::MenuGreeting->pathFor($tenant->id, hash('sha256', 'MENU-WAV'));
+
+    expect(TenantContext::run($tenant->id, fn (): ?string => $menu->fresh()->greeting_path))->toBe($expected)
+        ->and(Storage::disk('local')->get($expected))->toBe('MENU-WAV');
 });
