@@ -5,6 +5,7 @@ use App\Enums\RoleName;
 use App\Filament\Resources\Menus\MenuResource;
 use App\Filament\Resources\Menus\Pages\CreateMenu;
 use App\Filament\Resources\Menus\Pages\EditMenu;
+use App\Filament\Resources\Menus\Pages\ListMenus;
 use App\Filament\Resources\PhoneNumbers\Pages\EditPhoneNumber;
 use App\Models\Menu;
 use App\Models\PhoneNumber;
@@ -163,4 +164,15 @@ it('will not let a team leader change which menu answers a number (AU-19)', func
         ->assertHasNoFormErrors();
 
     expect($number->fresh()->menu_id)->toBeNull();
+});
+
+it('opens the menus list page for head office, bulk delete and all (AU-19)', function () {
+    $tenant = menuHeadOffice();
+    TenantContext::run($tenant->id, fn (): Menu => Menu::factory()->withGreeting()->create());
+
+    // The list page renders a tick-the-boxes-and-delete button, which asks the policy
+    // `deleteAny`. The panel runs strictAuthorization(), so a MISSING method is a 500 on
+    // the whole page rather than a hidden button — and only mounting the page finds it.
+    // Found on staging in S170; every other bulk-delete table gets it from a shared trait.
+    Livewire::test(ListMenus::class)->assertOk();
 });

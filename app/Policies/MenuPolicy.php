@@ -53,4 +53,14 @@ class MenuPolicy
     {
         return $user->operatesGlobally();
     }
+
+    /**
+     * The tick-the-boxes-and-delete button on the table asks THIS, not delete(), and the
+     * panel runs strictAuthorization() — so leaving it out is a 500 on the whole list
+     * page rather than a hidden button.
+     */
+    public function deleteAny(User $user): bool
+    {
+        return $user->operatesGlobally();
+    }
 }
