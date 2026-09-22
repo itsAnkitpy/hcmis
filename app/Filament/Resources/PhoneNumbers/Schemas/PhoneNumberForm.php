@@ -67,7 +67,14 @@ class PhoneNumberForm
                     // The dropdown only ever lists this client's campaigns (the tenant
                     // scope does that). This rule is what REFUSES a mismatch that arrives
                     // any other way — the ND-5 guard is a refusal, not a filtered list.
-                    ->rule(fn (): object => Rule::exists('campaigns', 'id')->where('tenant_id', TenantContext::id()))
+                    //
+                    // 🔴 THE NUMBER'S OWN CLIENT, not the request's — the same reason the
+                    // menu rule below reads it that way. Head office is never pinned to a
+                    // client, so asking the request refused EVERY campaign for them, the
+                    // right one included. Harmless until slice 6 gave head office a reason
+                    // to edit a number; found on staging, S170.
+                    ->rule(fn (?PhoneNumber $record): object => Rule::exists('campaigns', 'id')
+                        ->where('tenant_id', $record?->tenant_id ?? TenantContext::id()))
                     ->validationMessages([
                         'exists' => 'That campaign belongs to a different client.',
                     ]),

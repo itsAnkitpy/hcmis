@@ -2,12 +2,16 @@
 
 use App\Enums\RoleName;
 use App\Filament\Resources\PhoneNumbers\Pages\CreatePhoneNumber;
+use App\Filament\Resources\PhoneNumbers\Pages\EditPhoneNumber;
 use App\Models\Campaign;
+use App\Models\Menu;
 use App\Models\PhoneNumber;
 use App\Models\Tenant;
+use App\Models\User;
 use App\Tenancy\TenantContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Livewire\Livewire;
+use Spatie\Permission\Models\Role;
 
 uses(RefreshDatabase::class);
 
@@ -125,4 +129,39 @@ it('lets read-only QC look but not add', function () {
 
     $this->actingAs($qc->fresh())->get('/admin/phone-numbers')->assertSuccessful();
     $this->actingAs($qc->fresh())->get('/admin/phone-numbers/create')->assertForbidden();
+});
+
+it('lets head office save a number that already has a campaign, and still refuses a foreign one', function () {
+    $tenant = Tenant::factory()->create();
+    $campaign = TenantContext::run($tenant->id, fn () => Campaign::factory()->create());
+    $menu = TenantContext::run($tenant->id, fn (): Menu => Menu::factory()->withGreeting()->create());
+    $number = TenantContext::run($tenant->id, fn (): PhoneNumber => PhoneNumber::factory()->create([
+        'number' => '+919876543210',
+        'campaign_id' => $campaign->id,
+    ]));
+    $foreign = Tenant::factory()->create();
+    $foreignCampaign = TenantContext::run($foreign->id, fn () => Campaign::factory()->create());
+
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    Role::findOrCreate(RoleName::HcAdmin->value, 'web');
+    $user->assignRole(RoleName::HcAdmin->value);
+    test()->actingAs($user->fresh());
+    TenantContext::applyWebRequest(null, true);
+
+    // 🔴 Head office is NEVER pinned to a client, so a guard that asks the REQUEST's
+    // client refused every campaign — the number's own included — and blocked the one
+    // field only head office may set. Found on staging, S170; the menu rule beside it
+    // was already written this way.
+    Livewire::test(EditPhoneNumber::class, ['record' => $number->getKey()])
+        ->fillForm(['number' => $number->number, 'campaign_id' => $campaign->id, 'menu_id' => $menu->id])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($number->fresh()->menu_id)->toBe($menu->id);
+
+    // The ND-5 guard itself is untouched: another client's campaign is still refused.
+    Livewire::test(EditPhoneNumber::class, ['record' => $number->getKey()])
+        ->fillForm(['number' => $number->number, 'campaign_id' => $foreignCampaign->id])
+        ->call('save')
+        ->assertHasFormErrors(['campaign_id']);
 });
