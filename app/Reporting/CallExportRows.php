@@ -167,6 +167,10 @@ final class CallExportRows
             // from the agent's disposition, not from the line result. A column that
             // looks like a telecom fact and is an agent's opinion needs saying so.
             'Outcome (provisional)',
+            // inbound-audio AU-25: what the caller chose at the client's menu, by name.
+            // Blank on every call that met no menu, and "No choice made" for a caller who
+            // reached an agent by missing it twice.
+            'Menu choice',
             // CP-5: the agent's own account of the call, beside the coded outcome. The
             // disposition says WHICH box the call went in; this says what was actually
             // said, which is what a client queries a row about.
@@ -253,6 +257,7 @@ final class CallExportRows
             'sale' => $this->flag($call->disposition?->is_sale),
             'contact' => $this->flag($call->disposition?->is_contact),
             'outcome' => $call->outcome?->label() ?? '',
+            'menuChoice' => $call->menu_choice ?? '',
             'notes' => $call->notes ?? '',
             // The wait, split the way their column sheet splits it. Queue is the caller
             // holding before any phone rang; Ring is a phone ringing; Waited is both

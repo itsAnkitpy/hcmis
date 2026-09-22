@@ -88,7 +88,10 @@ class EditTenant extends EditRecord
         // box beside it IS one, so it saves — and is audited — with everything else here.
         $this->uploadedMedia = [];
 
-        foreach (TenantMedia::cases() as $kind) {
+        // 🔴 clientKinds(), NOT cases(). Slice 6 put two MENU sounds on the same list, and
+        // they have no column on the client at all — asking one for its upload field
+        // throws on purpose. This form is the client's own, so it walks the client's own.
+        foreach (TenantMedia::clientKinds() as $kind) {
             if (filled($data[$kind->uploadField()] ?? null)) {
                 $this->uploadedMedia[$kind->value] = (string) $data[$kind->uploadField()];
             }

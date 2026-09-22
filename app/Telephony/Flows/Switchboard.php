@@ -455,6 +455,15 @@ class Switchboard implements HandlerRegistry
                 // counting them anywhere would overstate one of the three numbers and,
                 // for `waiting`, would feed a longest-wait clock nobody is waiting on.
                 CallFlowState::PlayingClosedMessage => null,
+                // A caller standing at the menu belongs in no column either (slice 6,
+                // Ankit S169). Nobody is talking to them, no desk is ringing, and they
+                // are not queueing for one — they are being asked a question. Counting
+                // them as waiting would tell the floor to pull agents off wrap-up for
+                // people who have not chosen anything, and would start the longest-wait
+                // clock on someone nobody is meant to be fetching. Nothing is lost by
+                // leaving them out: the clock runs from ARRIVAL, so the seconds they
+                // spent choosing appear the moment they do join the queue.
+                CallFlowState::InMenu, CallFlowState::PlayingMenuMessage => null,
                 CallFlowState::Idle => null,
             };
 

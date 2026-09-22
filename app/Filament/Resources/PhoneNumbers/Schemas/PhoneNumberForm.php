@@ -71,6 +71,38 @@ class PhoneNumberForm
                     ->validationMessages([
                         'exists' => 'That campaign belongs to a different client.',
                     ]),
+                // inbound-audio AU-18 / AU-19. A number may point at one menu, or none —
+                // none is today's behaviour and the default.
+                //
+                // 🔴 HEAD OFFICE ONLY, on a form a TEAM LEADER owns. This is the one
+                // field here they may not touch: a wrong campaign mislabels a report, a
+                // wrong menu traps every caller on the number. Disabled rather than
+                // hidden so a team leader can SEE which menu answers their number.
+                //
+                // `dehydrated()` says outright what `disabled()` already implies in
+                // Filament — a disabled field is dropped, not saved. Measured: removing
+                // this line turns no test red. It is kept as a statement of intent on a
+                // permission boundary, not as the thing doing the work, and the test
+                // below proves the value really is dropped rather than merely greyed out.
+                Select::make('menu_id')
+                    ->label('Call menu')
+                    ->relationship('menu', 'name')
+                    ->searchable()
+                    ->preload()
+                    ->placeholder('No menu — straight to an agent')
+                    ->helperText('What a caller on this number hears before anyone\'s phone rings.')
+                    ->disabled(fn (): bool => ! auth()->user()?->operatesGlobally())
+                    ->dehydrated(fn (): bool => (bool) auth()->user()?->operatesGlobally())
+                    // 🔴 THE NUMBER'S OWN CLIENT, not the request's. Head office is never
+                    // pinned to a client (SetCurrentTenant), so a context-based rule would
+                    // refuse every menu for the only people allowed to set one. A team
+                    // leader creating a number has no record yet and is pinned, so the
+                    // context is right for them.
+                    ->rule(fn (?PhoneNumber $record): object => Rule::exists('menus', 'id')
+                        ->where('tenant_id', $record?->tenant_id ?? TenantContext::id()))
+                    ->validationMessages([
+                        'exists' => 'That menu belongs to a different client.',
+                    ]),
                 Toggle::make('is_active')
                     ->label('Active')
                     ->default(true)

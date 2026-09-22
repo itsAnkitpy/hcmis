@@ -82,4 +82,37 @@ enum CallFlowState
      * the caller gives up / the client's maximum hold time runs out.
      */
     case Waiting;
+
+    /**
+     * The caller is answered and the client's spoken menu is asking them to press a key
+     * (inbound-audio slice 6, AU-17 … AU-24). Reached from the inbound door only, after
+     * the hours check (AU-21) and before any desk is looked at.
+     *
+     * 🔴 TIMED BY THE SOUND, NOT BY OUR HEARTBEAT. The greeting and five seconds of
+     * silence are handed over as ONE play, so that play finishing with no key pressed IS
+     * the timeout (S163). The listener's heartbeat is five seconds on a quiet line, so
+     * using it would have made the wait anywhere from five to ten.
+     *
+     * NOT A DEAD END, unlike the closed message: a caller who misses twice goes on to a
+     * desk with "No choice made" (AU-23/AU-24), so every exit the waiting room has is
+     * reachable from here. It is also the one answered state the sweep would otherwise
+     * ignore, which is why the maximum-hold check names it — a lost "sound finished"
+     * event would otherwise leave the caller on a live line with no ending at all.
+     */
+    case InMenu;
+
+    /**
+     * The caller chose a key that answers them and then ends the call — "hear a message",
+     * or the confirmation after "take me off your list" (AU-17, AU-28).
+     *
+     * 🔴 A DEAD END, the same shape as PlayingClosedMessage, and separate from it for one
+     * reason: while the menu is still asking, a finished sound means the caller said
+     * nothing. Here it means they were served and the call is over. One state cannot
+     * carry both readings, and guessing from the playback id alone would break the moment
+     * a later slice plays anything else in the menu.
+     *
+     * Their call record is written the moment the key is taken, before a sound plays, so
+     * no ending can lose it — the same discipline slice 4 uses at the door.
+     */
+    case PlayingMenuMessage;
 }

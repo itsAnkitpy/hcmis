@@ -158,6 +158,33 @@ it('shows an hour-long wait as an hour, not as an instant hang-up (S88 review #6
     });
 });
 
+it('keeps a caller the menu served off the list, and everyone else on it (AUQ-3)', function () {
+    // 🔴 THIS ASSERTS THE SCREEN'S OWN QUERY, NOT THE ENUM. A test that only asked the
+    // reason whether it belongs here would prove our belief about it and nothing else —
+    // the list is built from the outcome and this branch is what excludes them.
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $gaveUp = missedCall(['outcome' => CallOutcome::Abandoned]);
+        $weStopped = missedCall(['outcome' => CallOutcome::NoAnswer]);
+        $closed = missedCall(['outcome' => CallOutcome::NoAnswer, 'missed_reason' => MissedReason::ClosedHours]);
+        $hungUpInMenu = missedCall(['outcome' => CallOutcome::Abandoned, 'missed_reason' => MissedReason::HungUpInMenu]);
+        // Served by the menu: they got what they rang for, so nobody rings them back.
+        $served = missedCall(['outcome' => CallOutcome::NoAnswer, 'missed_reason' => MissedReason::ServedByMenu]);
+
+        $shown = (new MissedCalls)->missedCalls()->pluck('id');
+
+        // 🔴 The two with NO reason at all matter most here. In SQL `NULL NOT IN (…)` is
+        // NULL, which is not true — so a bare NOT IN would have hidden every ordinary
+        // missed call and emptied this screen entirely.
+        expect($shown)->toContain($gaveUp->id)
+            ->and($shown)->toContain($weStopped->id)
+            ->and($shown)->toContain($closed->id)
+            ->and($shown)->toContain($hungUpInMenu->id)
+            ->and($shown)->not->toContain($served->id);
+    });
+});
+
 it('says how each caller was lost in plain words (QD-6)', function () {
     $tenant = Tenant::factory()->create();
 
@@ -167,6 +194,8 @@ it('says how each caller was lost in plain words (QD-6)', function () {
         expect($page->reasonFor(missedCall(['outcome' => CallOutcome::Abandoned])))->toBe('They gave up waiting')
             ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::NoAnswer])))->toBe('We stopped waiting')
             // inbound-audio slice 1 (AU-3): the stored reason wins over the outcome's text.
-            ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::NoAnswer, 'missed_reason' => MissedReason::ClosedHours])))->toBe('Called while closed');
+            ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::NoAnswer, 'missed_reason' => MissedReason::ClosedHours])))->toBe('Called while closed')
+            // inbound-audio slice 6 (AU-26).
+            ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::Abandoned, 'missed_reason' => MissedReason::HungUpInMenu])))->toBe('Hung up in the menu');
     });
 });

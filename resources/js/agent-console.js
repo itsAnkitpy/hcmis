@@ -38,6 +38,9 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
     // fault that does not exist.
     errorTitle: 'Registration failed',
     callerNumber: null,
+    // inbound-audio AU-25: what the caller chose at the client's menu, read off the
+    // same handoff note the ticket comes from. Null on every call that met no menu.
+    menuChoice: null,
     lead: null,
     leadResolved: false,
     // CH-2: this caller's recent history, held CLIENT-SIDE like `lead` above and for
@@ -230,7 +233,14 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
             // wrap-up (5-30s away) and must not block showing the lead; a failure just
             // means no recording attach (graceful, TH-2). Option A makes the order versus
             // lookupLead irrelevant (the claim owns callCorrelationId).
-            this.$wire.claimHandoffTicket().catch(() => {});
+            //
+            // inbound-audio AU-25: the same note also says what the caller chose at the
+            // menu, and the agent needs it WHILE the phone is ringing — until agent
+            // groups exist it is the only thing saying why this person rang. The claim
+            // is renderless, so it hands the value back rather than morphing the page.
+            this.$wire.claimHandoffTicket().then((choice) => {
+                this.menuChoice = choice ?? null;
+            }).catch(() => {});
 
             // Anonymous caller (no number) — nothing to match; show the bare
             // "no matching lead" state once, no server round-trip.
@@ -990,6 +1000,7 @@ const agentConsole = (config, breakCategories = [], resumeBreak = null) => ({
         // close it so it doesn't reappear stale after the call.
         this.breakPickerOpen = false;
         this.callerNumber = null;
+        this.menuChoice = null;
         this.lead = null;
         this.leadResolved = false;
         this.history = { calls: [], callbacks: [], fields: [], scripts: [] };

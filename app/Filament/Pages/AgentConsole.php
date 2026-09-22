@@ -598,12 +598,20 @@ class AgentConsole extends Page
      * must not morph the live console.
      */
     #[Renderless]
-    public function claimHandoffTicket(): void
+    public function claimHandoffTicket(): ?string
     {
-        $this->callCorrelationId = CallHandoff::query()
+        $note = CallHandoff::query()
             ->where('agent_user_id', auth()->id())
             ->latest('id')
-            ->value('ticket');
+            ->first();
+
+        $this->callCorrelationId = $note?->ticket;
+
+        // inbound-audio AU-25. Handed BACK rather than set as a property, because this
+        // method is renderless on purpose — it fires mid-ring and must not morph the live
+        // console, so a property would never reach the screen. Null on every call that
+        // met no menu, and the card hides the line entirely for those.
+        return $note?->menu_choice;
     }
 
     /**
@@ -1600,6 +1608,10 @@ class AgentConsole extends Page
             // F25: copied off the note like the moments below, because the note is pruned
             // on this agent's next ring and DP-12a's report reads it long after.
             'was_dialled' => (bool) $moments?->was_dialled,
+            // AU-25, copied off the note for the same reason the moments below are: the
+            // note is pruned on this agent's next ring, and the calls list and the export
+            // read this long after.
+            'menu_choice' => $moments?->menu_choice,
             'from_number' => $isOutbound ? $ourNumber : $this->callPartyNumber,
             'to_number' => $isOutbound ? $this->callPartyNumber : $ourNumber,
             'lead_id' => $lead?->id,

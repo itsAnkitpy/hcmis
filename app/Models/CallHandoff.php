@@ -48,6 +48,7 @@ use Illuminate\Support\Carbon;
  * @property int $agent_user_id
  * @property string $ticket
  * @property string|null $dialled_number
+ * @property string|null $menu_choice
  * @property bool $was_dialled
  * @property Carbon|null $arrived_at
  * @property Carbon|null $answered_at
@@ -66,6 +67,9 @@ class CallHandoff extends Model
         'agent_user_id',
         'ticket',
         'dialled_number',
+        // inbound-audio AU-25: what the caller chose at the menu, read by the agent's
+        // screen while the phone is still ringing.
+        'menu_choice',
         // DIAL-1 F15: did WE place this call? The dialer's customer reaches the agent as
         // a ring and a screen pop, exactly like an inbound caller, so the console cannot
         // tell them apart without being told — and it writes the row's direction.

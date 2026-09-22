@@ -22,6 +22,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int $tenant_id
  * @property string $number
  * @property int|null $campaign_id
+ * @property int|null $menu_id
  * @property bool $is_active
  */
 class PhoneNumber extends Model
@@ -32,6 +33,7 @@ class PhoneNumber extends Model
     protected $fillable = [
         'number',
         'campaign_id',
+        'menu_id',
         'is_active',
     ];
 
@@ -51,6 +53,17 @@ class PhoneNumber extends Model
     public function campaign(): BelongsTo
     {
         return $this->belongsTo(Campaign::class);
+    }
+
+    /**
+     * The spoken menu that answers this number, or null for today's behaviour — straight
+     * to the agent board (inbound-audio AU-18).
+     *
+     * @return BelongsTo<Menu, $this>
+     */
+    public function menu(): BelongsTo
+    {
+        return $this->belongsTo(Menu::class);
     }
 
     /**
@@ -83,7 +96,7 @@ class PhoneNumber extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['number', 'campaign_id', 'is_active'];
+        return ['number', 'campaign_id', 'menu_id', 'is_active'];
     }
 
     protected function activityLogName(): string

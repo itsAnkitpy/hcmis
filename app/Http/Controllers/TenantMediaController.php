@@ -41,9 +41,27 @@ use Symfony\Component\HttpFoundation\Response;
  *       - a signed-in head-office user who may edit this client (AU-8), which is
  *         the Filament form's own play button (AU-9) — Filament has no audio
  *         player, so the form renders a plain <audio> tag at this same address.
- *  3. The file in the address must be the one the client currently has FOR THAT KIND.
- *     Content naming means a re-upload is a new address; an old address 404s rather
- *     than quietly serving a sound the client has replaced.
+ *  3. The file is still IN USE, and the check differs by who owns it.
+ *
+ *     For a CLIENT's own sound, unchanged since slice 3: it must be the file this
+ *     client currently has for that kind. Content naming means a re-upload is a new
+ *     address; an old address 404s rather than quietly serving a sound the client has
+ *     replaced — and it 404s even if the replaced file is still sitting on the disk.
+ *
+ *     🔴 A MENU'S SOUNDS CANNOT BE ASKED THAT QUESTION (slice 6). One client may have
+ *     several menus and one menu several sounds, so there is no fixed column to compare
+ *     against. For those the check is that the file is still on the disk — the shape a
+ *     presigned link on S3 or Cloud Storage already has, where the signature is the
+ *     capability and the store serves the object if it is still there.
+ *
+ *     🔴 WHICH MAKES DELETING THE FILE THE ONLY REVOCATION FOR A MENU SOUND. Menu::
+ *     booted does it on every way one stops being used — the menu deleted, a key
+ *     removed, a sound replaced — because these addresses never expire (AUQ-4).
+ *
+ *     Kept as a BRANCH rather than made uniform, and that was a correction: dropping
+ *     the client-column read everywhere looked free, and three tests proved it was not.
+ *     A client sound whose file lingers on the disk after the row moved on would have
+ *     gone on being served. The stronger check still works where it works, so it stays.
  *
  * TWO HEADERS THE VOICE BOX ACTUALLY READS (measured on staging, S165):
  *  - `Content-Type: audio/wav` — it picks the file's format from this FIRST and
@@ -70,11 +88,15 @@ class TenantMediaController extends Controller
 
         abort_unless($this->mayFetch($request, $client), 403);
 
-        $path = $client->{$media->pathColumn()};
+        // The address IS the path: the kind, the client and the content hash are all
+        // signed, so this reconstruction cannot be steered anywhere else.
+        $path = $media->pathFor($tenant, $hash);
 
-        abort_unless(filled($path), 404);
-
-        abort_unless($path === $media->pathFor($tenant, $hash), 404);
+        // A client's own sound still has to BE the client's current one for that kind.
+        // A menu's has no such column, so its only check is the disk, below.
+        if ($media->isClientOwned()) {
+            abort_unless($client->{$media->pathColumn()} === $path, 404);
+        }
 
         $disk = Storage::disk(config('telephony.media.disk'));
 

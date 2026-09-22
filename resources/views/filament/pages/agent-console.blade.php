@@ -402,6 +402,20 @@
                             >No matching lead</p>
                         </div>
                     </template>
+
+                    {{-- inbound-audio AU-25: what the caller chose at the client's menu,
+                         shown from the first ring. Until agent groups exist (slice 7)
+                         this is the only thing on the screen saying why they rang. Hidden
+                         entirely on a call that met no menu, which is every call before
+                         that slice. --}}
+                    <p
+                        x-show="menuChoice"
+                        x-cloak
+                        class="mt-2 inline-flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-1 text-sm font-medium text-amber-900 dark:bg-amber-500/10 dark:text-amber-300"
+                    >
+                        <span class="text-xs font-normal opacity-75">They chose</span>
+                        <span x-text="menuChoice"></span>
+                    </p>
                 </div>
 
                 <div class="flex items-center gap-2">

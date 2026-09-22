@@ -115,6 +115,9 @@ class Call extends Model
         'ended_by',
         // inbound-audio slice 1: why a caller is on Missed Calls, beside `outcome`.
         'missed_reason',
+        // inbound-audio AU-25: what the caller chose at the menu, by name. Not audited,
+        // like `missed_reason` beside it — written once at creation and never edited.
+        'menu_choice',
         // hold.md H-1/H-7: how long this caller spent on hold, as one total. The single
         // deliberate exception to CT-1 — a call held three times has no pair of moments.
         'hold_seconds',

@@ -230,10 +230,13 @@ function inboundOn(string $legId, string $dialledNumber, ?string $callerNumber =
  * lookup (RLS, switched-off rows, cross-client isolation) is proven against the DB
  * in NumberDirectoryTest.
  */
-function fakeNumberDirectory(): NumberDirectory
+function fakeNumberDirectory(?int $menuId = null): NumberDirectory
 {
-    $directory = new class extends NumberDirectory
+    $directory = new class($menuId) extends NumberDirectory
     {
+        /** inbound-audio AU-18: null is a number with no menu, which is every number before slice 6. */
+        public function __construct(public ?int $menuId) {}
+
         public function resolve(?string $dialledNumber): ?PhoneNumber
         {
             if ($dialledNumber === null || ! str_starts_with($dialledNumber, TEST_DIALLED_PREFIX)) {
@@ -242,6 +245,7 @@ function fakeNumberDirectory(): NumberDirectory
 
             return (new PhoneNumber)->forceFill([
                 'tenant_id' => (int) substr($dialledNumber, strlen(TEST_DIALLED_PREFIX)),
+                'menu_id' => $this->menuId,
             ]);
         }
     };
@@ -532,6 +536,23 @@ function createAsteriskMusicTables(): void
  *
  * @return array<string, mixed>
  */
+/**
+ * A caller pressed a key (inbound-audio slice 6, R2). Sent when the key is RELEASED, and
+ * it carries a top-level channel — which is why the switchboard's default branch routes
+ * it without a case of its own.
+ *
+ * @return array<string, mixed>
+ */
+function dtmfReceived(string $digit, string $legId): array
+{
+    return [
+        'type' => 'ChannelDtmfReceived',
+        'digit' => $digit,
+        'duration_ms' => 100,
+        'channel' => ['id' => $legId],
+    ];
+}
+
 function playbackFinished(string $playbackId, string $legId, string $state = 'done'): array
 {
     return [

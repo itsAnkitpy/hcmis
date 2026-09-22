@@ -6,6 +6,7 @@ namespace App\Filament\Pages;
 
 use App\Enums\CallDirection;
 use App\Enums\CallOutcome;
+use App\Enums\MissedReason;
 use App\Enums\RoleName;
 use App\Models\Call;
 use App\Models\User;
@@ -13,6 +14,7 @@ use App\Tenancy\TenantContext;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Gate;
 use UnitEnum;
@@ -92,6 +94,19 @@ class MissedCalls extends Page
             ->where('direction', CallDirection::Inbound)
             ->whereNull('agent_id')
             ->whereIn('outcome', [CallOutcome::Abandoned->value, CallOutcome::NoAnswer->value])
+            // 🔴 THE OUTCOME IS NO LONGER THE WHOLE ANSWER (inbound-audio slice 6, AUQ-3).
+            // A caller who pressed "hear a message" or "take me off your list" got exactly
+            // what they rang for, and gets a call record so reports can say why people
+            // ring — but nobody needs to ring them back, so they must never reach this
+            // list. The reason says which is which, and it is asked rather than listed
+            // here so a reason added later cannot quietly leak onto an agent's queue.
+            //
+            // 🔴 THE NULL BRANCH IS NOT OPTIONAL. Most missed calls carry no reason at
+            // all, and in SQL `NULL NOT IN (…)` is NULL, which is not true — so a bare
+            // NOT IN would have hidden every ordinary missed call and emptied this screen.
+            ->where(fn (Builder $query) => $query
+                ->whereNull('missed_reason')
+                ->orWhereNotIn('missed_reason', MissedReason::hiddenFromMissedCalls()))
             ->orderByDesc('created_at')
             ->limit(self::SHOW_LATEST)
             ->get();

@@ -8,11 +8,15 @@ use App\Enums\CallDirection;
 use App\Enums\CallEndedBy;
 use App\Enums\CallOutcome;
 use App\Enums\ClosedHours;
+use App\Enums\DncSource;
+use App\Enums\MenuAction;
 use App\Enums\MissedReason;
 use App\Models\Call;
 use App\Models\CallHandoff;
 use App\Models\Campaign;
+use App\Models\DncEntry;
 use App\Models\Lead;
+use App\Models\Menu;
 // The model, aliased: App\Support\PhoneNumber (the number formatter) already owns the
 // plain name across the codebase (AgentConsole).
 use App\Models\PhoneNumber as PhoneNumberRecord;
@@ -86,6 +90,20 @@ class CallToAgentFlow
      * rhythm, not a guarantee, and it is the reason this is not a scheduler.
      */
     private const WAITING_MESSAGE_EVERY_SECONDS = 60;
+
+    /**
+     * The five seconds a caller gets to press a key (AU-23), played as a sound straight
+     * after the greeting in the SAME play — that play finishing is the timeout (S163).
+     *
+     * 🔴 A BUILT-IN PROMPT, NOT AN UPLOAD. Asterisk's own sound package ships one to ten
+     * seconds of silence, so this needs no file, no conversion, no route and no cache
+     * entry. `AsteriskAriProvider::play` adds the `sound:` spelling the engine wants, and
+     * being English-only (R8) does not matter for silence.
+     */
+    private const MENU_SILENCE_SOUND = 'silence/5';
+
+    /** What AU-25 saves for a caller who reached a desk by missing the menu twice. */
+    private const NO_CHOICE_MADE = 'No choice made';
 
     private CallFlowState $state = CallFlowState::Idle;
 
@@ -229,6 +247,42 @@ class CallToAgentFlow
      * may never hear it at all.
      */
     private ?Carbon $lastWaitingMessageAt = null;
+
+    /**
+     * The spoken menu answering the number this caller rang (inbound-audio slice 6,
+     * AU-18), read once at the door. Null on every number with no menu, which is every
+     * number before this slice and the reason nothing else changes for them.
+     */
+    private ?Menu $menu = null;
+
+    /**
+     * The menu sound playing right now, by the id the engine gave the play — the
+     * greeting-plus-silence, or the sound a chosen key plays before the call ends.
+     *
+     * 🔴 THIS ID IS THE WHOLE RACE GUARD. A play we stop reports the same `done` as one
+     * that ran out (S165), and unlike the waiting announcement the call does NOT leave
+     * its state behind on a wrong key — the caller is still standing at the menu. So the
+     * id is what tells the first greeting from its replay: it is replaced (or cleared)
+     * before the stopped play can report in, and the listener runs one event to
+     * completion before reading the next, so the replacement always wins.
+     */
+    private ?string $menuPlaybackId = null;
+
+    /**
+     * Has this caller already had the greeting a second time (AU-23/AU-24)?
+     *
+     * A yes/no rather than a counter because the limit is exactly one replay, shared by
+     * saying nothing and pressing a key the menu does not offer. A counter would invite a
+     * setting nobody asked for.
+     */
+    private bool $menuReplayed = false;
+
+    /**
+     * What this caller chose, by NAME (AU-25) — it rides to the agent's screen on the
+     * ring-time note and is saved on the call record. "No choice made" for a caller who
+     * reached a desk by missing twice. Null on every call that never met a menu.
+     */
+    private ?string $menuChoice = null;
 
     /**
      * The agents who have let THIS caller's ring run out, and the moment each one's phone
@@ -466,6 +520,11 @@ class CallToAgentFlow
                 'StasisStart' => $this->onArrival($event),
                 'ChannelDestroyed', 'StasisEnd' => $this->onLegEnded($event),
                 'PlaybackFinished' => $this->onPlaybackFinished($event),
+                // inbound-audio slice 6. The switchboard already routes this one by its
+                // default branch, because unlike a finished sound it DOES carry a
+                // top-level channel (R2, and the 20.6.0 event spec) — but it arrived
+                // here and was dropped until this line existed.
+                'ChannelDtmfReceived' => $this->onKeyPressed($event),
                 default => null,
             };
         } catch (AriConnectionLost $exception) {
@@ -636,7 +695,18 @@ class CallToAgentFlow
         $this->dialledNumber = $this->dialledNumber($event);
         $this->startedAt = now();
 
-        $tenantId = $this->companyLabel($event);
+        // Which company is this call for? (B2.3a ND-1.) The dialplan used to stamp a
+        // hardcoded company on every inbound call, which is exactly why a second client
+        // could never have a phone number; now it only notes WHICH NUMBER WAS DIALLED and
+        // the lookup happens here, against the phone_numbers list. The note is read from
+        // the arrival event's channelvars (ND-3, verified live S85: `dialednumber` arrives
+        // intact, NOT the "800" the call's extension reads as after the dialplan's Goto).
+        //
+        // 🔴 THE ROW IS KEPT, NOT JUST ITS CLIENT. Slice 6 needs a second thing off the
+        // same row — which menu answers this number — and reading it with a second lookup
+        // would run the company-blind query twice on every single inbound call.
+        $dialledNumberRow = $this->numbers->resolve($this->dialledNumber);
+        $tenantId = $dialledNumberRow?->tenant_id;
 
         // ND-4: the number is not in the list, or is switched off. Nothing to route to —
         // the agent board is never read, so this must not say "all busy". No missed-call
@@ -708,16 +778,298 @@ class CallToAgentFlow
 
         $this->telephony->answer($callerLegId);
 
+        // inbound-audio slice 6: the receptionist, AFTER the hours check (AU-21) and
+        // before any desk is looked at. A number with no menu — every number before this
+        // slice — falls straight through to the two doors below, unchanged.
+        if ($this->startMenuIfAny($dialledNumberRow?->menu_id)) {
+            return;
+        }
+
+        $this->offerTheCallerADesk('nobody was free when the call arrived');
+    }
+
+    /**
+     * QD-4's two doors, in one place because slice 6 added a third way in: a caller who
+     * has just finished with the menu. Either a desk is free and rings, or the caller
+     * waits — and the waiting room is reached from all three.
+     */
+    private function offerTheCallerADesk(string $whyWaiting): void
+    {
         $reservedAgentId = $this->reserveNextAgent();
 
-        // QD-4 door one: the client is known and nobody is free. The caller waits.
         if ($reservedAgentId === null) {
-            $this->enterWaitingRoom('nobody was free when the call arrived');
+            $this->enterWaitingRoom($whyWaiting);
 
             return;
         }
 
         $this->ringAgent($reservedAgentId);
+    }
+
+    /**
+     * The receptionist (inbound-audio slice 6). True when this number has a working menu
+     * and the caller is now listening to it; false means "carry on as before", which is
+     * every number with no menu and every number before this slice.
+     *
+     * 🔴 A MENU WITH NO GREETING IS NOT A MENU. It would play silence at the caller and
+     * then put them through, which reads as a dropped call. The edit form refuses to save
+     * one, so this is the net for a greeting that has gone missing since — falling through
+     * to today's behaviour is the one ending that is always safe.
+     */
+    private function startMenuIfAny(?int $menuId): bool
+    {
+        if ($menuId === null || $this->tenantId === null) {
+            return false;
+        }
+
+        $menu = TenantContext::run(
+            (int) $this->tenantId,
+            fn (): ?Menu => Menu::query()->find($menuId),
+        );
+
+        if ($menu === null || $menu->greetingUrl() === null) {
+            return false;
+        }
+
+        $this->menu = $menu;
+        $this->state = CallFlowState::InMenu;
+        $this->playMenuGreeting();
+
+        return true;
+    }
+
+    /**
+     * Say the greeting, then wait five seconds — as ONE play, because the engine takes a
+     * list of sounds and reports ONE finish for the whole list (R1, S165). That finish IS
+     * the timeout, which is why there is no timer here and nothing new running.
+     *
+     * Used for the first pass and the second one alike (Ankit, S169): the identical play,
+     * so both misses share one code path and the wait is exactly five seconds each time.
+     */
+    private function playMenuGreeting(): void
+    {
+        $this->menuPlaybackId = $this->telephony->play((string) $this->callerLegId, [
+            (string) $this->menu?->greetingUrl(),
+            self::MENU_SILENCE_SOUND,
+        ]);
+
+        Log::info('Inbound call: the caller is hearing the client\'s menu.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+            'menu' => $this->menu?->id,
+            'secondTry' => $this->menuReplayed,
+            'playback' => $this->menuPlaybackId,
+        ]);
+    }
+
+    /**
+     * Stop whatever the menu is playing. A no-op when nothing is.
+     *
+     * 🔴 A REFUSAL HERE IS NOT AN ERROR, AND SLICE 6 HAS TWO KINDS. The sound ended a
+     * moment ago, so the engine says it never existed (404, the slice 5 case). Or the
+     * caller pressed two keys in quick succession and the replay has been asked for but
+     * has not started talking, so it is not stoppable yet (500 — `playback_stop` refuses
+     * a playback that is not `controllable`). Our phone layer turns every refusal into an
+     * exception, and this sits on the hot path of every single key press.
+     *
+     * 🔴 THE ID IS CLEARED BEFORE THE STOP, NOT AFTER. The stopped play still reports
+     * `done` (S165), and unlike the waiting announcement the caller has NOT left this
+     * state — so the id is the only thing telling the two passes apart. Clearing it here
+     * (and replacing it in the replay that follows) is what makes the late report
+     * unrecognisable. The listener finishes one event before reading the next, so the
+     * replacement always lands first.
+     */
+    private function stopMenuSound(): void
+    {
+        if ($this->menuPlaybackId === null) {
+            return;
+        }
+
+        $playbackId = $this->menuPlaybackId;
+        $this->menuPlaybackId = null;
+
+        try {
+            $this->telephony->stopPlayback($playbackId);
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException) {
+            // It had already finished, or it had not started. Nothing to stop either way.
+        }
+    }
+
+    /**
+     * A key was pressed (R2 — one event per key, sent when the key is RELEASED).
+     *
+     * Any key stops the greeting (AU-22); a key does NOT stop it by itself (R3), so this
+     * is our job. Silence and a wrong key share one limit (AU-24), so both land in the
+     * same miss below.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function onKeyPressed(array $event): void
+    {
+        if ($this->state !== CallFlowState::InMenu || $this->menu === null) {
+            return;
+        }
+
+        // Only the caller's own keypad. Nothing else presses keys on our paths today,
+        // but a key from an agent's leg must never choose this caller's option.
+        if (($event['channel']['id'] ?? null) !== $this->callerLegId) {
+            return;
+        }
+
+        $digit = (string) ($event['digit'] ?? '');
+        $option = $this->menu->optionFor($digit);
+
+        $this->stopMenuSound();
+
+        if ($option === null) {
+            $this->missTheMenu('pressed a key this menu does not offer');
+
+            return;
+        }
+
+        $this->takeMenuOption($option);
+    }
+
+    /**
+     * The caller said nothing, or pressed a key that means nothing (AU-23 / AU-24). One
+     * limit covers both: say it once more, and on the second miss put them through to a
+     * desk with "No choice made".
+     */
+    private function missTheMenu(string $why): void
+    {
+        Log::info('Inbound call: the caller missed the menu.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+            'why' => $why,
+            'secondTry' => $this->menuReplayed,
+        ]);
+
+        if (! $this->menuReplayed) {
+            $this->menuReplayed = true;
+            $this->playMenuGreeting();
+
+            return;
+        }
+
+        $this->leaveMenuForADesk(self::NO_CHOICE_MADE);
+    }
+
+    /**
+     * Do what this key says (AU-17). An action this build does not know is treated as a
+     * miss rather than as a dead end — a client whose menu was saved by a later version
+     * still gets their caller to a person.
+     *
+     * @param  array<string, mixed>  $option
+     */
+    private function takeMenuOption(array $option): void
+    {
+        $label = (string) ($option['label'] ?? '');
+        $action = MenuAction::tryFrom((string) ($option['action'] ?? ''));
+
+        if ($action === null) {
+            $this->missTheMenu('pressed a key whose action this build does not know');
+
+            return;
+        }
+
+        Log::info('Inbound call: the caller chose an option at the menu.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+            'menu' => $this->menu?->id,
+            'key' => $option['key'] ?? null,
+            'choice' => $label,
+            'action' => $action->value,
+        ]);
+
+        match ($action) {
+            MenuAction::TalkToAgent => $this->leaveMenuForADesk($label),
+            MenuAction::HearMessage => $this->serveTheCallerAndEnd($label, $this->menu?->soundUrlFor($option)),
+            MenuAction::RemoveFromList => $this->removeTheCallerFromTheList($label, $option),
+        };
+    }
+
+    /**
+     * The caller is done with the menu and wants a person — today's path, with what they
+     * chose saved so it reaches the agent's screen on the ring-time note (AU-25).
+     *
+     * The music is NOT started here: ringAgent opens with it, and the waiting room opens
+     * with it, so both endings already put the caller on music (S88 review #3).
+     */
+    private function leaveMenuForADesk(string $choice): void
+    {
+        $this->menuChoice = $choice;
+        $this->menuPlaybackId = null;
+
+        $this->offerTheCallerADesk('the caller finished at the menu and nobody was free');
+    }
+
+    /**
+     * A key that answers the caller and ends the call — "hear a message", and the
+     * confirmation after "take me off your list" (AU-17, AU-28).
+     *
+     * 🔴 THE CALL RECORD IS WRITTEN FIRST, BEFORE A SOUND PLAYS. Slice 4's discipline,
+     * for slice 4's reason: AUQ-3 wants a record of why this person rang even though no
+     * agent spoke to them, and writing it here means no ending can lose it — not the
+     * sound finishing, not the caller hanging up halfway through, not a listener restart.
+     * Its reason keeps it OFF Missed Calls: they were helped, so nobody rings them back.
+     *
+     * No sound is the ordinary case for "take me off your list" — the confirmation is
+     * optional (AU-28) and the number is added either way.
+     */
+    private function serveTheCallerAndEnd(string $choice, ?string $soundUrl): void
+    {
+        $this->menuChoice = $choice;
+        $this->menuPlaybackId = null;
+        $this->recordMissedCall(CallOutcome::NoAnswer, MissedReason::ServedByMenu);
+
+        if ($soundUrl === null) {
+            rescue(fn () => $this->telephony->hangup((string) $this->callerLegId), report: false);
+            $this->dispose();
+
+            return;
+        }
+
+        $this->state = CallFlowState::PlayingMenuMessage;
+        $this->menuPlaybackId = $this->telephony->play((string) $this->callerLegId, [$soundUrl]);
+    }
+
+    /**
+     * AU-28 — added to this client's do-not-call list STRAIGHT AWAY, with no "are you
+     * sure" step. The US telemarketing rule is add-then-disconnect, and a mistaken press
+     * is undone by head office. Tenant-scoped, so one client's opt-out never touches
+     * another's list; `firstOrCreate` makes a second press a no-op (the LeadsTable
+     * precedent).
+     *
+     * Best-effort on purpose: a failed write must not cost the caller their confirmation
+     * or a clean hang-up, and it is worth a log line of its own because nothing else
+     * would ever say it did not happen.
+     *
+     * @param  array<string, mixed>  $option
+     */
+    private function removeTheCallerFromTheList(string $choice, array $option): void
+    {
+        if (filled($this->callerNumber) && $this->tenantId !== null) {
+            rescue(
+                fn () => TenantContext::run((int) $this->tenantId, fn () => DncEntry::firstOrCreate(
+                    ['phone' => $this->callerNumber],
+                    ['source' => DncSource::CustomerRequest],
+                )),
+                function (Throwable $exception): void {
+                    Log::warning('Inbound call: the caller asked to come off the list and the entry could not be written.', [
+                        'ticket' => $this->ticketNumber,
+                        'tenant' => $this->tenantId,
+                        'error' => $exception->getMessage(),
+                    ]);
+                },
+            );
+        }
+
+        $this->serveTheCallerAndEnd($choice, $this->menu?->soundUrlFor($option));
     }
 
     /**
@@ -959,6 +1311,12 @@ class CallToAgentFlow
                     // a call the customer made to us. dialedLeadId is set by the dialer
                     // and by nothing else, so it already IS the question.
                     'was_dialled' => $this->dialedLeadId !== null,
+                    // AU-25. Until agent groups exist (slice 7) this is the only thing on
+                    // the agent's screen telling them why the person rang, and it has to
+                    // be there while the phone is still ringing — which is what this note
+                    // is for. "No choice made" when they reached this desk by missing the
+                    // menu twice; null on every call that never met one.
+                    'menu_choice' => $this->menuChoice,
                     'arrived_at' => $arrivedAt,
                 ]);
             }),
@@ -1093,6 +1451,20 @@ class CallToAgentFlow
         // saves that call; only a ring that has already run past the cap is cut.
         if ($this->state === CallFlowState::RingingAgent) {
             if ($this->heldTooLong() && ! $this->deskAlreadyAnswered()) {
+                $this->giveUpOnWaitingCaller();
+            }
+
+            return;
+        }
+
+        // inbound-audio slice 6 (Ankit, S169). The menu times ITSELF, by its own sounds,
+        // so without this arm the sweep never looks at this caller at all — and a
+        // "sound finished" event that never arrives would leave them on a live line with
+        // no ending whatsoever. There is a safety net for a stranded desk and none for a
+        // stranded caller. Same check the ring already gets; it turns a forever into an
+        // ordinary missed call.
+        if ($this->state === CallFlowState::InMenu) {
+            if ($this->heldTooLong()) {
                 $this->giveUpOnWaitingCaller();
             }
 
@@ -1432,6 +1804,9 @@ class CallToAgentFlow
                 // computed from these two moments wherever it is shown.
                 'ended_at' => $endedAt,
                 'missed_reason' => $reason,
+                // AU-25. Null on every call that never met a menu, which is every call
+                // before slice 6.
+                'menu_choice' => $this->menuChoice,
             ])),
             function (Throwable $exception) use ($filedOutcome): void {
                 Log::warning('Missed-call record write failed — the caller will not appear in the missed-call list.', [
@@ -1447,31 +1822,6 @@ class CallToAgentFlow
         // 90-second claim lapsed. Rescued because discard() reaches here, and a DB error
         // must not skip hanging up the held legs. Inbound calls have no lead — a no-op.
         rescue(fn () => $this->countDialAttempt());
-    }
-
-    /**
-     * Which company is this call for? (B2.3a ND-1.)
-     *
-     * The SOURCE changed, not the meaning: the dialplan used to stamp a hardcoded
-     * company on every inbound call (RD-1, `Set(tenantid=1)`) — which is exactly why
-     * a second client could never have a phone number. Now the dialplan only notes
-     * WHICH NUMBER WAS DIALLED and the lookup happens here, against the phone_numbers
-     * list. Every caller of this method, its return type and every downstream step are
-     * untouched (the RD-1 promise).
-     *
-     * The note is read from the arrival event's channelvars (ND-3, verified live S85:
-     * `dialednumber` arrives intact, NOT the "800" the call's extension reads as after
-     * the dialplan's Goto). It rides as a channel variable rather than a Stasis
-     * argument because Switchboard::onArrival classifies a new inbound call as
-     * STRICTLY empty args — one extra argument and the call is silently dropped.
-     *
-     * Returns null for an unknown or switched-off number (ND-4 clean end).
-     *
-     * @param  array<string, mixed>  $event
-     */
-    private function companyLabel(array $event): ?int
-    {
-        return $this->numbers->resolve($this->dialledNumber($event))?->tenant_id;
     }
 
     /**
@@ -2301,6 +2651,43 @@ class CallToAgentFlow
             return;
         }
 
+        // The greeting and its five seconds of silence ran out with no key pressed
+        // (slice 6): that finish IS the timeout. A play that FAILED arrives here too, as
+        // the same event with its own state, and wants exactly the same answer — ask once
+        // more, then a desk.
+        if ($this->state === CallFlowState::InMenu
+            && $this->menuPlaybackId !== null
+            && $playbackId === $this->menuPlaybackId) {
+            $this->menuPlaybackId = null;
+            $this->missTheMenu('said nothing');
+
+            return;
+        }
+
+        // A chosen key's own sound finished, and that key ends the call (AU-17, AU-28).
+        // The call record was written the moment the key was taken, so there is nothing
+        // left to do but hang up.
+        if ($this->state === CallFlowState::PlayingMenuMessage
+            && $this->menuPlaybackId !== null
+            && $playbackId === $this->menuPlaybackId) {
+            $this->menuPlaybackId = null;
+
+            Log::info('Inbound call: the menu option\'s message finished — ending the call.', [
+                'ticket' => $this->ticketNumber,
+                'tenant' => $this->tenantId,
+                'caller' => $this->callerLegId,
+                'choice' => $this->menuChoice,
+            ]);
+
+            if ($this->callerLegId !== null) {
+                rescue(fn () => $this->telephony->hangup($this->callerLegId), report: false);
+            }
+
+            $this->dispose();
+
+            return;
+        }
+
         if ($this->state !== CallFlowState::PlayingClosedMessage) {
             return;
         }
@@ -2331,6 +2718,37 @@ class CallToAgentFlow
         // Missed Calls row is already written — the door wrote it before a single sound
         // played, precisely so this path never has to.
         if ($this->state === CallFlowState::PlayingClosedMessage) {
+            if ($legId === $this->callerLegId) {
+                $this->dispose();
+            }
+
+            return;
+        }
+
+        // The caller hung up while the menu was still asking (AU-26). Their row is
+        // written HERE rather than at the door, and that is the difference from the
+        // closed message: a caller who goes on to reach a desk must NOT have one, and
+        // every other way out of the menu writes its own.
+        if ($this->state === CallFlowState::InMenu) {
+            if ($legId === $this->callerLegId) {
+                Log::info('Inbound call: the caller hung up while the menu was asking.', [
+                    'ticket' => $this->ticketNumber,
+                    'tenant' => $this->tenantId,
+                    'caller' => $this->callerLegId,
+                    'secondTry' => $this->menuReplayed,
+                ]);
+
+                $this->recordMissedCall(CallOutcome::Abandoned, MissedReason::HungUpInMenu);
+                $this->dispose();
+            }
+
+            return;
+        }
+
+        // The caller hung up on the sound their chosen key was playing, or the hang-up we
+        // asked for came back to us. Either way the record was written when the key was
+        // taken — and it is deliberately NOT a missed call, because they were served.
+        if ($this->state === CallFlowState::PlayingMenuMessage) {
             if ($legId === $this->callerLegId) {
                 $this->dispose();
             }
@@ -2681,7 +3099,12 @@ class CallToAgentFlow
     {
         if ($this->state !== CallFlowState::Waiting
             && $this->state !== CallFlowState::RingingAgent
-            && $this->state !== CallFlowState::DialingCustomer) {
+            && $this->state !== CallFlowState::DialingCustomer
+            // Slice 6: a caller torn down by a refused verb while the menu was asking had
+            // been answered and never reached anyone, which is exactly the row QD-5
+            // promises. The two menu endings that DO write their own rows have already
+            // left this state by the time they can be torn down.
+            && $this->state !== CallFlowState::InMenu) {
             return;
         }
 
@@ -2817,6 +3240,10 @@ class CallToAgentFlow
         $this->waitingMessageUrl = null;
         $this->waitingMessagePlaybackId = null;
         $this->lastWaitingMessageAt = null;
+        $this->menu = null;
+        $this->menuPlaybackId = null;
+        $this->menuReplayed = false;
+        $this->menuChoice = null;
         $this->rangOutAt = [];
         $this->pendingReservedTenantId = null;
         $this->pendingReservedAgentId = null;

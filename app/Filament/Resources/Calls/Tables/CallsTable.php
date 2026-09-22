@@ -63,6 +63,15 @@ class CallsTable
                     ->placeholder('—')
                     ->formatStateUsing(fn (?CallOutcome $state): string => $state?->label() ?? '—')
                     ->sortable(),
+                // inbound-audio AU-25: what the caller chose at the client's menu. Off by
+                // default — it is blank on every call to a number with no menu, which is
+                // most of them, and a permanently empty column trains people to ignore
+                // the row. Toggled on, it answers "why did these people ring".
+                TextColumn::make('menu_choice')
+                    ->label('Menu choice')
+                    ->placeholder('—')
+                    ->searchable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 // CP-5: what the agent wrote about the call. Truncated here because a
                 // note runs to a paragraph and this row already carries eleven facts —
                 // the full text is on the View page and in the export. Searchable is the

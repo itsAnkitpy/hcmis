@@ -20,7 +20,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\URL;
 use Spatie\Permission\Models\Role;
 
 /**
@@ -137,17 +136,7 @@ class Tenant extends Model
      */
     public function mediaUrl(TenantMedia $kind): ?string
     {
-        $path = $this->{$kind->pathColumn()};
-
-        if (blank($path)) {
-            return null;
-        }
-
-        return URL::signedRoute('tenants.media', [
-            'kind' => $kind->value,
-            'tenant' => $this->id,
-            'hash' => basename((string) $path, '.wav'),
-        ]);
+        return $kind->addressFor($this->id, $this->{$kind->pathColumn()});
     }
 
     /** The waiting-area music's address (slice 3). Read by HoldMusicWriter and the form. */

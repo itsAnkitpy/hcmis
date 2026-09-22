@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Jobs;
 
 use App\Enums\TenantMedia;
+use App\Models\Menu;
 use App\Models\Tenant;
 use App\Telephony\HoldMusicWriter;
 use Illuminate\Bus\Queueable;
@@ -15,6 +16,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
@@ -25,6 +27,12 @@ use Throwable;
  * columns the file lands in, whether a second of silence is appended, and whether the
  * voice box's music table gets a row — and in nothing else. The kind carries those
  * values, so a second sound is an enum case, not a second copy of this file.
+ *
+ * SLICE 6 ADDS AN OWNER, NOT A SECOND JOB. A menu's greeting and its per-key sounds
+ * are converted exactly like a client's, but land on a MENU row rather than a client
+ * column, because one client may have several menus. `$menu` says so; `$optionKey`
+ * picks the key inside it, or null for the greeting. Everything above this line —
+ * the conversion, the padding, the content naming, the cache reasoning — is shared.
  *
  * Queued for the same reason the recording merge is (D5): nobody is on hold waiting
  * for this, and audio conversion must never run inside the listener. Converting on
@@ -47,6 +55,8 @@ class ConvertTenantMediaJob implements ShouldQueue
         public TenantMedia $kind,
         public string $uploadDisk,
         public string $uploadPath,
+        public ?Menu $menu = null,
+        public ?string $optionKey = null,
     ) {}
 
     public function handle(HoldMusicWriter $writer): void
@@ -56,8 +66,14 @@ class ConvertTenantMediaJob implements ShouldQueue
 
         $extension = pathinfo($this->uploadPath, PATHINFO_EXTENSION) ?: 'mp3';
         $directory = sys_get_temp_dir();
-        $sourcePath = "{$directory}/{$this->kind->value}-{$this->tenant->id}-source.{$extension}";
-        $convertedPath = "{$directory}/{$this->kind->value}-{$this->tenant->id}.wav";
+        // 🔴 UNIQUE PER JOB, not per client and kind. One menu save can queue several
+        // uploads of the SAME kind for the SAME client — one per key — and a shared temp
+        // name would have two of them writing over each other mid-conversion. The random
+        // tail is not the client's business, but the EXTENSION is: sox reads the input's
+        // format from it, so the source copy keeps the uploaded one.
+        $stem = "{$this->kind->value}-{$this->tenant->id}-".Str::random(8);
+        $sourcePath = "{$directory}/{$stem}-source.{$extension}";
+        $convertedPath = "{$directory}/{$stem}.wav";
 
         try {
             file_put_contents($sourcePath, (string) $uploads->get($this->uploadPath));
@@ -78,11 +94,20 @@ class ConvertTenantMediaJob implements ShouldQueue
 
             $converted = (string) file_get_contents($convertedPath);
             $path = $this->kind->pathFor($this->tenant->id, hash('sha256', $converted));
-            $previousPath = $this->tenant->{$this->kind->pathColumn()};
 
             $media->put($path, $converted);
 
-            $this->tenant->update([$this->kind->pathColumn() => $path]);
+            // A menu's sounds are swept by the menu itself, which covers the removals no
+            // job ever sees (a key deleted on the edit form) as well as this replacement.
+            // A client's sound has no such owner, so its previous file is deleted below.
+            $previousPath = null;
+
+            if ($this->menu !== null) {
+                $this->menu->storeSoundPath($this->optionKey, $path);
+            } else {
+                $previousPath = $this->tenant->{$this->kind->pathColumn()};
+                $this->tenant->update([$this->kind->pathColumn() => $path]);
+            }
 
             // Only hold music has a row in the voice box's own tables, because only hold
             // music is looked up BY NAME there. Every other sound is played by a direct
@@ -114,6 +139,8 @@ class ConvertTenantMediaJob implements ShouldQueue
         Log::error('Tenant media: converting the client\'s upload failed; their previous file (or the default) is still in use.', [
             'tenant' => $this->tenant->id,
             'kind' => $this->kind->value,
+            'menu' => $this->menu?->id,
+            'option' => $this->optionKey,
             'upload' => $this->uploadPath,
             'why' => $exception?->getMessage() ?? 'media conversion failed',
         ]);
