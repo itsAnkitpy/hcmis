@@ -10,6 +10,7 @@ use App\Models\CallHandoff;
 use App\Models\DncEntry;
 use App\Models\Menu;
 use App\Models\Tenant;
+use App\Telephony\AriNotFound;
 use App\Telephony\Flows\CallFlowState;
 use App\Telephony\Flows\CallToAgentFlow;
 use App\Telephony\Flows\Switchboard;
@@ -532,4 +533,27 @@ it('counts a caller at the menu in no column on the wall board (Ankit, S169)', f
     // throws on every publish, and rescue() swallows it into a log while the whole board
     // silently stops updating — so this proves both the arm AND that nothing throws.
     expect($switchboard->tallyByTenant())->toBe([]);
+});
+
+it('files the hang-up when the engine reports the sound first, as a real one does (S170)', function () {
+    $tenant = openClient();
+    $menu = menuFor($tenant, [menuKey('1', MenuAction::TalkToAgent, 'Sales')]);
+    fakeAgentRouter(null);
+
+    // 🔴 THE REAL ORDER, WHICH THE TIDY ONE ABOVE MISSES. A dropped line ends the play,
+    // and that report arrives BEFORE the leg-ended event — so the miss path asks for the
+    // replay and the engine answers "no such channel". Staging, S170: the caller was
+    // filed under the general abort's reason instead of this one.
+    $telephony = Mockery::mock(TelephonyProvider::class);
+    $telephony->shouldReceive('answer')->once();
+    $telephony->shouldReceive('play')->once()->andReturn('play-1');
+    $telephony->shouldReceive('play')->once()->andThrow(new AriNotFound('HTTP 404: Channel not found'));
+
+    $flow = callerAtMenu($tenant, $menu, $telephony);
+    $flow->handle(playbackFinished('play-1', 'caller-leg'));
+
+    $call = TenantContext::cross(fn () => Call::query()->sole());
+
+    expect($call->outcome)->toBe(CallOutcome::Abandoned)
+        ->and($call->missed_reason)->toBe(MissedReason::HungUpInMenu);
 });

@@ -269,10 +269,14 @@ class AsteriskAriProvider implements TelephonyProvider
                 ->send($method, $path)
                 ->throw();
         } catch (RequestException $exception) {
-            throw new TelephonyException(
-                "Asterisk refused {$method} {$path} — HTTP {$exception->response->status()}: {$exception->response->body()}",
-                previous: $exception,
-            );
+            $message = "Asterisk refused {$method} {$path} — HTTP {$exception->response->status()}: {$exception->response->body()}";
+
+            // 404 is its own answer, not a general refusal: the channel or playback we
+            // named is gone. Callers that know what a missing leg means (the menu) act on
+            // it; everyone else still sees a TelephonyException, since AriNotFound is one.
+            throw $exception->response->status() === 404
+                ? new AriNotFound($message, previous: $exception)
+                : new TelephonyException($message, previous: $exception);
         } catch (ConnectionException $exception) {
             throw new TelephonyException(
                 "Cannot reach Asterisk for {$method} {$path}: {$exception->getMessage()}",

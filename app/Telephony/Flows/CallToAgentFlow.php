@@ -25,6 +25,7 @@ use App\Support\PhoneNumber;
 use App\Telephony\AgentDirectory;
 use App\Telephony\AgentRouter;
 use App\Telephony\AriConnectionLost;
+use App\Telephony\AriNotFound;
 use App\Telephony\NumberDirectory;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyException;
@@ -848,10 +849,21 @@ class CallToAgentFlow
      */
     private function playMenuGreeting(): void
     {
-        $this->menuPlaybackId = $this->telephony->play((string) $this->callerLegId, [
-            (string) $this->menu?->greetingUrl(),
-            self::MENU_SILENCE_SOUND,
-        ]);
+        try {
+            $this->menuPlaybackId = $this->telephony->play((string) $this->callerLegId, [
+                (string) $this->menu?->greetingUrl(),
+                self::MENU_SILENCE_SOUND,
+            ]);
+        } catch (AriNotFound) {
+            // 🔴 THE CALLER HUNG UP, AND THIS IS HOW WE HEAR IT FIRST (AU-26). Their leg
+            // going away ends the play, and THAT report reaches us before the leg-ended
+            // event does — so the miss path asks for the replay on a line that is already
+            // gone. Without this the general abort filed them under its own reason and
+            // the one written for this case was never used. Found on staging, S170.
+            $this->hungUpInTheMenu();
+
+            return;
+        }
 
         Log::info('Inbound call: the caller is hearing the client\'s menu.', [
             'ticket' => $this->ticketNumber,
@@ -861,6 +873,21 @@ class CallToAgentFlow
             'secondTry' => $this->menuReplayed,
             'playback' => $this->menuPlaybackId,
         ]);
+    }
+
+    /** File the caller who left while the menu was still asking, and end the call (AU-26). */
+    private function hungUpInTheMenu(): void
+    {
+        Log::info('Inbound call: the caller hung up while the menu was asking.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+            'secondTry' => $this->menuReplayed,
+        ]);
+
+        $this->menuPlaybackId = null;
+        $this->recordMissedCall(CallOutcome::Abandoned, MissedReason::HungUpInMenu);
+        $this->dispose();
     }
 
     /**
@@ -2731,15 +2758,7 @@ class CallToAgentFlow
         // every other way out of the menu writes its own.
         if ($this->state === CallFlowState::InMenu) {
             if ($legId === $this->callerLegId) {
-                Log::info('Inbound call: the caller hung up while the menu was asking.', [
-                    'ticket' => $this->ticketNumber,
-                    'tenant' => $this->tenantId,
-                    'caller' => $this->callerLegId,
-                    'secondTry' => $this->menuReplayed,
-                ]);
-
-                $this->recordMissedCall(CallOutcome::Abandoned, MissedReason::HungUpInMenu);
-                $this->dispose();
+                $this->hungUpInTheMenu();
             }
 
             return;
