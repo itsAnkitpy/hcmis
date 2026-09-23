@@ -90,6 +90,13 @@ class TenantForm
                             ->minValue(30)
                             ->maxValue(3600)
                             ->helperText('How long a caller may wait before we end the call and add them to the missed-call list. Default 180 (three minutes).'),
+                        // inbound-audio slice 7 (D3).
+                        TextInput::make('department_wait_seconds')
+                            ->label('Wait for the department (seconds)')
+                            ->numeric()
+                            ->minValue(10)
+                            ->maxValue(3600)
+                            ->helperText('How long a caller who pressed a department key waits for that department before any free agent may take them. Default 60.'),
                     ])
                     ->columns(2)
                     ->hiddenOn('create'),

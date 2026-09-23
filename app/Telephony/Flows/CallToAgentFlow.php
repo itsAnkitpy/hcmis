@@ -1015,6 +1015,8 @@ class CallToAgentFlow
 
         match ($action) {
             MenuAction::TalkToAgent => $this->leaveMenuForADesk($label),
+            // ponytail: any free agent until slice 7 step 6 routes by department.
+            MenuAction::RingDepartment => $this->leaveMenuForADesk($label),
             MenuAction::HearMessage => $this->serveTheCallerAndEnd($label, $this->menu?->soundUrlFor($option)),
             MenuAction::RemoveFromList => $this->removeTheCallerFromTheList($label, $option),
         };

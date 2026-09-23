@@ -29,6 +29,7 @@ use Illuminate\Support\Facades\Storage;
  *   key                    one character, 0-9 * or # (AU-27)
  *   label                  what the caller chose, saved on the call (AU-25)
  *   action                 a MenuAction value
+ *   department_id          the department a RingDepartment key rings (slice 7)
  *   sound_path             the converted file, or null
  *   sound_rights_confirmed the AU-14 tick for that file
  *

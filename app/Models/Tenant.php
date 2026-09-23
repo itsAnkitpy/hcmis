@@ -57,6 +57,7 @@ class Tenant extends Model
         'status_reason',
         'ring_seconds',
         'max_hold_seconds',
+        'department_wait_seconds',
         'timezone',
         'hold_music_path',
         'hold_music_rights_confirmed',
@@ -78,6 +79,7 @@ class Tenant extends Model
             'archived_at' => 'datetime',
             'ring_seconds' => 'integer',
             'max_hold_seconds' => 'integer',
+            'department_wait_seconds' => 'integer',
             'hold_music_rights_confirmed' => 'boolean',
             'closed_message_rights_confirmed' => 'boolean',
             'settings' => TenantSettingsCast::class,
@@ -102,6 +104,16 @@ class Tenant extends Model
     public function maxHoldSeconds(): int
     {
         return $this->max_hold_seconds ?? (int) config('telephony.queue.max_hold_seconds');
+    }
+
+    /**
+     * How long a caller who pressed a department key waits for that department
+     * before any free agent may take them (inbound-audio slice 7, D3). Falls back
+     * to the config default when the client has set nothing.
+     */
+    public function departmentWaitSeconds(): int
+    {
+        return $this->department_wait_seconds ?? (int) config('telephony.queue.department_wait_seconds');
     }
 
     /**
@@ -289,7 +301,7 @@ class Tenant extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed', 'closed_message_path', 'closed_message_rights_confirmed', 'waiting_message_path', 'waiting_message_rights_confirmed'];
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'department_wait_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed', 'closed_message_path', 'closed_message_rights_confirmed', 'waiting_message_path', 'waiting_message_rights_confirmed'];
     }
 
     protected function activityLogName(): string

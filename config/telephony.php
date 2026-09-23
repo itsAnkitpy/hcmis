@@ -200,6 +200,8 @@ return [
     'queue' => [
         'ring_seconds' => (int) env('TELEPHONY_RING_SECONDS', 20),
         'max_hold_seconds' => (int) env('TELEPHONY_MAX_HOLD_SECONDS', 180),
+        // Slice 7 (D3): seconds a caller waits for their department before widening to anyone.
+        'department_wait_seconds' => (int) env('TELEPHONY_DEPARTMENT_WAIT_SECONDS', 60),
     ],
 
 ];

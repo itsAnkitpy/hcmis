@@ -156,3 +156,24 @@ it('saves the closed-hours switch and holiday dates, and a date comes back uncha
             return ['closed_hours' => ClosedHours::NoPickup->value];
         });
 });
+
+it('saves the department wait, and a blank one falls back to the default (inbound-audio slice 7)', function () {
+    $tenant = Tenant::factory()->create([
+        'settings' => ['dispositions' => [['code' => 'X', 'label' => 'X', 'is_contact' => false, 'is_sale' => false]]],
+    ]);
+
+    Livewire::test(EditTenant::class, ['record' => $tenant->getRouteKey()])
+        ->fillForm(['department_wait_seconds' => 45])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($tenant->fresh()->departmentWaitSeconds())->toBe(45);
+
+    Livewire::test(EditTenant::class, ['record' => $tenant->getRouteKey()])
+        ->fillForm(['department_wait_seconds' => null])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($tenant->fresh()->department_wait_seconds)->toBeNull()
+        ->and($tenant->fresh()->departmentWaitSeconds())->toBe(60);
+});

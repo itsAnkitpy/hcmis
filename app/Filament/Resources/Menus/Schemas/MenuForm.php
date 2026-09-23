@@ -6,6 +6,7 @@ namespace App\Filament\Resources\Menus\Schemas;
 
 use App\Enums\MenuAction;
 use App\Enums\TenantMedia;
+use App\Models\Department;
 use App\Models\Menu;
 use App\Tenancy\TenantContext;
 use Closure;
@@ -150,6 +151,24 @@ class MenuForm
                                     ->live()
                                     ->columnSpan(2),
 
+                                // slice 7: only the menu's OWN client's switched-on departments
+                                // are offered, and the rule refuses anything else a crafted
+                                // request names. Head office has no client in context, so
+                                // the client is the menu's, read off the form.
+                                Select::make('department_id')
+                                    ->label('Department')
+                                    ->options(fn (Get $get, ?Menu $record): array => self::departmentsFor($record?->tenant_id ?? $get('../../tenant_id')))
+                                    ->visible(fn (Get $get): bool => MenuAction::tryFrom((string) $get('action')) === MenuAction::RingDepartment)
+                                    ->required()
+                                    ->rules([
+                                        fn (Get $get, ?Menu $record): Closure => function (string $attribute, mixed $value, Closure $fail) use ($get, $record): void {
+                                            if (! array_key_exists((int) $value, self::departmentsFor($record?->tenant_id ?? $get('../../tenant_id')))) {
+                                                $fail('Pick a switched-on department of this menu\'s client.');
+                                            }
+                                        },
+                                    ])
+                                    ->columnSpanFull(),
+
                                 // Round-trips the converted file so an edit that touches
                                 // nothing else keeps it. The conversion job overwrites it
                                 // by KEY after the save.
@@ -192,5 +211,28 @@ class MenuForm
                                 : null),
                     ]),
             ]);
+    }
+
+    /**
+     * The departments a key on this client's menu may ring: switched on, and the
+     * client's own. Head office sees every client's rows (cross-client posture), so the
+     * client filter here is what keeps one client's key off another's department.
+     *
+     * @return array<int, string>
+     */
+    private static function departmentsFor(mixed $tenantId): array
+    {
+        $tenantId ??= TenantContext::id();
+
+        if (blank($tenantId)) {
+            return [];
+        }
+
+        return Department::query()
+            ->where('tenant_id', $tenantId)
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->pluck('name', 'id')
+            ->all();
     }
 }

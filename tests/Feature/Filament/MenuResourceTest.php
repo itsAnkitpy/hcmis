@@ -7,6 +7,7 @@ use App\Filament\Resources\Menus\Pages\CreateMenu;
 use App\Filament\Resources\Menus\Pages\EditMenu;
 use App\Filament\Resources\Menus\Pages\ListMenus;
 use App\Filament\Resources\PhoneNumbers\Pages\EditPhoneNumber;
+use App\Models\Department;
 use App\Models\Menu;
 use App\Models\PhoneNumber;
 use App\Models\Tenant;
@@ -176,3 +177,51 @@ it('opens the menus list page for head office, bulk delete and all (AU-19)', fun
     // Found on staging in S170; every other bulk-delete table gets it from a shared trait.
     Livewire::test(ListMenus::class)->assertOk();
 });
+
+// --- slice 7: the "ring a department" key ---
+
+it('saves a department key pointing at the client\'s own switched-on department', function () {
+    $tenant = menuHeadOffice();
+    [$menu, $hindi] = TenantContext::run($tenant->id, fn (): array => [
+        Menu::factory()->withGreeting()->create(),
+        Department::factory()->create(['name' => 'Hindi']),
+    ]);
+
+    Livewire::test(EditMenu::class, ['record' => $menu->getKey()])
+        ->fillForm([
+            'name' => 'Main menu',
+            'options' => [
+                ['key' => '2', 'label' => 'Hindi', 'action' => MenuAction::RingDepartment->value, 'department_id' => (string) $hindi->id],
+            ],
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    // Stored as a number: the departments screen finds the menus using a department by
+    // matching this value inside the JSON, and "3" is not 3 there.
+    expect($menu->fresh()->optionFor('2')['department_id'])->toBe($hindi->id)
+        ->and(TenantContext::run($tenant->id, fn () => $hindi->menusUsingIt()->pluck('id')->all()))->toBe([$menu->id]);
+
+    Livewire::test(EditMenu::class, ['record' => $menu->getKey()])->assertOk();
+});
+
+it('refuses a department key pointing at a switched-off department or another client\'s', function (string $which) {
+    $tenant = menuHeadOffice();
+    $other = Tenant::factory()->create();
+    $menu = TenantContext::run($tenant->id, fn (): Menu => Menu::factory()->withGreeting()->create());
+    $department = $which === 'switched off'
+        ? TenantContext::run($tenant->id, fn (): Department => Department::factory()->inactive()->create())
+        : TenantContext::run($other->id, fn (): Department => Department::factory()->create());
+
+    Livewire::test(EditMenu::class, ['record' => $menu->getKey()])
+        ->fillForm([
+            'name' => 'Main menu',
+            'options' => [
+                ['key' => '2', 'label' => 'Hindi', 'action' => MenuAction::RingDepartment->value, 'department_id' => $department->id],
+            ],
+        ])
+        ->call('save')
+        ->assertHasFormErrors();
+
+    expect($menu->fresh()->options)->toBe([]);
+})->with(['switched off', 'another client\'s']);
