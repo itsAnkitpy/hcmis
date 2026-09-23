@@ -286,6 +286,22 @@ class CallToAgentFlow
     private ?string $menuChoice = null;
 
     /**
+     * The department a "ring a department" key asked for (inbound-audio slice 7), the
+     * moment the key was pressed — the client's wait counts from there, not from arrival
+     * (D5) — and whether the agent last reserved came from outside it. All null / false
+     * on every call that did not press a department key, which keeps every other way to
+     * a desk on today's query (D8).
+     */
+    private ?int $departmentId = null;
+
+    private ?Carbon $departmentChosenAt = null;
+
+    private bool $departmentWidened = false;
+
+    /** This client's wait for a department before widening, read with the other queue settings. */
+    private ?int $departmentWaitSeconds = null;
+
+    /**
      * The agents who have let THIS caller's ring run out, and the moment each one's phone
      * stopped ringing (QD-4's per-call skip list). Without it a waiting caller cycles
      * between hold music and the same silent desk: the agent's phone rings out, the board
@@ -1015,8 +1031,7 @@ class CallToAgentFlow
 
         match ($action) {
             MenuAction::TalkToAgent => $this->leaveMenuForADesk($label),
-            // ponytail: any free agent until slice 7 step 6 routes by department.
-            MenuAction::RingDepartment => $this->leaveMenuForADesk($label),
+            MenuAction::RingDepartment => $this->leaveMenuForADepartment($label, $option),
             MenuAction::HearMessage => $this->serveTheCallerAndEnd($label, $this->menu?->soundUrlFor($option)),
             MenuAction::RemoveFromList => $this->removeTheCallerFromTheList($label, $option),
         };
@@ -1035,6 +1050,24 @@ class CallToAgentFlow
         $this->menuPlaybackId = null;
 
         $this->offerTheCallerADesk('the caller finished at the menu and nobody was free');
+    }
+
+    /**
+     * "Ring a department" (inbound-audio slice 7): the same way to a desk as "talk to an
+     * agent", with the department and the moment of the key press remembered, so every
+     * try for a desk from here on asks the department first (D3, D5).
+     *
+     * A key saved with no department (a hand-edited row) rings anyone, like "talk to an
+     * agent" — a caller is never stranded by a bad key.
+     *
+     * @param  array<string, mixed>  $option
+     */
+    private function leaveMenuForADepartment(string $choice, array $option): void
+    {
+        $this->departmentId = filled($option['department_id'] ?? null) ? (int) $option['department_id'] : null;
+        $this->departmentChosenAt = now();
+
+        $this->leaveMenuForADesk($choice);
     }
 
     /**
@@ -1118,6 +1151,7 @@ class CallToAgentFlow
         $this->maxHoldSeconds = $tenant?->maxHoldSeconds();
         $this->holdMusicClass = $tenant?->holdMusicClass();
         $this->waitingMessageUrl = $tenant?->waitingMessageUrl();
+        $this->departmentWaitSeconds = $tenant?->departmentWaitSeconds();
 
         return $tenant;
     }
@@ -1130,14 +1164,40 @@ class CallToAgentFlow
      */
     private function reserveNextAgent(): ?int
     {
-        $reservedAgentId = $this->router->reserveFreeAgent((int) $this->tenantId, $this->coolingOffAgentIds());
+        $reservedAgentId = $this->router->reserveFreeAgent(
+            (int) $this->tenantId,
+            $this->coolingOffAgentIds(),
+            $this->departmentId,
+            $this->departmentId !== null && $this->mayWidenBeyondDepartment(),
+        );
 
         if ($reservedAgentId !== null) {
             $this->pendingReservedTenantId = $this->tenantId;
             $this->pendingReservedAgentId = $reservedAgentId;
+
+            if ($this->departmentId !== null) {
+                $this->departmentWidened = ! $this->router->isInDepartment((int) $this->tenantId, $this->departmentId, $reservedAgentId);
+            }
         }
 
         return $reservedAgentId;
+    }
+
+    /**
+     * May this department caller now be taken by anyone free (D3, D4)? Yes once the
+     * client's wait has run from the key press, or at once when nobody in the department
+     * is logged in — checked on every try, so someone logging out mid-wait widens the
+     * next one. The department keeps first pick either way (AgentRouter).
+     */
+    private function mayWidenBeyondDepartment(): bool
+    {
+        $waitSeconds = $this->departmentWaitSeconds ?? (int) config('telephony.queue.department_wait_seconds');
+
+        if ($this->departmentChosenAt?->copy()->addSeconds($waitSeconds)->lte(now()) === true) {
+            return true;
+        }
+
+        return ! $this->router->isAnyoneInDepartmentLoggedIn((int) $this->tenantId, (int) $this->departmentId);
     }
 
     /**
@@ -3265,6 +3325,10 @@ class CallToAgentFlow
         $this->menuPlaybackId = null;
         $this->menuReplayed = false;
         $this->menuChoice = null;
+        $this->departmentId = null;
+        $this->departmentChosenAt = null;
+        $this->departmentWidened = false;
+        $this->departmentWaitSeconds = null;
         $this->rangOutAt = [];
         $this->pendingReservedTenantId = null;
         $this->pendingReservedAgentId = null;

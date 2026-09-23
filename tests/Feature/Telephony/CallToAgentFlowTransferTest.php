@@ -167,7 +167,7 @@ it('when nobody is free at transfer time: touches nothing — the caller stays w
 
         private int $calls = 0;
 
-        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = [], ?int $departmentId = null, bool $mayWiden = false): ?int
         {
             $this->reserved[] = $tenantId;
 

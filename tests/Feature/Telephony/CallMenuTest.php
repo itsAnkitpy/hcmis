@@ -5,11 +5,15 @@ use App\Enums\ClosedHours;
 use App\Enums\DncSource;
 use App\Enums\MenuAction;
 use App\Enums\MissedReason;
+use App\Enums\PresenceStatus;
+use App\Models\AgentPresence;
 use App\Models\Call;
 use App\Models\CallHandoff;
+use App\Models\Department;
 use App\Models\DncEntry;
 use App\Models\Menu;
 use App\Models\Tenant;
+use App\Models\User;
 use App\Telephony\AriNotFound;
 use App\Telephony\Flows\CallFlowState;
 use App\Telephony\Flows\CallToAgentFlow;
@@ -557,3 +561,162 @@ it('files the hang-up when the engine reports the sound first, as a real one doe
     expect($call->outcome)->toBe(CallOutcome::Abandoned)
         ->and($call->missed_reason)->toBe(MissedReason::HungUpInMenu);
 });
+
+/*
+| inbound-audio slice 7 — "ring a department". The flow decides WHEN a caller may widen
+| (the client's wait from the key press, or nobody in the department logged in); the
+| router, proven in AgentRouterTest, decides WHO. So these read what each try asked for.
+*/
+
+/** A department at $tenant with these members, each given a phone. */
+function departmentFor(Tenant $tenant, User ...$members): Department
+{
+    return TenantContext::run($tenant->id, function () use ($members): Department {
+        $department = Department::factory()->create();
+        $department->members()->attach(array_map(fn (User $member): int => $member->id, $members));
+
+        return $department;
+    });
+}
+
+/** A member at work: a phone and a fresh board row in this status. */
+function memberAtWork(Tenant $tenant, PresenceStatus $status): User
+{
+    $member = clientUserWithRole($tenant, 'agent');
+    $member->forceFill(['sip_extension' => (string) (1100 + $member->id)])->save();
+    TenantContext::run($tenant->id, fn () => AgentPresence::factory()->forUser($member)->status($status)->create());
+
+    return $member;
+}
+
+function departmentKey(string $key, Department $department): array
+{
+    return [...menuKey($key, MenuAction::RingDepartment, $department->name), 'department_id' => $department->id];
+}
+
+/** A telephony double that lets a caller reach the menu, press a key and hold. */
+function menuPhone(): TelephonyProvider
+{
+    $telephony = Mockery::mock(TelephonyProvider::class)->shouldIgnoreMissing();
+    $telephony->shouldReceive('play')->andReturn('play-1', 'play-2', 'play-3', 'play-4');
+
+    return $telephony;
+}
+
+it('asks the department first, without widening, while a member is at work (D3)', function () {
+    $tenant = openClient();
+    $department = departmentFor($tenant, memberAtWork($tenant, PresenceStatus::OnBreak));
+    $router = fakeAgentRouter(null);
+
+    $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
+    $flow->handle(dtmfReceived('2', 'caller-leg'));
+
+    expect($flow->state())->toBe(CallFlowState::Waiting)
+        ->and($router->asked)->toBe([[$department->id, false]]);
+});
+
+it('widens at the client\'s wait, counted from the key press and not from arrival (D3, D5)', function () {
+    $tenant = openClient();
+    $tenant->update(['department_wait_seconds' => 30]);
+    $department = departmentFor($tenant, memberAtWork($tenant, PresenceStatus::OnBreak));
+    $router = fakeAgentRouter(null);
+
+    $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
+    $this->travel(20)->seconds();                 // twenty seconds listening to the menu
+    $flow->handle(dtmfReceived('2', 'caller-leg'));
+
+    $this->travel(29)->seconds();                 // 49 since arrival, 29 since the key
+    $flow->tryAgain();
+    $this->travel(1)->seconds();                  // 30 since the key
+    $flow->tryAgain();
+
+    expect($router->asked)->toBe([
+        [$department->id, false],
+        [$department->id, false],
+        [$department->id, true],
+    ]);
+});
+
+it('widens at once when nobody in the department is logged in, or it has nobody', function (bool $withOfflineMember) {
+    $tenant = openClient();
+    $department = $withOfflineMember
+        ? departmentFor($tenant, memberAtWork($tenant, PresenceStatus::Offline))
+        : departmentFor($tenant);
+    $router = fakeAgentRouter(null);
+
+    $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
+    $flow->handle(dtmfReceived('2', 'caller-leg'));
+
+    expect($router->asked)->toBe([[$department->id, true]]);
+})->with(['everyone offline' => true, 'an empty department' => false]);
+
+it('widens on the next try when the last member logs out mid-wait (D4)', function () {
+    $tenant = openClient();
+    $member = memberAtWork($tenant, PresenceStatus::OnBreak);
+    $department = departmentFor($tenant, $member);
+    $router = fakeAgentRouter(null);
+
+    $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
+    $flow->handle(dtmfReceived('2', 'caller-leg'));
+
+    TenantContext::run($tenant->id, fn () => AgentPresence::query()->where('user_id', $member->id)->update(['status' => PresenceStatus::Offline->value]));
+    $flow->tryAgain();
+
+    expect($router->asked)->toBe([[$department->id, false], [$department->id, true]]);
+});
+
+it('tries two waiting callers for different departments in arrival order (D5)', function () {
+    $tenant = openClient();
+    $sales = departmentFor($tenant, memberAtWork($tenant, PresenceStatus::OnBreak));
+    $hindi = departmentFor($tenant, memberAtWork($tenant, PresenceStatus::OnBreak));
+    $menu = menuFor($tenant, [departmentKey('1', $sales), departmentKey('2', $hindi)]);
+    fakeNumberDirectory($menu->id);
+    $router = fakeAgentRouter(null);
+
+    $switchboard = new Switchboard(menuPhone());
+    $switchboard->handle(stasisStart('caller-A', [], '9998887777', (string) $tenant->id));
+    $switchboard->handle(stasisStart('caller-B', [], '9998887778', (string) $tenant->id));
+    // B presses first; A still arrived first, so A is tried first on every sweep.
+    $switchboard->handle(dtmfReceived('2', 'caller-B'));
+    $switchboard->handle(dtmfReceived('1', 'caller-A'));
+    $router->asked = [];
+
+    $switchboard->sweepWaiting();
+
+    expect($router->asked)->toBe([[$sales->id, false], [$hindi->id, false]]);
+});
+
+it('records whether the reserved agent came from outside the department', function (bool $member) {
+    $tenant = openClient();
+    $agent = memberAtWork($tenant, PresenceStatus::Ready);
+    $department = $member ? departmentFor($tenant, $agent) : departmentFor($tenant);
+    fakeAgentRouter($agent->id);
+
+    $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
+    $flow->handle(dtmfReceived('2', 'caller-leg'));
+
+    expect($flow->state())->toBe(CallFlowState::RingingAgent)
+        ->and((fn () => $this->departmentWidened)->call($flow))->toBe(! $member);
+})->with(['a member' => true, 'an outsider' => false]);
+
+// D8 — every other way to a desk asks with no department, exactly as before.
+
+it('asks with no department on every other way to a desk (D8)', function (string $how) {
+    $tenant = openClient();
+    $router = fakeAgentRouter(null);
+
+    if ($how === 'no menu') {
+        fakeNumberDirectory(null);
+        (new CallToAgentFlow(menuPhone(), new Switchboard(menuPhone())))
+            ->handle(stasisStart('caller-leg', [], '9998887777', (string) $tenant->id));
+    } else {
+        $flow = callerAtMenu($tenant, menuFor($tenant, [menuKey('1', MenuAction::TalkToAgent, 'Sales')]), menuPhone());
+        $presses = $how === 'talk to an agent' ? ['1'] : ['7', '7'];   // 7 is not on this menu
+
+        foreach ($presses as $press) {
+            $flow->handle(dtmfReceived($press, 'caller-leg'));
+        }
+    }
+
+    expect($router->asked)->toBe([[null, false]]);
+})->with(['no menu', 'talk to an agent', 'no choice made']);

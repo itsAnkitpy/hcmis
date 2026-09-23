@@ -8,6 +8,9 @@ use App\Enums\PresenceStatus;
 use App\Models\AgentPresence;
 use App\Models\User;
 use App\Tenancy\TenantContext;
+use Carbon\CarbonInterface;
+use Illuminate\Database\Query\Builder;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Pick a free agent among several, race-proof (B2.2b RD-3/RD-4). The watcher's
@@ -61,37 +64,94 @@ class AgentRouter
      * candidate, so the caller waits exactly as they do when nobody is free (RD-5) —
      * a path that was already built and proven.
      *
+     * DEPARTMENTS (inbound-audio slice 7). With a department, its free agents are tried
+     * first; only when none is free AND the caller may widen is anyone else tried. The
+     * department is re-tried first on every call, so it keeps first pick after widening
+     * (D3). Whether to widen is the flow's decision (the client's wait, or nobody in the
+     * department logged in); the router only obeys it. With no department: today's
+     * query, unchanged (D8).
+     *
      * @param  array<int, int>  $skipUserIds
      */
-    public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
+    public function reserveFreeAgent(int $tenantId, array $skipUserIds = [], ?int $departmentId = null, bool $mayWiden = false): ?int
     {
-        return TenantContext::run($tenantId, function () use ($skipUserIds): ?int {
-            $freshThreshold = now()->subSeconds(
-                (int) config('telephony.presence.stale_after_seconds'),
-            );
+        return TenantContext::run($tenantId, function () use ($skipUserIds, $departmentId, $mayWiden): ?int {
+            if ($departmentId !== null) {
+                $reserved = $this->reserveFirstFree($skipUserIds, $departmentId);
 
-            $candidates = AgentPresence::query()
-                ->where('status', PresenceStatus::Ready->value)
-                ->where('last_seen_at', '>=', $freshThreshold)
-                ->whereIn('user_id', User::query()->whereNotNull('sip_extension')->select('id'))
-                ->when($skipUserIds !== [], fn ($query) => $query->whereNotIn('user_id', $skipUserIds))
-                ->orderBy('user_id')
-                ->pluck('user_id');
-
-            foreach ($candidates as $userId) {
-                $reserved = AgentPresence::query()
-                    ->where('user_id', $userId)
-                    ->where('status', PresenceStatus::Ready->value)
-                    ->where('last_seen_at', '>=', $freshThreshold)
-                    ->update(['status' => PresenceStatus::OnCall->value]);
-
-                if ($reserved === 1) {
-                    return (int) $userId;
+                if ($reserved !== null || ! $mayWiden) {
+                    return $reserved;
                 }
             }
 
-            return null;
+            return $this->reserveFirstFree($skipUserIds);
         });
+    }
+
+    /**
+     * Is anyone in this department at work — any status but Offline, with a fresh
+     * heartbeat? On break counts as there (D4): they will be back, so the caller waits
+     * for them rather than widening at once. A member with no phone does not count,
+     * because they can never be rung (SEC-1).
+     */
+    public function isAnyoneInDepartmentLoggedIn(int $tenantId, int $departmentId): bool
+    {
+        return TenantContext::run($tenantId, fn (): bool => AgentPresence::query()
+            ->where('status', '!=', PresenceStatus::Offline->value)
+            ->where('last_seen_at', '>=', $this->freshThreshold())
+            ->whereIn('user_id', $this->membersOf($departmentId))
+            ->whereIn('user_id', User::query()->whereNotNull('sip_extension')->select('id'))
+            ->exists());
+    }
+
+    /** Is this agent in this department? Tells the flow whether a reservation widened. */
+    public function isInDepartment(int $tenantId, int $departmentId, int $userId): bool
+    {
+        return TenantContext::run($tenantId, fn (): bool => $this->membersOf($departmentId)->where('user_id', $userId)->exists());
+    }
+
+    /**
+     * The first-free read and the atomic tag. Runs inside the caller's TenantContext.
+     *
+     * @param  array<int, int>  $skipUserIds
+     */
+    private function reserveFirstFree(array $skipUserIds, ?int $departmentId = null): ?int
+    {
+        $freshThreshold = $this->freshThreshold();
+
+        $candidates = AgentPresence::query()
+            ->where('status', PresenceStatus::Ready->value)
+            ->where('last_seen_at', '>=', $freshThreshold)
+            ->whereIn('user_id', User::query()->whereNotNull('sip_extension')->select('id'))
+            ->when($departmentId !== null, fn ($query) => $query->whereIn('user_id', $this->membersOf($departmentId)))
+            ->when($skipUserIds !== [], fn ($query) => $query->whereNotIn('user_id', $skipUserIds))
+            ->orderBy('user_id')
+            ->pluck('user_id');
+
+        foreach ($candidates as $userId) {
+            $reserved = AgentPresence::query()
+                ->where('user_id', $userId)
+                ->where('status', PresenceStatus::Ready->value)
+                ->where('last_seen_at', '>=', $freshThreshold)
+                ->update(['status' => PresenceStatus::OnCall->value]);
+
+            if ($reserved === 1) {
+                return (int) $userId;
+            }
+        }
+
+        return null;
+    }
+
+    /** The department's member ids, as a subquery. The membership table is walled by RLS. */
+    private function membersOf(int $departmentId): Builder
+    {
+        return DB::table('department_user')->where('department_id', $departmentId)->select('user_id');
+    }
+
+    private function freshThreshold(): CarbonInterface
+    {
+        return now()->subSeconds((int) config('telephony.presence.stale_after_seconds'));
     }
 
     /**

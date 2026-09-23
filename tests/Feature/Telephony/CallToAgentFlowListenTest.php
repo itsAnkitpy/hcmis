@@ -310,7 +310,7 @@ it('will not tap an agent whose own phone is still ringing', function () {
     // on a row whose phone has not been picked up yet.
     app()->instance(AgentRouter::class, new class extends AgentRouter
     {
-        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = [], ?int $departmentId = null, bool $mayWiden = false): ?int
         {
             return $skipUserIds === [] && ! isset($this->rung) ? ($this->rung = 6) : 7;
         }
@@ -434,7 +434,7 @@ it('lets a real transfer end the coaching session rather than leaving the coach 
     // shape the conference case above uses.
     app()->instance(AgentRouter::class, new class extends AgentRouter
     {
-        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = [], ?int $departmentId = null, bool $mayWiden = false): ?int
         {
             return isset($this->rung) ? 7 : ($this->rung = 6);
         }

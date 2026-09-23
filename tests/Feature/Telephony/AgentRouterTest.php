@@ -3,6 +3,7 @@
 use App\Enums\PresenceStatus;
 use App\Enums\RoleName;
 use App\Models\AgentPresence;
+use App\Models\Department;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Telephony\AgentRouter;
@@ -203,4 +204,86 @@ it('rings past a phoneless agent to the next free one who does hold a phone', fu
 
     expect((new AgentRouter)->reserveFreeAgent($tenant->id))->toBe($withPhone->id)
         ->and(statusOf($tenant, $phoneless))->toBe(PresenceStatus::Ready);
+});
+
+/*
+| inbound-audio slice 7 — departments. The department's free agents first; anyone
+| else only when the flow says the caller may widen (D3). No department is today's
+| query (D8), which every test above already pins.
+*/
+
+function departmentOf(Tenant $tenant, User ...$members): Department
+{
+    return TenantContext::run($tenant->id, function () use ($members): Department {
+        $department = Department::factory()->create();
+        $department->members()->attach(array_map(fn (User $member): int => $member->id, $members));
+
+        return $department;
+    });
+}
+
+it('gives the department first pick even when a lower-numbered outsider is free', function (bool $mayWiden) {
+    $tenant = Tenant::factory()->create();
+    $outsider = seedPresenceRow($tenant, PresenceStatus::Ready);
+    $member = seedPresenceRow($tenant, PresenceStatus::Ready);
+    $department = departmentOf($tenant, $member);
+
+    // Widening never takes first pick away from the department (D3).
+    expect((new AgentRouter)->reserveFreeAgent($tenant->id, [], $department->id, $mayWiden))->toBe($member->id)
+        ->and(statusOf($tenant, $outsider))->toBe(PresenceStatus::Ready);
+})->with(['may not widen' => false, 'may widen' => true]);
+
+it('waits rather than taking an outsider when the department is busy and may not widen', function () {
+    $tenant = Tenant::factory()->create();
+    $outsider = seedPresenceRow($tenant, PresenceStatus::Ready);
+    $department = departmentOf($tenant, seedPresenceRow($tenant, PresenceStatus::OnCall));
+
+    expect((new AgentRouter)->reserveFreeAgent($tenant->id, [], $department->id, false))->toBeNull()
+        ->and(statusOf($tenant, $outsider))->toBe(PresenceStatus::Ready);
+});
+
+it('takes an outsider when the department is busy and the caller may widen', function () {
+    $tenant = Tenant::factory()->create();
+    $outsider = seedPresenceRow($tenant, PresenceStatus::Ready);
+    $department = departmentOf($tenant, seedPresenceRow($tenant, PresenceStatus::OnCall));
+
+    expect((new AgentRouter)->reserveFreeAgent($tenant->id, [], $department->id, true))->toBe($outsider->id);
+});
+
+it('applies the per-call skip list inside the department (QD-4)', function () {
+    $tenant = Tenant::factory()->create();
+    $first = seedPresenceRow($tenant, PresenceStatus::Ready);
+    $second = seedPresenceRow($tenant, PresenceStatus::Ready);
+    $department = departmentOf($tenant, $first, $second);
+
+    expect((new AgentRouter)->reserveFreeAgent($tenant->id, [$first->id], $department->id))->toBe($second->id)
+        ->and((new AgentRouter)->reserveFreeAgent($tenant->id, [$first->id], $department->id))->toBeNull();
+});
+
+it('counts a member as logged in on any status but offline, on break included (D4)', function (PresenceStatus $status, bool $loggedIn) {
+    $tenant = Tenant::factory()->create();
+    $department = departmentOf($tenant, seedPresenceRow($tenant, $status));
+
+    expect((new AgentRouter)->isAnyoneInDepartmentLoggedIn($tenant->id, $department->id))->toBe($loggedIn);
+})->with([
+    'ready' => [PresenceStatus::Ready, true],
+    'on a call' => [PresenceStatus::OnCall, true],
+    'wrapping up' => [PresenceStatus::WrappingUp, true],
+    'on break' => [PresenceStatus::OnBreak, true],
+    'offline' => [PresenceStatus::Offline, false],
+]);
+
+it('does not count a member whose heartbeat went stale, or who holds no phone', function (bool $stale, bool $withPhone) {
+    $tenant = Tenant::factory()->create();
+    $department = departmentOf($tenant, seedPresenceRow($tenant, PresenceStatus::Ready, $stale, $withPhone));
+
+    expect((new AgentRouter)->isAnyoneInDepartmentLoggedIn($tenant->id, $department->id))->toBeFalse();
+})->with(['stale heartbeat' => [true, true], 'no phone' => [false, false]]);
+
+it('treats an empty department as nobody logged in, while an outsider is at work', function () {
+    $tenant = Tenant::factory()->create();
+    seedPresenceRow($tenant, PresenceStatus::Ready);
+    $department = departmentOf($tenant);
+
+    expect((new AgentRouter)->isAnyoneInDepartmentLoggedIn($tenant->id, $department->id))->toBeFalse();
 });

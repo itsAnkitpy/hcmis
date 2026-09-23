@@ -279,13 +279,21 @@ function fakeAgentRouter(?int $agentId = 6): AgentRouter
         /** @var array<int, array{int, int}> */
         public array $released = [];
 
+        /**
+         * What each try asked for: [department id, may widen] (inbound-audio slice 7).
+         *
+         * @var array<int, array{int|null, bool}>
+         */
+        public array $asked = [];
+
         /** Public and mutable so a waiting-room test can free an agent up mid-test. */
         public function __construct(public ?int $agentId) {}
 
-        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = [], ?int $departmentId = null, bool $mayWiden = false): ?int
         {
             $this->reserved[] = $tenantId;
             $this->skipped[] = $skipUserIds;
+            $this->asked[] = [$departmentId, $mayWiden];
 
             if ($this->agentId !== null && in_array($this->agentId, $skipUserIds, strict: true)) {
                 return null;   // this caller has already been rung out on our one agent

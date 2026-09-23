@@ -44,7 +44,7 @@ function sequenceAgentRouter(array $ids): AgentRouter
         /** @param array<int, int> $ids */
         public function __construct(private readonly array $ids) {}
 
-        public function reserveFreeAgent(int $tenantId, array $skipUserIds = []): ?int
+        public function reserveFreeAgent(int $tenantId, array $skipUserIds = [], ?int $departmentId = null, bool $mayWiden = false): ?int
         {
             $this->reserved[] = $tenantId;
 
