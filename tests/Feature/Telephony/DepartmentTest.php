@@ -73,6 +73,21 @@ it('stamps a member row with the department\'s own client when head office adds 
     });
 });
 
+it('lets one agent sit in several departments, a bilingual agent in Sales and Hindi (D1)', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function () {
+        $agent = User::factory()->create();
+        [$sales, $hindi] = Department::factory()->count(2)->create()->all();
+
+        $sales->members()->attach($agent);
+        $hindi->members()->attach($agent);
+
+        expect($sales->members->pluck('id')->all())->toBe([$agent->id])
+            ->and($hindi->members->pluck('id')->all())->toBe([$agent->id]);
+    });
+});
+
 // --- the client's wait setting (D3) ---
 
 it('waits the config default of 60 seconds unless the client set its own', function () {

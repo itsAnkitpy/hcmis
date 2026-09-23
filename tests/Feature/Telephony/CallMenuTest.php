@@ -14,6 +14,7 @@ use App\Models\DncEntry;
 use App\Models\Menu;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Telephony\AgentRouter;
 use App\Telephony\AriNotFound;
 use App\Telephony\Flows\CallFlowState;
 use App\Telephony\Flows\CallToAgentFlow;
@@ -709,6 +710,43 @@ it('puts the department and widened on the ring-time note, then on the missed ro
     expect($call->department_id)->toBe($department->id)
         ->and($call->department_widened)->toBe(! $member);
 })->with(['a member took it' => true, 'an outsider took it' => false]);
+
+it('saves widened on a missed call that rang nobody once the caller passed the department\'s wait (D6, S173)', function (int $waited, bool $widened) {
+    $tenant = openClient();
+    $tenant->update(['department_wait_seconds' => 30]);
+    $department = departmentFor($tenant, memberAtWork($tenant, PresenceStatus::OnBreak));
+    fakeAgentRouter(null);
+
+    $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
+    $flow->handle(dtmfReceived('2', 'caller-leg'));
+    $this->travel($waited)->seconds();
+    $flow->handle(stasisEnd('caller-leg'));
+
+    $call = TenantContext::cross(fn () => Call::query()->sole());
+    expect($call->department_id)->toBe($department->id)
+        ->and($call->department_widened)->toBe($widened);
+})->with(['hung up inside the wait' => [29, false], 'hung up past the wait' => [30, true]]);
+
+it('still saves a missed department call when the presence lookup fails at hang-up (S173)', function () {
+    $tenant = openClient();
+    $department = departmentFor($tenant, memberAtWork($tenant, PresenceStatus::OnBreak));
+    $router = Mockery::mock(AgentRouter::class)->makePartial();
+    $router->shouldReceive('reserveFreeAgent')->andReturnNull();
+    $lookups = 0;
+    $router->shouldReceive('isAnyoneInDepartmentLoggedIn')->andReturnUsing(function () use (&$lookups): bool {
+        // At work at the key press; the database is gone by hang-up.
+        return ++$lookups === 1 ? true : throw new RuntimeException('connection lost');
+    });
+    app()->instance(AgentRouter::class, $router);
+
+    $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
+    $flow->handle(dtmfReceived('2', 'caller-leg'));
+    $flow->handle(stasisEnd('caller-leg'));
+
+    $call = TenantContext::cross(fn () => Call::query()->sole());
+    expect($call->department_id)->toBe($department->id)
+        ->and($call->department_widened)->toBeFalse();
+});
 
 // D8 — every other way to a desk asks with no department, exactly as before.
 

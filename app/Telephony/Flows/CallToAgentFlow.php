@@ -1857,6 +1857,12 @@ class CallToAgentFlow
         // says who ended it, and that is what `ended_by` records below. A ring-out never
         // came on the line, so it stays `no_answer` (F9).
         $filedOutcome = $wasDialled && $startedAt !== null ? CallOutcome::Abandoned : $outcome;
+        // Slice 7 (D6): widened means the department could not serve this caller. A
+        // missed call often rang nobody, so it also counts once the caller passed the
+        // widen point (S173, Cisco's "overflow out" rule). Worked out here, not inside
+        // the write below, so a failed presence lookup costs the flag, never the row.
+        $departmentWidened = $this->departmentId !== null && ($this->departmentWidened
+            || rescue(fn (): bool => $this->mayWidenBeyondDepartment(), false));
 
         rescue(
             fn () => TenantContext::run($tenantId, fn () => Call::query()->create([
@@ -1901,9 +1907,8 @@ class CallToAgentFlow
                 // AU-25. Null on every call that never met a menu, which is every call
                 // before slice 6.
                 'menu_choice' => $this->menuChoice,
-                // Slice 7 (D6): widened means the last agent rung came from outside it.
                 'department_id' => $this->departmentId,
-                'department_widened' => $this->departmentWidened,
+                'department_widened' => $departmentWidened,
             ])),
             function (Throwable $exception) use ($filedOutcome): void {
                 Log::warning('Missed-call record write failed — the caller will not appear in the missed-call list.', [

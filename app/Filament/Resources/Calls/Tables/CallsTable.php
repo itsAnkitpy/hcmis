@@ -73,7 +73,9 @@ class CallsTable
                     ->searchable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 // inbound-audio slice 7 (D6): the department asked for, with "Widened"
-                // under it when an agent outside it took the call. Off by default for the
+                // under it when the department could not serve the caller: an agent outside
+                // it took the call, or a missed caller waited past the widen point (S173).
+                // Off by default for the
                 // menu choice's reason — blank on every call that pressed no department key.
                 TextColumn::make('department.name')
                     ->label('Department')
