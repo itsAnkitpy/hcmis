@@ -1612,6 +1612,9 @@ class AgentConsole extends Page
             // note is pruned on this agent's next ring, and the calls list and the export
             // read this long after.
             'menu_choice' => $moments?->menu_choice,
+            // Slice 7 (D6), off the note for the same reason.
+            'department_id' => $moments?->department_id,
+            'department_widened' => (bool) $moments?->department_widened,
             'from_number' => $isOutbound ? $ourNumber : $this->callPartyNumber,
             'to_number' => $isOutbound ? $this->callPartyNumber : $ourNumber,
             'lead_id' => $lead?->id,

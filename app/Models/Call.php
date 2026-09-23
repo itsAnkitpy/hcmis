@@ -118,6 +118,10 @@ class Call extends Model
         // inbound-audio AU-25: what the caller chose at the menu, by name. Not audited,
         // like `missed_reason` beside it — written once at creation and never edited.
         'menu_choice',
+        // inbound-audio slice 7 (D6): the department asked for — a link, so a report
+        // survives a rename — and whether the call went to an agent outside it.
+        'department_id',
+        'department_widened',
         // hold.md H-1/H-7: how long this caller spent on hold, as one total. The single
         // deliberate exception to CT-1 — a call held three times has no pair of moments.
         'hold_seconds',
@@ -134,6 +138,7 @@ class Call extends Model
         return [
             'direction' => CallDirection::class,
             'was_dialled' => 'boolean',
+            'department_widened' => 'boolean',
             'outcome' => CallOutcome::class,
             'started_at' => 'datetime',
             'ringing_at' => 'datetime',
@@ -319,6 +324,16 @@ class Call extends Model
     public function agent(): BelongsTo
     {
         return $this->belongsTo(User::class, 'agent_id');
+    }
+
+    /**
+     * The department the caller asked for at the menu (inbound-audio slice 7).
+     *
+     * @return BelongsTo<Department, $this>
+     */
+    public function department(): BelongsTo
+    {
+        return $this->belongsTo(Department::class);
     }
 
     /**

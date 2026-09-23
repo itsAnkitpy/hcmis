@@ -171,6 +171,10 @@ final class CallExportRows
             // Blank on every call that met no menu, and "No choice made" for a caller who
             // reached an agent by missing it twice.
             'Menu choice',
+            // inbound-audio slice 7 (D6). Widened is blank, not "No", on a call that asked
+            // for no department: there was nothing to widen from.
+            'Department',
+            'Widened',
             // CP-5: the agent's own account of the call, beside the coded outcome. The
             // disposition says WHICH box the call went in; this says what was actually
             // said, which is what a client queries a row about.
@@ -258,6 +262,8 @@ final class CallExportRows
             'contact' => $this->flag($call->disposition?->is_contact),
             'outcome' => $call->outcome?->label() ?? '',
             'menuChoice' => $call->menu_choice ?? '',
+            'department' => $call->department?->name ?? '',
+            'widened' => $call->department_id === null ? '' : $this->flag($call->department_widened),
             'notes' => $call->notes ?? '',
             // The wait, split the way their column sheet splits it. Queue is the caller
             // holding before any phone rang; Ring is a phone ringing; Waited is both
@@ -373,8 +379,8 @@ final class CallExportRows
     private function relations(): array
     {
         return $this->showsClient()
-            ? ['agent', 'campaign', 'lead', 'disposition', 'tenant']
-            : ['agent', 'campaign', 'lead', 'disposition'];
+            ? ['agent', 'campaign', 'lead', 'disposition', 'department', 'tenant']
+            : ['agent', 'campaign', 'lead', 'disposition', 'department'];
     }
 
     /** Client attribution is meaningful only in the cross-client posture. */

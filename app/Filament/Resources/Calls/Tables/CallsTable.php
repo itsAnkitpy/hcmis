@@ -34,7 +34,7 @@ class CallsTable
     public static function configure(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn (Builder $query): Builder => ClientColumn::eagerLoad($query->with(['agent', 'campaign', 'lead'])))
+            ->modifyQueryUsing(fn (Builder $query): Builder => ClientColumn::eagerLoad($query->with(['agent', 'campaign', 'lead', 'department'])))
             ->columns([
                 TextColumn::make('created_at')->label('When')->dateTime()->sortable(),
                 ClientColumn::make(),
@@ -71,6 +71,14 @@ class CallsTable
                     ->label('Menu choice')
                     ->placeholder('—')
                     ->searchable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                // inbound-audio slice 7 (D6): the department asked for, with "Widened"
+                // under it when an agent outside it took the call. Off by default for the
+                // menu choice's reason — blank on every call that pressed no department key.
+                TextColumn::make('department.name')
+                    ->label('Department')
+                    ->placeholder('—')
+                    ->description(fn (Call $record): ?string => $record->department_widened ? 'Widened' : null)
                     ->toggleable(isToggledHiddenByDefault: true),
                 // CP-5: what the agent wrote about the call. Truncated here because a
                 // note runs to a paragraph and this row already carries eleven facts —
@@ -133,6 +141,7 @@ class CallsTable
                         : null),
                 SelectFilter::make('agent_id')->label('Agent')->relationship('agent', 'name'),
                 SelectFilter::make('campaign_id')->label('Campaign')->relationship('campaign', 'name'),
+                SelectFilter::make('department_id')->label('Department')->relationship('department', 'name'),
                 SelectFilter::make('tenant')->label('Client')->relationship('tenant', 'name'),
                 SelectFilter::make('direction')->options(fn (): array => collect(CallDirection::cases())
                     ->mapWithKeys(fn (CallDirection $d): array => [$d->value => $d->label()])->all()),

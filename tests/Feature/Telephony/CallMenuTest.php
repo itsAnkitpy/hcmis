@@ -686,7 +686,7 @@ it('tries two waiting callers for different departments in arrival order (D5)', 
     expect($router->asked)->toBe([[$sales->id, false], [$hindi->id, false]]);
 });
 
-it('records whether the reserved agent came from outside the department', function (bool $member) {
+it('puts the department and widened on the ring-time note, then on the missed row when the caller hangs up (D6)', function (bool $member) {
     $tenant = openClient();
     $agent = memberAtWork($tenant, PresenceStatus::Ready);
     $department = $member ? departmentFor($tenant, $agent) : departmentFor($tenant);
@@ -695,9 +695,20 @@ it('records whether the reserved agent came from outside the department', functi
     $flow = callerAtMenu($tenant, menuFor($tenant, [departmentKey('2', $department)]), menuPhone());
     $flow->handle(dtmfReceived('2', 'caller-leg'));
 
-    expect($flow->state())->toBe(CallFlowState::RingingAgent)
-        ->and((fn () => $this->departmentWidened)->call($flow))->toBe(! $member);
-})->with(['a member' => true, 'an outsider' => false]);
+    expect($flow->state())->toBe(CallFlowState::RingingAgent);
+
+    // The answered path: the agent's screen copies these off the note at wrap-up.
+    $note = TenantContext::cross(fn () => CallHandoff::query()->sole());
+    expect($note->department_id)->toBe($department->id)
+        ->and($note->department_widened)->toBe(! $member);
+
+    // The missed path: the flow writes the row itself.
+    $flow->handle(stasisEnd('caller-leg'));
+
+    $call = TenantContext::cross(fn () => Call::query()->sole());
+    expect($call->department_id)->toBe($department->id)
+        ->and($call->department_widened)->toBe(! $member);
+})->with(['a member took it' => true, 'an outsider took it' => false]);
 
 // D8 — every other way to a desk asks with no department, exactly as before.
 

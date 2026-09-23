@@ -1406,6 +1406,11 @@ class CallToAgentFlow
                     // is for. "No choice made" when they reached this desk by missing the
                     // menu twice; null on every call that never met one.
                     'menu_choice' => $this->menuChoice,
+                    // Slice 7 (D6). Both paths need these: an answered call's row is
+                    // written by the agent's screen off this note, a missed one by
+                    // recordMissedCall.
+                    'department_id' => $this->departmentId,
+                    'department_widened' => $this->departmentWidened,
                     'arrived_at' => $arrivedAt,
                 ]);
             }),
@@ -1896,6 +1901,9 @@ class CallToAgentFlow
                 // AU-25. Null on every call that never met a menu, which is every call
                 // before slice 6.
                 'menu_choice' => $this->menuChoice,
+                // Slice 7 (D6): widened means the last agent rung came from outside it.
+                'department_id' => $this->departmentId,
+                'department_widened' => $this->departmentWidened,
             ])),
             function (Throwable $exception) use ($filedOutcome): void {
                 Log::warning('Missed-call record write failed — the caller will not appear in the missed-call list.', [

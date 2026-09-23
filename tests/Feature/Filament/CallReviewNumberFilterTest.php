@@ -6,6 +6,7 @@ use App\Filament\Resources\Calls\Pages\ListCalls;
 use App\Filament\Resources\Leads\Pages\ListLeads;
 use App\Models\Call;
 use App\Models\Campaign;
+use App\Models\Department;
 use App\Models\Lead;
 use App\Models\Tenant;
 use App\Tenancy\TenantContext;
@@ -85,4 +86,34 @@ it('filters from the query string the Leads History action builds', function () 
         ->filterTable($filter, $query['tableFilters'][$filter])
         ->assertCanSeeTableRecords([$theirs])
         ->assertCanNotSeeTableRecords([$someoneElse]);
+});
+
+// inbound-audio slice 7 (D6): "how many Hindi callers" is a filter on a link, not a label.
+it('narrows the call list to one department, and shows it with widened under it', function () {
+    $admin = callReviewHcUser(RoleName::HcAdmin->value);
+
+    [$widened, $notWidened, $noDepartment, $hindi] = TenantContext::run(
+        Tenant::factory()->create()->id,
+        function (): array {
+            $hindi = Department::factory()->create(['name' => 'Hindi']);
+
+            return [
+                Call::factory()->create(['department_id' => $hindi->id, 'department_widened' => true]),
+                Call::factory()->create(['department_id' => $hindi->id, 'department_widened' => false]),
+                Call::factory()->create(),
+                $hindi,
+            ];
+        },
+    );
+
+    $this->actingAs($admin);
+    TenantContext::applyWebRequest(null, crossTenant: true);
+
+    Livewire::test(ListCalls::class)
+        ->toggleAllTableColumns()
+        ->filterTable('department_id', $hindi->id)
+        ->assertCanSeeTableRecords([$widened, $notWidened])
+        ->assertCanNotSeeTableRecords([$noDepartment])
+        ->assertTableColumnStateSet('department.name', 'Hindi', $widened)
+        ->assertSeeText('Widened');
 });

@@ -5,6 +5,7 @@ use App\Enums\CallOutcome;
 use App\Enums\RoleName;
 use App\Models\Call;
 use App\Models\Campaign;
+use App\Models\Department;
 use App\Models\Disposition;
 use App\Models\Lead;
 use App\Models\Tenant;
@@ -662,4 +663,20 @@ it('keeps the row and the heading the same width when the call has no lead', fun
 
     expect(exportRows($tenant, $filters)[0])->toHaveCount(count(exportHeadings($tenant, $filters)))
         ->and(cell($tenant, exportRows($tenant, $filters)[0], 'Policy Number', $filters))->toBe('');
+});
+
+it('exports the department asked for and whether it widened, blank when none was asked for (slice 7)', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $hindi = Department::factory()->create(['name' => 'Hindi']);
+        Call::factory()->create(['department_id' => $hindi->id, 'department_widened' => true, 'created_at' => now()->subMinutes(3)]);
+        Call::factory()->create(['department_id' => $hindi->id, 'department_widened' => false, 'created_at' => now()->subMinutes(2)]);
+        Call::factory()->create(['created_at' => now()->subMinute()]);
+    });
+
+    $rows = exportRows($tenant);   // newest first
+
+    expect(array_map(fn (array $row): array => [cell($tenant, $row, 'Department'), cell($tenant, $row, 'Widened')], $rows))
+        ->toBe([['', ''], ['Hindi', 'No'], ['Hindi', 'Yes']]);
 });
