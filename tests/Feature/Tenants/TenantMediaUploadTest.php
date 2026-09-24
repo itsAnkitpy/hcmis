@@ -265,3 +265,75 @@ it('records who ticked the closed message\'s rights box, and when (AU-14)', func
         ->and($changes['attributes']['closed_message_rights_confirmed'] ?? null)->toBeTrue()
         ->and($changes['old']['closed_message_rights_confirmed'] ?? null)->toBeFalse();
 });
+
+// --- slice 8: the message pad's switch, which cannot be saved on without a greeting ---
+
+it('refuses to switch voicemail on when the client has no greeting (AU-34)', function () {
+    editClient(editableClient())
+        ->fillForm(['voicemail_enabled' => true])
+        ->call('save')
+        ->assertHasFormErrors(['voicemail_enabled']);
+});
+
+it('allows the voicemail switch and its greeting in the same save', function () {
+    $tenant = editableClient();
+
+    editClient($tenant)
+        ->fillForm([
+            'voicemail_enabled' => true,
+            'voicemail_greeting_upload' => UploadedFile::fake()->create('greeting.mp3', 200, 'audio/mpeg'),
+            'voicemail_greeting_rights_confirmed' => true,
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    Queue::assertPushed(
+        ConvertTenantMediaJob::class,
+        fn (ConvertTenantMediaJob $job): bool => $job->kind === TenantMedia::VoicemailGreeting,
+    );
+    expect($tenant->fresh()->voicemail_enabled)->toBeTrue();
+});
+
+it('allows the voicemail switch when the client already has a greeting', function () {
+    $tenant = editableClient([
+        'voicemail_greeting_path' => 'voicemail-greeting/1/'.str_repeat('a', 64).'.wav',
+    ]);
+
+    editClient($tenant)
+        ->fillForm(['voicemail_enabled' => true])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($tenant->fresh()->voicemail_enabled)->toBeTrue();
+});
+
+it('records who switched voicemail on, and when', function () {
+    $tenant = editableClient([
+        'voicemail_greeting_path' => 'voicemail-greeting/1/'.str_repeat('a', 64).'.wav',
+    ]);
+
+    editClient($tenant)
+        ->fillForm(['voicemail_enabled' => true])
+        ->call('save');
+
+    $entry = TenantContext::cross(fn () => ActivityLog::query()
+        ->where('log_name', 'tenant')
+        ->where('subject_id', $tenant->id)
+        ->where('event', 'updated')
+        ->latest('id')
+        ->first());
+    $changes = $entry?->attribute_changes ?? [];
+
+    expect($entry?->causer_id)->toBe($this->admin->id)
+        ->and($changes['attributes']['voicemail_enabled'] ?? null)->toBeTrue()
+        ->and($changes['old']['voicemail_enabled'] ?? null)->toBeFalse();
+});
+
+it('offers no greeting to the call flow until the switch is on and the file has converted', function () {
+    $greeting = 'voicemail-greeting/1/'.str_repeat('a', 64).'.wav';
+
+    expect(editableClient(['voicemail_greeting_path' => $greeting])->voicemailGreetingUrl())->toBeNull()
+        ->and(editableClient(['voicemail_enabled' => true])->voicemailGreetingUrl())->toBeNull()
+        ->and(editableClient(['voicemail_enabled' => true, 'voicemail_greeting_path' => $greeting])->voicemailGreetingUrl())
+        ->toContain('/voicemail-greeting/');
+});

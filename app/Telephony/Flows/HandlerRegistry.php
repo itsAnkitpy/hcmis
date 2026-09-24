@@ -28,4 +28,11 @@ interface HandlerRegistry
      * RecordingFinished that arrives after this handler is gone still merges (FD-4).
      */
     public function depositMerge(string $callId, RecordingSession $recording): void;
+
+    /**
+     * Hand a message being recorded to the switchboard (inbound-audio slice 8), for the
+     * same reason: the caller hanging up mid-message ends the handler before the engine
+     * reports the file.
+     */
+    public function depositVoicemail(string $recordingName, string $ticket): void;
 }

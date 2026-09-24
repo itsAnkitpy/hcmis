@@ -210,4 +210,12 @@ interface TelephonyProvider
      * proven in the lab; lets the app server live apart from the voice box.
      */
     public function fetchRecording(string $recordingName): string;
+
+    /**
+     * Record a caller's message on their own leg, with the engine's own stops
+     * (inbound-audio slice 8, AU-30): a beep first, then up to three minutes, ended by a
+     * hang-up, the # key or five seconds of silence. The finish arrives later as a
+     * RecordingFinished event carrying the seconds of speech (AU-31).
+     */
+    public function recordMessage(string $legId, string $name): void;
 }

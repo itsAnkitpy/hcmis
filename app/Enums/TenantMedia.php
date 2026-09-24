@@ -43,6 +43,9 @@ enum TenantMedia: string
     /** The "thanks for waiting" announcement (slice 5, AU-15). Played every 60s of waiting. */
     case WaitingMessage = 'waiting-message';
 
+    /** The message pad's greeting, played before the beep (slice 8, AU-34). */
+    case VoicemailGreeting = 'voicemail-greeting';
+
     /** A menu's greeting (slice 6, AU-17). Lives on the menu row, not the client. */
     case MenuGreeting = 'menu-greeting';
 
@@ -59,7 +62,7 @@ enum TenantMedia: string
      */
     public static function clientKinds(): array
     {
-        return [self::HoldMusic, self::ClosedMessage, self::WaitingMessage];
+        return [self::HoldMusic, self::ClosedMessage, self::WaitingMessage, self::VoicemailGreeting];
     }
 
     /** Is this sound found by a column on the client row, rather than on a menu? */
@@ -75,6 +78,7 @@ enum TenantMedia: string
             self::HoldMusic => 'hold_music_path',
             self::ClosedMessage => 'closed_message_path',
             self::WaitingMessage => 'waiting_message_path',
+            self::VoicemailGreeting => 'voicemail_greeting_path',
             self::MenuGreeting, self::MenuOption => throw new LogicException(self::NOT_ON_A_CLIENT),
         };
     }
@@ -86,6 +90,7 @@ enum TenantMedia: string
             self::HoldMusic => 'hold_music_rights_confirmed',
             self::ClosedMessage => 'closed_message_rights_confirmed',
             self::WaitingMessage => 'waiting_message_rights_confirmed',
+            self::VoicemailGreeting => 'voicemail_greeting_rights_confirmed',
             self::MenuGreeting, self::MenuOption => throw new LogicException(self::NOT_ON_A_CLIENT),
         };
     }
@@ -97,6 +102,7 @@ enum TenantMedia: string
             self::HoldMusic => 'hold_music_upload',
             self::ClosedMessage => 'closed_message_upload',
             self::WaitingMessage => 'waiting_message_upload',
+            self::VoicemailGreeting => 'voicemail_greeting_upload',
             self::MenuGreeting, self::MenuOption => throw new LogicException(self::NOT_ON_A_CLIENT),
         };
     }
@@ -115,6 +121,7 @@ enum TenantMedia: string
             self::HoldMusic => 0,
             self::ClosedMessage => 1,
             self::WaitingMessage => 1,
+            self::VoicemailGreeting => 1,
             // Both are speech, so both get the second that stops a handset clipping the
             // last word (S165). Nothing on a menu loops.
             self::MenuGreeting, self::MenuOption => 1,

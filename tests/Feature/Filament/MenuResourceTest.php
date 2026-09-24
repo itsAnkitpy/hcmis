@@ -106,6 +106,8 @@ it('saves keys onto the menu, and the edit page mounts with them', function () {
             'options' => [
                 ['key' => '1', 'label' => 'Sales', 'action' => MenuAction::TalkToAgent->value],
                 ['key' => '9', 'label' => 'Take me off your list', 'action' => MenuAction::RemoveFromList->value],
+                // Slice 8 (review S175, handoff question 4): no upload, no tick box.
+                ['key' => '3', 'label' => 'Leave a message', 'action' => MenuAction::LeaveMessage->value],
             ],
         ])
         ->call('save')
@@ -116,6 +118,7 @@ it('saves keys onto the menu, and the edit page mounts with them', function () {
     expect($menu->name)->toBe('Main menu')
         ->and($menu->optionFor('1')['label'])->toBe('Sales')
         ->and($menu->optionFor('9')['action'])->toBe(MenuAction::RemoveFromList->value)
+        ->and($menu->optionFor('3'))->toMatchArray(['action' => 'voicemail', 'sound_path' => null])
         ->and($menu->optionFor('5'))->toBeNull();
 
     // The mount is the point: a repeater over a JSON column that cannot round-trip

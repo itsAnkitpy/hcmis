@@ -207,6 +207,27 @@ class AsteriskAriProvider implements TelephonyProvider
         return $this->command('GET', "/recordings/stored/{$recordingName}/file")->body();
     }
 
+    /**
+     * 🔴 `maxSilenceSeconds` IS NOT ONLY A STOP. The finished event carries
+     * `talking_duration` only when it is non-zero (20 branch `recordings.json`), and AU-31
+     * drops empty messages on that number — so it must never be sent as 0.
+     *
+     * The line must not be in a bridge: the engine refuses ("Cannot record channel while
+     * in bridge", `res_stasis_recording.c`). Every way in reaches here before any bridge.
+     */
+    public function recordMessage(string $legId, string $name): void
+    {
+        $this->command('POST', "/channels/{$legId}/record", [
+            'name' => $name,
+            'format' => 'wav',
+            'maxDurationSeconds' => 180,
+            'maxSilenceSeconds' => 5,
+            'terminateOn' => '#',
+            'beep' => 'true',
+            'ifExists' => 'overwrite',
+        ]);
+    }
+
     public function snoop(string $legId, string $spy, string $whisper = 'none'): string
     {
         $params = [

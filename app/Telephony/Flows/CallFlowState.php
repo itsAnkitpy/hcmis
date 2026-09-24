@@ -115,4 +115,16 @@ enum CallFlowState
      * no ending can lose it — the same discipline slice 4 uses at the door.
      */
     case PlayingMenuMessage;
+
+    /**
+     * The caller is at the message pad (inbound-audio slice 8, AU-29, AU-30): hearing the
+     * client's greeting, then being recorded after the beep. Reached after the closed
+     * message, at the hold limit (inbound callers only), or from the menu's voicemail key.
+     *
+     * 🔴 A DEAD END. The missed row is already written — at the door, at the hold limit or
+     * at the key — so no ending can lose the caller. The recording's own finish belongs to
+     * the SWITCHBOARD, not to this state: a caller who hangs up mid-message ends this
+     * handler before the engine reports the file (FD-4's reason).
+     */
+    case LeavingMessage;
 }

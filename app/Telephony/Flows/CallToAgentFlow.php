@@ -106,6 +106,15 @@ class CallToAgentFlow
     /** What AU-25 saves for a caller who reached a desk by missing the menu twice. */
     private const NO_CHOICE_MADE = 'No choice made';
 
+    /**
+     * How long a caller may spend at the message pad before the sweep drops the line
+     * (slice 8). Counted twice: from the pad opening, for a greeting that never reports
+     * finishing, and again from the beep, for the three-minute message (AU-30) with room
+     * to spare. Only a lost finish event ever reaches it. A greeting over five minutes
+     * would be cut; the upload checks size, not length (review S175 F2).
+     */
+    private const MESSAGE_PAD_LIMIT_SECONDS = 300;
+
     private CallFlowState $state = CallFlowState::Idle;
 
     private ?string $callerLegId = null;
@@ -234,6 +243,19 @@ class CallToAgentFlow
      * nothing to stop when a desk frees up.
      */
     private ?string $waitingMessagePlaybackId = null;
+
+    /**
+     * The message pad's greeting (inbound-audio slice 8), read from the same client row as
+     * the other sounds. Null means this client takes no messages — switched off, or the
+     * greeting still converting — and null keeps every caller on today's ending (AU-29).
+     */
+    private ?string $voicemailGreetingUrl = null;
+
+    /** The greeting playing at the message pad, matched by id like every other sound. */
+    private ?string $voicemailPlaybackId = null;
+
+    /** When the message pad opened, for the sweep's backstop against a lost finish. */
+    private ?Carbon $messagePadOpenedAt = null;
 
     /**
      * When this caller last heard the waiting announcement. Null until the first one, and
@@ -1034,6 +1056,7 @@ class CallToAgentFlow
             MenuAction::RingDepartment => $this->leaveMenuForADepartment($label, $option),
             MenuAction::HearMessage => $this->serveTheCallerAndEnd($label, $this->menu?->soundUrlFor($option)),
             MenuAction::RemoveFromList => $this->removeTheCallerFromTheList($label, $option),
+            MenuAction::LeaveMessage => $this->leaveMenuForTheMessagePad($label),
         };
     }
 
@@ -1068,6 +1091,26 @@ class CallToAgentFlow
         $this->departmentChosenAt = now();
 
         $this->leaveMenuForADesk($choice);
+    }
+
+    /**
+     * The menu's voicemail key (slice 8, AU-29). The row is written at the key, before a
+     * sound plays, with a reason that keeps it ON Missed Calls — the caller still wants
+     * ringing back. A client with voicemail off sends the caller to a desk instead: a
+     * caller is never stranded by a key.
+     */
+    private function leaveMenuForTheMessagePad(string $choice): void
+    {
+        if (! $this->offersTheMessagePad()) {
+            $this->leaveMenuForADesk($choice);
+
+            return;
+        }
+
+        $this->menuChoice = $choice;
+        $this->menuPlaybackId = null;
+        $this->recordMissedCall(CallOutcome::NoAnswer, MissedReason::AskedForVoicemail);
+        $this->openTheMessagePad('from the menu');
     }
 
     /**
@@ -1151,6 +1194,7 @@ class CallToAgentFlow
         $this->maxHoldSeconds = $tenant?->maxHoldSeconds();
         $this->holdMusicClass = $tenant?->holdMusicClass();
         $this->waitingMessageUrl = $tenant?->waitingMessageUrl();
+        $this->voicemailGreetingUrl = $tenant?->voicemailGreetingUrl();
         $this->departmentWaitSeconds = $tenant?->departmentWaitSeconds();
 
         return $tenant;
@@ -1537,6 +1581,18 @@ class CallToAgentFlow
 
     private function sweepThisCall(): void
     {
+        // Slice 8: the switchboard hangs up once the message finishes, and the engine caps
+        // a message at three minutes. This is the net under a lost finish event, for the
+        // same reason as the menu's arm below: a caller must never be left on a live line
+        // with no ending at all.
+        if ($this->state === CallFlowState::LeavingMessage) {
+            if ($this->messagePadOpenedAt?->copy()->addSeconds(self::MESSAGE_PAD_LIMIT_SECONDS)->isPast()) {
+                $this->endTheMessagePad('the message pad ran past its limit');
+            }
+
+            return;
+        }
+
         // The client's maximum hold is read while a desk is RINGING too (S88 review #4).
         // It used to be read only while the caller was waiting, so a ring already running
         // when the cap passed always ran to its own end first — the configured maximum
@@ -1790,8 +1846,128 @@ class CallToAgentFlow
         ]);
 
         rescue(fn () => $this->releaseAllReservations(), report: false);
+
+        // Slice 8 (AU-29): an inbound caller of a client taking messages keeps their line
+        // and goes to the message pad. Only the desk mid-ring is dropped. A customer the
+        // dialer rang never reaches this branch (S163) — see offersTheMessagePad().
+        if ($this->offersTheMessagePad()) {
+            foreach (array_keys($this->agents) as $agentLegId) {
+                rescue(fn () => $this->telephony->hangup($agentLegId), report: false);
+            }
+
+            $this->recordMissedCall(CallOutcome::NoAnswer);
+            $this->openTheMessagePad('at the hold limit');
+
+            return;
+        }
+
         $this->hangupHeldLegs();
         $this->recordMissedCall(CallOutcome::NoAnswer);
+        $this->dispose();
+    }
+
+    /**
+     * Can this caller leave a message (AU-29)? The client must have voicemail on with its
+     * greeting converted, and the caller must have rung US: a customer the dialer rang
+     * keeps today's ending at the hold limit, hung up and filed `abandoned` (S163).
+     */
+    private function offersTheMessagePad(): bool
+    {
+        return $this->voicemailGreetingUrl !== null
+            && $this->dialedLeadId === null
+            && $this->callerLegId !== null;
+    }
+
+    /**
+     * Open the message pad: silence the waiting area and play the client's greeting. The
+     * beep and the recording start when the greeting finishes (onPlaybackFinished).
+     *
+     * The music and the menu are stopped outright rather than left to the greeting to
+     * interrupt, so nothing of the waiting area can sound over the message. The engine
+     * queues a new sound behind one still playing, so an unstopped menu would run to its
+     * end first — a caller timed out mid-menu would hear keys that no longer work (S175 F1).
+     *
+     * A refusal means the caller has gone or the file cannot be fetched. Either way the
+     * row is already written, so the line is dropped and nothing is lost.
+     */
+    private function openTheMessagePad(string $from): void
+    {
+        $this->state = CallFlowState::LeavingMessage;
+        $this->messagePadOpenedAt = now();
+        $this->stopWaitingMessage();
+        $this->stopMenuSound();
+
+        try {
+            $this->stopHoldMusicIfPlaying();
+            $this->voicemailPlaybackId = $this->telephony->play((string) $this->callerLegId, [(string) $this->voicemailGreetingUrl]);
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException $exception) {
+            $this->endTheMessagePad('the greeting could not be played', $exception->getMessage());
+
+            return;
+        }
+
+        Log::info('Inbound call: the caller is at the message pad, hearing the greeting.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+            'from' => $from,
+            'playback' => $this->voicemailPlaybackId,
+        ]);
+    }
+
+    /**
+     * The greeting finished: record after the beep (AU-30), and hand the recording to the
+     * switchboard, which owns its finish.
+     *
+     * 🔴 THE ENGINE REPORTS A SOUND'S END BEFORE THE LEG'S END (S170 bug 4). A caller who
+     * hangs up mid-greeting lands here first, and the record request is refused because
+     * the line is gone. That refusal is the ordinary way this path hears the hang-up.
+     */
+    private function startTheMessage(): void
+    {
+        $recordingName = 'voicemail-'.$this->ticketNumber;
+
+        try {
+            $this->telephony->recordMessage((string) $this->callerLegId, $recordingName);
+        } catch (AriConnectionLost $exception) {
+            throw $exception;
+        } catch (TelephonyException $exception) {
+            $this->endTheMessagePad('the recording could not be started', $exception->getMessage());
+
+            return;
+        }
+
+        $this->registry->depositVoicemail($recordingName, (string) $this->ticketNumber);
+
+        // The pad's clock restarts at the beep, so a long greeting never eats the
+        // caller's three minutes (review S175 F2).
+        $this->messagePadOpenedAt = now();
+
+        Log::info('Inbound call: recording the caller\'s message.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+            'recording' => $recordingName,
+        ]);
+    }
+
+    /** Drop the line and forget the call. The missed row was written before the pad opened. */
+    private function endTheMessagePad(string $why, ?string $error = null): void
+    {
+        Log::info('Inbound call: the message pad ended without a message being recorded.', [
+            'ticket' => $this->ticketNumber,
+            'tenant' => $this->tenantId,
+            'caller' => $this->callerLegId,
+            'why' => $why,
+            'error' => $error,
+        ]);
+
+        if ($this->callerLegId !== null) {
+            rescue(fn () => $this->telephony->hangup((string) $this->callerLegId), report: false);
+        }
+
         $this->dispose();
     }
 
@@ -2766,6 +2942,16 @@ class CallToAgentFlow
             return;
         }
 
+        // The message pad's greeting finished (slice 8): the beep and the recording follow.
+        if ($this->state === CallFlowState::LeavingMessage
+            && $this->voicemailPlaybackId !== null
+            && $playbackId === $this->voicemailPlaybackId) {
+            $this->voicemailPlaybackId = null;
+            $this->startTheMessage();
+
+            return;
+        }
+
         // A chosen key's own sound finished, and that key ends the call (AU-17, AU-28).
         // The call record was written the moment the key was taken, so there is nothing
         // left to do but hang up.
@@ -2798,6 +2984,15 @@ class CallToAgentFlow
             return;
         }
 
+        // Slice 8 (AU-29): a client taking messages hands the caller to the message pad
+        // instead of hanging up. The row was written at the door, before a sound played.
+        if ($this->offersTheMessagePad()) {
+            $this->closedMessagePlaybackId = null;
+            $this->openTheMessagePad('after the closed message');
+
+            return;
+        }
+
         Log::info('Inbound call: the closed message finished — ending the call.', [
             'ticket' => $this->ticketNumber,
             'tenant' => $this->tenantId,
@@ -2820,6 +3015,17 @@ class CallToAgentFlow
         // Missed Calls row is already written — the door wrote it before a single sound
         // played, precisely so this path never has to.
         if ($this->state === CallFlowState::PlayingClosedMessage) {
+            if ($legId === $this->callerLegId) {
+                $this->dispose();
+            }
+
+            return;
+        }
+
+        // The caller hung up at the message pad, mid-greeting or mid-message, or the
+        // switchboard hung up after the message finished (slice 8). The row was written
+        // before the pad opened, and the recording's finish is the switchboard's.
+        if ($this->state === CallFlowState::LeavingMessage) {
             if ($legId === $this->callerLegId) {
                 $this->dispose();
             }
@@ -3334,6 +3540,9 @@ class CallToAgentFlow
         $this->waitingMessageUrl = null;
         $this->waitingMessagePlaybackId = null;
         $this->lastWaitingMessageAt = null;
+        $this->voicemailGreetingUrl = null;
+        $this->voicemailPlaybackId = null;
+        $this->messagePadOpenedAt = null;
         $this->menu = null;
         $this->menuPlaybackId = null;
         $this->menuReplayed = false;

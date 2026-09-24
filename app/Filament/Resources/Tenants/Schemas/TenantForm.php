@@ -111,6 +111,25 @@ class TenantForm
 
                 TenantMediaSection::make(TenantMedia::WaitingMessage),
 
+                // inbound-audio slice 8 (AU-29, AU-34). A real, audited column — see the
+                // migration. Same rule as "closed means a message": no greeting, no
+                // switch, and the file uploaded in this very save counts.
+                TenantMediaSection::make(TenantMedia::VoicemailGreeting, [
+                    Toggle::make('voicemail_enabled')
+                        ->label('Take messages')
+                        ->rules([
+                            fn (Get $get, ?Tenant $record): Closure => function (string $attribute, mixed $value, Closure $fail) use ($get, $record): void {
+                                if (! $value
+                                    || filled($get(TenantMedia::VoicemailGreeting->uploadField()))
+                                    || filled($record?->voicemail_greeting_path)) {
+                                    return;
+                                }
+
+                                $fail('Upload a greeting below before switching voicemail on.');
+                            },
+                        ]),
+                ]),
+
                 // call-export.md CE-10. Same reasoning as the waiting-room settings
                 // above: a real column, blank means the system default, and the change
                 // reaches the audit trail — because changing this moves calls between

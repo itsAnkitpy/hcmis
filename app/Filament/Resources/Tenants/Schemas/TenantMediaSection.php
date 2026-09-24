@@ -9,6 +9,7 @@ use App\Models\Tenant;
 use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Placeholder;
+use Filament\Schemas\Components\Component;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Illuminate\Support\HtmlString;
@@ -28,11 +29,16 @@ use Illuminate\Support\Str;
  */
 class TenantMediaSection
 {
-    public static function make(TenantMedia $kind): Section
+    /**
+     * @param  array<int, Component>  $leading  fields the sound's own setting needs above its upload (slice 8's switch)
+     */
+    public static function make(TenantMedia $kind, array $leading = []): Section
     {
         return Section::make(self::title($kind))
             ->description(self::description($kind))
             ->schema([
+                ...$leading,
+
                 // The field is deliberately never pre-filled with the current file:
                 // it means "replace this sound", and the player below is what shows
                 // what is in use today. Filling it would also push Filament to build
@@ -96,6 +102,7 @@ class TenantMediaSection
             TenantMedia::HoldMusic => 'Upload music',
             TenantMedia::ClosedMessage => 'Upload the message',
             TenantMedia::WaitingMessage => 'Upload the message',
+            TenantMedia::VoicemailGreeting => 'Upload the greeting',
         };
     }
 
@@ -105,6 +112,7 @@ class TenantMediaSection
             TenantMedia::HoldMusic => 'Hold music',
             TenantMedia::ClosedMessage => 'Closed message',
             TenantMedia::WaitingMessage => 'Waiting message',
+            TenantMedia::VoicemailGreeting => 'Voicemail',
         };
     }
 
@@ -114,6 +122,7 @@ class TenantMediaSection
             TenantMedia::HoldMusic => 'What a caller hears while they wait for an agent. Leave empty and they hear the standard music.',
             TenantMedia::ClosedMessage => 'What a caller hears outside business hours when "When closed" is set to play a message. The call ends once it has played.',
             TenantMedia::WaitingMessage => 'What a waiting caller hears every minute while they hold. The music pauses for it and resumes afterwards. Leave empty and they hear music only.',
+            TenantMedia::VoicemailGreeting => 'Off until you switch it on. Then a caller can leave a message after the closed message, when the maximum hold runs out, or from a menu key. They hear this greeting, a beep, and have up to three minutes. Messages play from Missed Calls.',
         };
     }
 
@@ -123,6 +132,7 @@ class TenantMediaSection
             TenantMedia::HoldMusic => 'Hold music',
             TenantMedia::ClosedMessage => 'The closed message',
             TenantMedia::WaitingMessage => 'The waiting message',
+            TenantMedia::VoicemailGreeting => 'The greeting',
         };
     }
 
@@ -132,6 +142,7 @@ class TenantMediaSection
             TenantMedia::HoldMusic => 'We have the rights to play this music to callers',
             TenantMedia::ClosedMessage => 'We have the right to play this recording to callers',
             TenantMedia::WaitingMessage => 'We have the right to play this recording to callers',
+            TenantMedia::VoicemailGreeting => 'We have the right to play this recording to callers',
         };
     }
 
@@ -141,6 +152,7 @@ class TenantMediaSection
             TenantMedia::HoldMusic => 'Confirm you have the rights to play this music to callers.',
             TenantMedia::ClosedMessage => 'Confirm you have the right to play this recording to callers.',
             TenantMedia::WaitingMessage => 'Confirm you have the right to play this recording to callers.',
+            TenantMedia::VoicemailGreeting => 'Confirm you have the right to play this recording to callers.',
         };
     }
 
@@ -150,6 +162,7 @@ class TenantMediaSection
             TenantMedia::HoldMusic => 'On-hold music is licensable in India in its own right — IPRS names "Music on Hold" in its own tariff. Ticking this is recorded against your name.',
             TenantMedia::ClosedMessage => 'A recording of your own words needs nothing else. If it contains music or anything you did not record, you need the rights to it. Ticking this is recorded against your name.',
             TenantMedia::WaitingMessage => 'A recording of your own words needs nothing else. If it contains music or anything you did not record, you need the rights to it. Ticking this is recorded against your name.',
+            TenantMedia::VoicemailGreeting => 'A recording of your own words needs nothing else. If it contains music or anything you did not record, you need the rights to it. Ticking this is recorded against your name.',
         };
     }
 }

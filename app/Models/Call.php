@@ -251,6 +251,37 @@ class Call extends Model
     }
 
     /**
+     * The agents' callback list (Missed Calls): inbound, no agent, a missed outcome, and a
+     * reason that shows there. The ONE definition — the page lists with it and CallPolicy
+     * lets an agent play a row's voicemail with it (review S175 F6), so the two cannot
+     * drift apart.
+     *
+     * 🔴 THE OUTCOME IS NO LONGER THE WHOLE ANSWER (inbound-audio slice 6, AUQ-3).
+     * A caller who pressed "hear a message" or "take me off your list" got exactly
+     * what they rang for, and gets a call record so reports can say why people
+     * ring — but nobody needs to ring them back, so they must never reach this
+     * list. The reason says which is which, and it is asked rather than listed
+     * here so a reason added later cannot quietly leak onto an agent's queue.
+     *
+     * 🔴 THE NULL BRANCH IS NOT OPTIONAL. Most missed calls carry no reason at
+     * all, and in SQL `NULL NOT IN (…)` is NULL, which is not true — so a bare
+     * NOT IN would have hidden every ordinary missed call and emptied this screen.
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
+     */
+    public function scopeOnMissedCalls(Builder $query): Builder
+    {
+        return $query
+            ->where('direction', CallDirection::Inbound)
+            ->whereNull('agent_id')
+            ->whereIn('outcome', [CallOutcome::Abandoned->value, CallOutcome::NoAnswer->value])
+            ->where(fn (Builder $query) => $query
+                ->whereNull('missed_reason')
+                ->orWhereNotIn('missed_reason', MissedReason::hiddenFromMissedCalls()));
+    }
+
+    /**
      * CH-1 — every call to or from one customer's number, newest first. The ONE
      * definition of "this number's history", shared by the agent console's ring-time
      * panel (CH-2) and the Call Review number filter (CH-3), so the two screens can

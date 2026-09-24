@@ -27,12 +27,16 @@ enum MissedReason: string
     /** Chose a key that answered them and ended the call (AU-26). Kept off the list. */
     case ServedByMenu = 'served_by_menu';
 
+    /** Pressed the menu's voicemail key (slice 8). Belongs on the list: the message is there. */
+    case AskedForVoicemail = 'asked_for_voicemail';
+
     public function label(): string
     {
         return match ($this) {
             self::ClosedHours => 'Called while closed',
             self::HungUpInMenu => 'Hung up in the menu',
             self::ServedByMenu => 'Served by the menu',
+            self::AskedForVoicemail => 'Asked to leave a message',
         };
     }
 

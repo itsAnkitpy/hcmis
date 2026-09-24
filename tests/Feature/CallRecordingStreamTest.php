@@ -1,5 +1,8 @@
 <?php
 
+use App\Enums\CallDirection;
+use App\Enums\CallOutcome;
+use App\Enums\MissedReason;
 use App\Enums\RoleName;
 use App\Models\ActivityLog;
 use App\Models\Call;
@@ -120,6 +123,73 @@ it('forbids an agent from a colleague\'s call in the same client (MD-1)', functi
     putRecordingFor($call);
 
     $this->actingAs($agent)
+        ->get(route('calls.recording', $call))
+        ->assertForbidden();
+});
+
+// --- inbound-audio slice 8 (AU-33): an agent plays a caller's voicemail, never downloads it ---
+
+/** A missed inbound row carrying a voicemail, the shape the message pad leaves. */
+function voicemailRow(Tenant $tenant, array $attributes = []): Call
+{
+    return TenantContext::run($tenant->id, fn (): Call => Call::factory()->withRecording()->inbound()->create(array_merge([
+        'outcome' => CallOutcome::NoAnswer,
+        'agent_id' => null,
+        'missed_reason' => MissedReason::AskedForVoicemail,
+    ], $attributes)));
+}
+
+it('streams a caller\'s voicemail to any agent of the client and audits the listen (AU-33)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $call = voicemailRow($tenant);
+    putRecordingFor($call);
+
+    $this->actingAs($agent)
+        ->get(route('calls.recording', $call))
+        ->assertOk()
+        ->assertHeader('content-type', 'audio/mpeg');
+
+    expect(recordingAccessCount($call, $tenant))->toBe(1);
+});
+
+it('forbids an agent from downloading a voicemail (AU-33 — play only)', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $call = voicemailRow($tenant);
+    putRecordingFor($call);
+
+    $this->actingAs($agent)
+        ->get(route('calls.recording', ['record' => $call, 'download' => 1]))
+        ->assertForbidden();
+});
+
+it('keeps the agent exception to rows on Missed Calls', function (array $attributes) {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+    $call = voicemailRow($tenant, $attributes);
+    putRecordingFor($call);
+
+    $this->actingAs($agent)
+        ->get(route('calls.recording', $call))
+        ->assertForbidden();
+})->with([
+    'answered' => [['outcome' => CallOutcome::Answered]],
+    'outbound' => [['direction' => CallDirection::Outbound]],
+    'served by the menu' => [['missed_reason' => MissedReason::ServedByMenu]],
+]);
+
+it('keeps the exception to agents — a client user still cannot play a voicemail', function () {
+    Storage::fake('recordings');
+    $tenant = Tenant::factory()->create();
+    $clientUser = clientUserWithRole($tenant, RoleName::ClientUser->value);
+    $call = voicemailRow($tenant);
+    putRecordingFor($call);
+
+    $this->actingAs($clientUser)
         ->get(route('calls.recording', $call))
         ->assertForbidden();
 });

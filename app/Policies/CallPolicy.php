@@ -15,7 +15,9 @@ use App\Models\User;
  *
  * The one row-based exception (My Day MD-1): an agent may `view` — and therefore
  * stream — a call they personally handled, so their own-day page can play their
- * own recordings (every listen audited, HD-3). `viewAny` stays auditor-only, so
+ * own recordings (every listen audited, HD-3). The second (inbound-audio slice 8,
+ * AU-33): an agent may play a caller's voicemail — a row on Missed Calls, which has no
+ * agent by definition, so "own call" could never reach it. `viewAny` stays auditor-only, so
  * the Call Review screen itself never opens to agents, and `download` is a
  * separate auditor-only ability (MD-4: play-only for agents).
  *
@@ -35,7 +37,9 @@ class CallPolicy
 
     public function view(User $user, Call $call): bool
     {
-        return $this->canRead($user) || $this->isOwnCall($user, $call);
+        return $this->canRead($user)
+            || $this->isOwnCall($user, $call)
+            || $this->isMissedCallForAnAgent($user, $call);
     }
 
     /** MD-4: a file leaving the system is auditor-only; agents get in-page play. */
@@ -71,6 +75,17 @@ class CallPolicy
                 RoleName::TeamLeader->value,
                 RoleName::Qc->value,
             ]);
+    }
+
+    /**
+     * AU-33: a row on the agents' own callback list, asked of the list's own definition
+     * (review S175 F6). Play only: `download` above never reads this. The only such row
+     * with a file is a voicemail. The role goes first so nobody else costs a query.
+     */
+    protected function isMissedCallForAnAgent(User $user, Call $call): bool
+    {
+        return $user->hasRole(RoleName::Agent->value)
+            && Call::query()->onMissedCalls()->whereKey($call->getKey())->exists();
     }
 
     /** MD-1: the agent on the call, and still holding the Agent role. */

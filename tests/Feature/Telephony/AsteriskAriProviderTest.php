@@ -284,6 +284,26 @@ it('stops both sides of a recording and releases the snoop legs', function () {
         && str_contains($request->url(), '/channels/snoop-heard'));
 });
 
+it('records a caller\'s message on their own leg with the engine\'s stops (slice 8, AU-30)', function () {
+    Http::fake(['*' => Http::response(null, 201)]);
+
+    $this->telephony->recordMessage('leg-caller', 'voicemail-ticket-1');
+
+    // 🔴 maxSilenceSeconds is also what makes the finish carry talking_duration, which
+    // AU-31's empty-message drop reads — never 0.
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && str_contains($request->url(), '/channels/leg-caller/record')
+        && ariParams($request) === [
+            'name' => 'voicemail-ticket-1',
+            'format' => 'wav',
+            'maxDurationSeconds' => '180',
+            'maxSilenceSeconds' => '5',
+            'terminateOn' => '#',
+            'beep' => 'true',
+            'ifExists' => 'overwrite',
+        ]);
+});
+
 it('fetches a stored recording as raw bytes', function () {
     Http::fake(['*' => Http::response('RIFF-wav-bytes')]);
 

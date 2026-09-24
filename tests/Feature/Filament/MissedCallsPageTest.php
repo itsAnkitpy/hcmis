@@ -199,3 +199,38 @@ it('says how each caller was lost in plain words (QD-6)', function () {
             ->and($page->reasonFor(missedCall(['outcome' => CallOutcome::Abandoned, 'missed_reason' => MissedReason::HungUpInMenu])))->toBe('Hung up in the menu');
     });
 });
+
+// --- inbound-audio slice 8: the message on the row, and the filter (AU-32) ---
+
+it('filters the list down to callers who left a message (AU-32)', function () {
+    $tenant = Tenant::factory()->create();
+
+    TenantContext::run($tenant->id, function (): void {
+        $withMessage = missedCall(['recording_disk' => 'recordings', 'recording_path' => 'recordings/voicemail-1.mp3']);
+        $withoutMessage = missedCall();
+
+        $page = new MissedCalls;
+        expect($page->missedCalls()->pluck('id'))->toContain($withMessage->id)->toContain($withoutMessage->id);
+
+        $page->onlyWithVoicemail = true;
+        expect($page->missedCalls()->pluck('id')->all())->toBe([$withMessage->id]);
+    });
+});
+
+it('gives an agent a play button on a caller\'s message, and no download link (AU-33)', function () {
+    $tenant = Tenant::factory()->create();
+    $agent = clientUserWithRole($tenant, RoleName::Agent->value);
+
+    $call = TenantContext::run($tenant->id, fn (): Call => missedCall([
+        'recording_disk' => 'recordings',
+        'recording_path' => 'recordings/voicemail-1.mp3',
+        'missed_reason' => MissedReason::AskedForVoicemail,
+    ]));
+
+    // Mounting the page is also the strictAuthorization() check (S170 bug 1).
+    $this->actingAs($agent)->get('/admin/missed-calls')
+        ->assertSuccessful()
+        ->assertSee(route('calls.recording', $call), escape: false)
+        ->assertDontSee('download=1', escape: false)
+        ->assertSee('Asked to leave a message');
+});

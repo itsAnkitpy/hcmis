@@ -7,9 +7,6 @@ namespace App\Enums;
 /**
  * What one key on a client's menu does (inbound-audio AU-17).
  *
- * Voicemail lands with slice 8 and is deliberately absent rather than present-and-broken
- * — a key a client can pick that does nothing is worse than a key they cannot pick yet.
- *
  * 🔴 THE VALUE IS STORED INSIDE `menus.options`, so renaming a case rewrites every
  * client's saved menu. Treat it as shipped the moment it reaches staging.
  */
@@ -30,6 +27,12 @@ enum MenuAction: string
     /** Add the caller to this client's do-not-call list, then end the call (AU-28). */
     case RemoveFromList = 'remove';
 
+    /**
+     * Take the caller to the message pad (slice 8, AU-29). No sound of its own: the
+     * greeting is the client's. A client with voicemail off sends the caller to a desk.
+     */
+    case LeaveMessage = 'voicemail';
+
     public function label(): string
     {
         return match ($this) {
@@ -37,6 +40,7 @@ enum MenuAction: string
             self::RingDepartment => 'Ring a department',
             self::HearMessage => 'Hear a message, then the call ends',
             self::RemoveFromList => 'Take me off your call list',
+            self::LeaveMessage => 'Leave a message (needs the client\'s voicemail on)',
         };
     }
 
@@ -55,16 +59,12 @@ enum MenuAction: string
 
     /**
      * Does the caller get what they rang for, so the call ends here rather than going
-     * to a desk? These keep them OFF Missed Calls (AU-26).
+     * to a desk? These keep them OFF Missed Calls (AU-26), and they are the keys with a
+     * sound of their own. A message left is NOT one: the caller still wants ringing back
+     * (AU-32), and the greeting belongs to the client.
      */
     public function servesCaller(): bool
     {
-        return ! $this->goesToADesk();
-    }
-
-    /** Does this key end at an agent's desk rather than ending the call? */
-    public function goesToADesk(): bool
-    {
-        return in_array($this, [self::TalkToAgent, self::RingDepartment], true);
+        return in_array($this, [self::HearMessage, self::RemoveFromList], true);
     }
 }

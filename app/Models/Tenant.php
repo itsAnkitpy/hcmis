@@ -40,6 +40,9 @@ use Spatie\Permission\Models\Role;
  * @property bool $hold_music_rights_confirmed
  * @property string|null $closed_message_path
  * @property bool $closed_message_rights_confirmed
+ * @property bool $voicemail_enabled
+ * @property string|null $voicemail_greeting_path
+ * @property bool $voicemail_greeting_rights_confirmed
  * @property TenantSettings $settings
  */
 #[ObservedBy([TenantObserver::class])]
@@ -65,6 +68,9 @@ class Tenant extends Model
         'closed_message_rights_confirmed',
         'waiting_message_path',
         'waiting_message_rights_confirmed',
+        'voicemail_enabled',
+        'voicemail_greeting_path',
+        'voicemail_greeting_rights_confirmed',
         'settings',
     ];
 
@@ -82,6 +88,8 @@ class Tenant extends Model
             'department_wait_seconds' => 'integer',
             'hold_music_rights_confirmed' => 'boolean',
             'closed_message_rights_confirmed' => 'boolean',
+            'voicemail_enabled' => 'boolean',
+            'voicemail_greeting_rights_confirmed' => 'boolean',
             'settings' => TenantSettingsCast::class,
         ];
     }
@@ -173,6 +181,16 @@ class Tenant extends Model
     public function waitingMessageUrl(): ?string
     {
         return $this->mediaUrl(TenantMedia::WaitingMessage);
+    }
+
+    /**
+     * The message pad's greeting address (slice 8), or null when the client may not take
+     * messages: switched off, or switched on in the same save as the upload and the file is
+     * still converting. Null is what keeps every caller on today's ending (AU-29, AU-34).
+     */
+    public function voicemailGreetingUrl(): ?string
+    {
+        return $this->voicemail_enabled ? $this->mediaUrl(TenantMedia::VoicemailGreeting) : null;
     }
 
     /**
@@ -301,7 +319,7 @@ class Tenant extends Model
      */
     protected function activityLogAttributes(): array
     {
-        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'department_wait_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed', 'closed_message_path', 'closed_message_rights_confirmed', 'waiting_message_path', 'waiting_message_rights_confirmed'];
+        return ['name', 'slug', 'status', 'suspended_at', 'archived_at', 'status_reason', 'ring_seconds', 'max_hold_seconds', 'department_wait_seconds', 'timezone', 'hold_music_path', 'hold_music_rights_confirmed', 'closed_message_path', 'closed_message_rights_confirmed', 'waiting_message_path', 'waiting_message_rights_confirmed', 'voicemail_enabled', 'voicemail_greeting_path', 'voicemail_greeting_rights_confirmed'];
     }
 
     protected function activityLogName(): string

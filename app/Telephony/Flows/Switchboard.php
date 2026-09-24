@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Telephony\Flows;
 
 use App\Jobs\MergeCallRecordingJob;
+use App\Jobs\StoreVoicemailJob;
 use App\Telephony\AriConnectionLost;
 use App\Telephony\RecordingSession;
 use App\Telephony\TelephonyProvider;
@@ -57,6 +58,21 @@ class Switchboard implements HandlerRegistry
      */
     private array $pendingMerges = [];
 
+    /**
+     * Messages being recorded, by recording name => the call's ticket (slice 8). The
+     * ticket is what the missed row carries as `correlation_id`.
+     *
+     * @var array<string, string>
+     */
+    private array $pendingVoicemails = [];
+
+    /**
+     * AU-31: a message with less speech than this is dropped, and the caller stays on
+     * Missed Calls without one. Lab-checked in slice 2: an empty recording reads about 1
+     * second, so 3 still drops it. Do not lower it to 1 (a noisy room reads as speech).
+     */
+    private const MESSAGE_MIN_SPEECH_SECONDS = 3;
+
     public function __construct(private readonly TelephonyProvider $telephony) {}
 
     /**
@@ -73,6 +89,13 @@ class Switchboard implements HandlerRegistry
         switch ($event['type'] ?? '') {
             case 'RecordingFinished':
                 $this->onRecordingFinished($event);
+
+                return;
+            case 'RecordingFailed':
+                // Slice 8. The event carries no call leg, so the default branch below
+                // dropped it — and a failed message would have left its caller on a
+                // silent line. Call recordings' failures are the listener's to log.
+                $this->onVoicemailFailed($event);
 
                 return;
             case 'StasisStart':
@@ -335,6 +358,12 @@ class Switchboard implements HandlerRegistry
     {
         $name = $event['recording']['name'] ?? '';
 
+        if (isset($this->pendingVoicemails[$name])) {
+            $this->onVoicemailFinished($name, $event);
+
+            return;
+        }
+
         foreach (array_keys($this->pendingMerges) as $key) {
             $session = $this->pendingMerges[$key]['recording'];
 
@@ -354,6 +383,82 @@ class Switchboard implements HandlerRegistry
         }
     }
 
+    /**
+     * A message finished (slice 8, AU-30, AU-31): keep it or drop it on the seconds of
+     * speech, then end the call if the caller is still on the line — the silence, # and
+     * three-minute stops all leave them there.
+     *
+     * 🔴 A MISSING `talking_duration` KEEPS THE MESSAGE. The engine always sends it while
+     * a silence stop is set (`recordings.json`), so its absence means something we did not
+     * plan for, and losing a caller's words is the worse mistake of the two.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function onVoicemailFinished(string $name, array $event): void
+    {
+        $ticket = $this->pendingVoicemails[$name];
+        unset($this->pendingVoicemails[$name]);
+
+        $spokeSeconds = $event['recording']['talking_duration'] ?? null;
+        $kept = $spokeSeconds === null || (int) $spokeSeconds >= self::MESSAGE_MIN_SPEECH_SECONDS;
+
+        if ($kept) {
+            StoreVoicemailJob::dispatch($ticket, $name);
+        }
+
+        Log::info($kept
+            ? 'Voicemail: message recorded — fetching it for the caller\'s Missed Calls row.'
+            : 'Voicemail: message dropped — too little speech; the caller stays on Missed Calls without one.', [
+                'ticket' => $ticket,
+                'recording' => $name,
+                'spokeSeconds' => $spokeSeconds,
+                'seconds' => $event['recording']['duration'] ?? null,
+            ]);
+
+        $this->hangUpMessageCaller($event);
+    }
+
+    /**
+     * The engine refused a message after accepting the request (slice 8). Nothing to
+     * keep; end the call so the caller is not left on a silent line.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function onVoicemailFailed(array $event): void
+    {
+        $name = $event['recording']['name'] ?? '';
+
+        if (! isset($this->pendingVoicemails[$name])) {
+            return;
+        }
+
+        Log::warning('Voicemail: the engine refused the recording — the caller stays on Missed Calls without a message.', [
+            'ticket' => $this->pendingVoicemails[$name],
+            'recording' => $name,
+            'cause' => $event['recording']['cause'] ?? null,
+        ]);
+
+        unset($this->pendingVoicemails[$name]);
+        $this->hangUpMessageCaller($event);
+    }
+
+    /**
+     * Hang up the recorded leg if its call is still live. A caller who hung up has
+     * already been forgotten, so there is nothing to ask the engine for.
+     *
+     * @param  array<string, mixed>  $event
+     */
+    private function hangUpMessageCaller(array $event): void
+    {
+        $legId = str_replace('channel:', '', (string) ($event['recording']['target_uri'] ?? ''));
+
+        if ($legId === '' || ! isset($this->handlers[$legId])) {
+            return;
+        }
+
+        rescue(fn () => $this->telephony->hangup($legId), report: false);
+    }
+
     public function registerLeg(string $legId, CallToAgentFlow $handler): void
     {
         $this->handlers[$legId] = $handler;
@@ -366,6 +471,11 @@ class Switchboard implements HandlerRegistry
                 unset($this->handlers[$legId]);
             }
         }
+    }
+
+    public function depositVoicemail(string $recordingName, string $ticket): void
+    {
+        $this->pendingVoicemails[$recordingName] = $ticket;
     }
 
     public function depositMerge(string $callId, RecordingSession $recording): void
@@ -464,6 +574,10 @@ class Switchboard implements HandlerRegistry
                 // leaving them out: the clock runs from ARRIVAL, so the seconds they
                 // spent choosing appear the moment they do join the queue.
                 CallFlowState::InMenu, CallFlowState::PlayingMenuMessage => null,
+                // Leaving a message (slice 8): nobody is fetching them any more. Counted
+                // as waiting, they would pull agents off wrap-up for a caller who has
+                // already been sent to the message pad.
+                CallFlowState::LeavingMessage => null,
                 CallFlowState::Idle => null,
             };
 

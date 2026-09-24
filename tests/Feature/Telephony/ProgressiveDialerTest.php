@@ -509,6 +509,35 @@ it('files a dialled customer the hold limit cuts off as abandoned, ended by us',
         ->and(TenantContext::run($tenant->id, fn () => $lead->fresh()->attempts))->toBe(1);
 });
 
+it('still hangs up on a dialled customer at the hold limit when the client takes messages (AU-29, S163)', function () {
+    $tenant = Tenant::factory()->create([
+        'max_hold_seconds' => 44,
+        'voicemail_enabled' => true,
+        'voicemail_greeting_path' => 'voicemail-greeting/1/'.str_repeat('d', 64).'.wav',
+    ]);
+    readyDeskOn($tenant);
+    $campaign = dialingCampaignOn($tenant);
+    leadOn($tenant, $campaign);
+
+    $telephony = fakeTelephony();
+    $telephony->shouldReceive('placeCall')->once()->andReturn('customer-leg');
+    $telephony->shouldReceive('placeCall')->once()->andReturn('agent-leg');
+    $telephony->shouldReceive('isAnswered')->with('agent-leg')->andReturnFalse();
+    $telephony->shouldReceive('hangup')->with('customer-leg')->once();
+    $telephony->shouldReceive('hangup')->with('agent-leg');
+    $telephony->shouldNotReceive('play');
+    $telephony->shouldNotReceive('recordMessage');
+
+    $switchboard = tickWith($telephony);
+    $switchboard->handle(stasisStart('customer-leg', ['dialer']));
+
+    $this->travel(45)->seconds();
+    $switchboard->sweepWaiting();
+
+    expect(TenantContext::run($tenant->id, fn (): Call => Call::query()->sole())->outcome)->toBe(CallOutcome::Abandoned)
+        ->and($switchboard->activeCallCount())->toBe(0);
+});
+
 /**
  * 🔴 F20 — found live on staging. The hold limit ran out in the same second the agent
  * picked up the desk. The listener sweeps before it hands over the event it is holding,
