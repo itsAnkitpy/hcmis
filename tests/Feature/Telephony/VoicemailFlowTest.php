@@ -466,7 +466,7 @@ it('keeps a message with enough speech, and ends the call of a caller still on t
         && $job->recordingName === messageName());
 });
 
-it('drops a message under three seconds of speech, and the caller stays on Missed Calls (AU-31)', function (int $spokeSeconds) {
+it('drops a message under two seconds of speech, and the caller stays on Missed Calls (AU-31)', function (int $spokeSeconds) {
     $tenant = takingMessages(closedAllWeek(ClosedHours::Message));
     fakeAgentRouter(null);
 
@@ -480,11 +480,12 @@ it('drops a message under three seconds of speech, and the caller stays on Misse
     Queue::assertNotPushed(StoreVoicemailJob::class);
     expect(onlyMissedRow()->recording_path)->toBeNull();
 })->with([
+    'nothing at all' => 0,
     'silent (the lab\'s empty recording read about 1 s)' => 1,
-    'just short' => 2,
 ]);
 
-it('keeps a message of exactly three seconds of speech', function () {
+it('keeps a message of exactly two seconds of speech (tuned on staging, S175)', function () {
+    // A real six-second message read 2 and 3 on two takes, so a minimum of 3 lost one.
     $tenant = takingMessages(closedAllWeek(ClosedHours::Message));
     fakeAgentRouter(null);
 
@@ -493,7 +494,7 @@ it('keeps a message of exactly three seconds of speech', function () {
     $telephony->shouldReceive('hangup')->once();
 
     $switchboard = callerRecording($telephony, $tenant);
-    $switchboard->handle(messageFinished(messageName(), 3));
+    $switchboard->handle(messageFinished(messageName(), 2));
 
     Queue::assertPushed(StoreVoicemailJob::class);
 });

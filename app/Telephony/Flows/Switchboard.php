@@ -69,9 +69,13 @@ class Switchboard implements HandlerRegistry
     /**
      * AU-31: a message with less speech than this is dropped, and the caller stays on
      * Missed Calls without one. Lab-checked in slice 2: an empty recording reads about 1
-     * second, so 3 still drops it. Do not lower it to 1 (a noisy room reads as speech).
+     * second, so 2 still drops it. Do not lower it to 1 (a noisy room reads as speech).
+     *
+     * Tuned on staging, S175: the engine counts only loud 20 ms slices, so every gap
+     * between words is silence. A real six-second message read 2 and 3 on two takes, and
+     * 3 lost one of them (main/app.c, __ast_play_and_record's totalsilence).
      */
-    private const MESSAGE_MIN_SPEECH_SECONDS = 3;
+    private const MESSAGE_MIN_SPEECH_SECONDS = 2;
 
     public function __construct(private readonly TelephonyProvider $telephony) {}
 
