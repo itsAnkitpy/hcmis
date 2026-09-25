@@ -46,7 +46,8 @@ git pull --ff-only
 new=$(git rev-parse HEAD)
 
 say "composer install"
-# Through php8.4 by name: composer's own shebang would find the box's php8.3.
+# Through php8.4 by name, like the systemd units: composer's shebang takes whatever plain
+# php is, and this box has 8.3 installed beside 8.4.
 "$PHP" "$(command -v composer)" install --no-interaction
 
 say "npm ci"
