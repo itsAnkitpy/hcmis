@@ -204,4 +204,22 @@ return [
         'department_wait_seconds' => (int) env('TELEPHONY_DEPARTMENT_WAIT_SECONDS', 60),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | The AI voice agent (AIV-1, AB-4-Q3)
+    |--------------------------------------------------------------------------
+    |
+    | The one secret the hcmis-voice program sends when it reports a finished
+    | call. One secret, not one per client: a single voice program on the box
+    | answers for every client, so it would hold every client's secret anyway.
+    | The client comes from the dialled number, never from the sender.
+    |
+    | Empty or unset refuses every report — an .env that forgot it fails closed.
+    |
+    */
+
+    'voice_agent' => [
+        'secret' => env('VOICE_AGENT_SECRET'),
+    ],
+
 ];

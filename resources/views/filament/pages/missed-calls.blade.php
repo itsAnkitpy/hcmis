@@ -42,7 +42,13 @@
                             <td class="px-3 py-2" style="text-align:left">
                                 {{ $this->waitedFor($call) }}
                             </td>
-                            <td class="px-3 py-2" style="text-align:left">{{ $this->reasonFor($call) }}</td>
+                            <td class="px-3 py-2" style="text-align:left">
+                                {{ $this->reasonFor($call) }}
+                                {{-- AIV-1 AB-4: the AI's message. Escaped — it is the caller's own words. --}}
+                                @if (filled($call->notes))
+                                    <span class="block text-xs text-gray-500 dark:text-gray-400">{{ $call->notes }}</span>
+                                @endif
+                            </td>
                             <td class="px-3 py-2" style="text-align:left">
                                 {{-- Play only for everyone here, auditors included: a download
                                      belongs to Call Review, which already offers it to them. --}}
